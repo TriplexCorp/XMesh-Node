@@ -21,7 +21,7 @@ if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; t
  chmod a+r /etc/apt/keyrings/docker.asc
  arch="$(dpkg --print-architecture)"
  case "$arch" in amd64|arm64|armhf|s390x|ppc64el) ;; *) echo "Unsupported Docker architecture: $arch" >&2; exit 1;; esac
- printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\\n' "$arch" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
+ printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' "$arch" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
  apt-get update
  # Do not silently uninstall an existing alternative Docker installation.
  if command -v docker >/dev/null; then
