@@ -20,6 +20,7 @@ func main(){
  listener,e:=net.Listen("tcp",c.ListenTCP);if e!=nil{log.Fatalf("tcp listener: %v",e)}
  defer listener.Close()
  ctx,cancel:=signal.NotifyContext(context.Background(),syscall.SIGTERM,syscall.SIGINT);defer cancel()
+ if c.PanelURL!="" {go heartbeatLoop(ctx,c)}
  if c.ListenUDP!=""{go func(){if e:=serveUDP(ctx,c);e!=nil&&ctx.Err()==nil{log.Printf("UDP listener failed: %v",e);cancel()}}()}
  go func(){<-ctx.Done();listener.Close()}()
  log.Printf("XMesh Node listening TCP %s / UDP %s",c.ListenTCP,c.ListenUDP)
