@@ -15,6 +15,9 @@ type Route struct {
  Backend string `json:"backend"`
 }
 type Config struct {
+ PanelURL string `json:"panel_url,omitempty"`
+ NodeID int64 `json:"node_id,omitempty"`
+ PrivateKeyFile string `json:"private_key_file,omitempty"`
  ListenTCP string `json:"listen_tcp"`
  ListenUDP string `json:"listen_udp"`
  DefaultTCP string `json:"default_tcp"`
@@ -31,6 +34,7 @@ func loadConfig(path string)(Config,error){
  dec:=json.NewDecoder(f);dec.DisallowUnknownFields()
  if e=dec.Decode(&c);e!=nil{return c,e}
  if dec.Decode(new(any))==nil{return c,errors.New("multiple JSON values")}
+ if c.PanelURL!="" { if !strings.HasPrefix(c.PanelURL,"https://") || c.NodeID<=0 || c.PrivateKeyFile=="" {return c,errors.New("panel_url requires HTTPS, node_id and private_key_file")} }
  if c.ListenTCP==""{c.ListenTCP=":443"}
  if c.HelloTimeoutSeconds==0{c.HelloTimeoutSeconds=5}
  if c.IdleTimeoutSeconds==0{c.IdleTimeoutSeconds=120}
