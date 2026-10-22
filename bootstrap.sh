@@ -12,6 +12,7 @@ command -v python3 >/dev/null
 command -v openssl >/dev/null
 command -v curl >/dev/null
 INSTALL_DIR=/opt/xmesh-node
+if [[ -d /root/XMesh-Node/.git ]]; then INSTALL_DIR=/root/XMesh-Node; fi
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
  command -v git >/dev/null || { echo "git required" >&2; exit 1; }
  git clone --depth 1 https://github.com/TriplexCorp/XMesh-Node.git "$INSTALL_DIR"
@@ -48,6 +49,12 @@ import json,sys
 p="config.json"
 with open(p) as f:d=json.load(f)
 d.update(panel_url=sys.argv[1],node_id=int(sys.argv[2]),private_key_file="/etc/xmesh-node-metrics/node.key")
+# Automatically repair an unsafe self-referential test backend.
+if d.get("listen_tcp") and d.get("default_tcp"):
+ from urllib.parse import urlsplit
+ if d["listen_tcp"].rsplit(":",1)[-1]==d["default_tcp"].rsplit(":",1)[-1]:
+  d["default_tcp"]="127.0.0.1:9443"
+  print("Corrected self-referential default TCP backend to 127.0.0.1:9443")
 with open(p,"w") as f:json.dump(d,f,indent=2)
 PY
 fi
