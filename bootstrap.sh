@@ -2,10 +2,11 @@
 set -Eeuo pipefail
 umask 077
 if [[ $EUID -ne 0 ]]; then exec sudo bash "$0" "$@"; fi
-if [[ $# -ne 3 ]]; then echo "Usage: bash bootstrap.sh https://panel.example.com NODE_ID ONE_TIME_TOKEN" >&2; exit 2; fi
-PANEL="${1%/}"; NODE="$2"; TOKEN="$3"
+if [[ $# -ne 2 ]]; then echo "Usage: bash bootstrap.sh https://panel.example.com NODE_ID (token requested securely)" >&2; exit 2; fi
+PANEL="${1%/}"; NODE="$2"
+TOKEN=""
 [[ "$PANEL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "Expected HTTPS panel origin" >&2; exit 2; }
-[[ "$NODE" =~ ^[1-9][0-9]*$ && "$TOKEN" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid node ID or token" >&2; exit 2; }
+[[ "$NODE" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid node ID" >&2; exit 2; }
 # Prepare dependencies before redeeming the short-lived enrollment token.
 command -v apt-get >/dev/null || { echo "Automatic bootstrap currently supports Ubuntu with apt." >&2; exit 1; }
 . /etc/os-release
@@ -60,16 +61,24 @@ if [[ ! -f "$KEY" ]];then
  chmod 600 "$KEY"
 fi
 PUB="$(openssl pkey -in "$KEY" -pubout -outform DER | tail -c 32 | od -An -tx1 -v | tr -d '[:space:]')"
+# Read the one-time secret without shell-history or process-argument exposure.
+# Prompt only after installing dependencies to preserve the 10-minute token TTL.
+[[ -r /dev/tty ]] || { echo "Interactive TTY required for secure token entry." >&2; exit 1; }
+printf 'Paste the one-time enrollment token (input hidden): ' > /dev/tty
+IFS= read -r -s TOKEN < /dev/tty
+printf '\\n' > /dev/tty
+[[ "$TOKEN" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid enrollment token" >&2; exit 2; }
 # Proof of private-key possession. Never send the private key to the panel.
 PROOF_FILE="$(mktemp /tmp/xmesh-proof.XXXXXXXX)"
 trap 'rm -f "$PROOF_FILE"' EXIT
 printf 'XMESH-ENROLL-V1\\n%s\\n%s\\n' "$TOKEN" "$PUB" > "$PROOF_FILE"
 PROOF="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$PROOF_FILE" | od -An -tx1 -v | tr -d '[:space:]')"
 [[ "${#PROOF}" -eq 128 ]] || { echo "Could not create Ed25519 enrollment proof" >&2; exit 1; }
-JSON="$(python3 -c 'import json,sys; print(json.dumps({"token":sys.argv[1],"publicKey":sys.argv[2],"proof":sys.argv[3]}))' "$TOKEN" "$PUB" "$PROOF")"
+JSON="$(printf '%s' "$TOKEN" | python3 -c 'import json,sys; print(json.dumps({"token":sys.stdin.read(),"publicKey":sys.argv[1],"proof":sys.argv[2]}))' "$PUB" "$PROOF")"
 curl --proto '=https' --tlsv1.2 -fsS --max-time 20 \
  -H 'Content-Type: application/json' \
  --data-binary "$JSON" "$PANEL/api/v1/node/enroll" >/dev/null
+unset TOKEN JSON PROOF
 cd "$INSTALL_DIR"
 # Preserve existing routing settings and never overwrite a user-edited configuration.
 if [[ ! -f config.json ]]; then
