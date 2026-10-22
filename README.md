@@ -21,7 +21,7 @@ Requires Go 1.23 or newer.
 go test ./...
 go build -o xmesh-node .
 sudo install -m 0755 xmesh-node /usr/local/bin/xmesh-node
-sudo install -d -m 0750 /etc/xmesh-node
+sudo install -d -m 0755 /etc/xmesh-node
 sudo cp config.example.json /etc/xmesh-node/config.json
 sudo cp deploy/xmesh-node.service /etc/systemd/system/
 sudo systemctl daemon-reload
