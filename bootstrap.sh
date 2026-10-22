@@ -6,12 +6,34 @@ if [[ $# -ne 3 ]]; then echo "Usage: bash bootstrap.sh https://panel.example.com
 PANEL="${1%/}"; NODE="$2"; TOKEN="$3"
 [[ "$PANEL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "Expected HTTPS panel origin" >&2; exit 2; }
 [[ "$NODE" =~ ^[1-9][0-9]*$ && "$TOKEN" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid node ID or token" >&2; exit 2; }
-command -v docker >/dev/null || { echo "Install Docker Engine and Compose first." >&2; exit 1; }
-docker compose version >/dev/null
-command -v python3 >/dev/null
-command -v openssl >/dev/null
-command -v curl >/dev/null
+# Prepare dependencies before redeeming the short-lived enrollment token.
+command -v apt-get >/dev/null || { echo "Automatic bootstrap currently supports Ubuntu with apt." >&2; exit 1; }
+. /etc/os-release
+[[ "${ID:-}" == "ubuntu" ]] || { echo "Automatic Docker installation currently supports Ubuntu only." >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "systemd is required for the metrics collector" >&2; exit 1; }
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
+ echo "Installing Docker Engine and Compose from Docker's official Ubuntu repository..."
+ apt-get update
+ apt-get install -y ca-certificates curl gnupg
+ install -m 0755 -d /etc/apt/keyrings
+ curl --proto '=https' --tlsv1.2 -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+ chmod a+r /etc/apt/keyrings/docker.asc
+ arch="$(dpkg --print-architecture)"
+ case "$arch" in amd64|arm64|armhf|s390x|ppc64el) ;; *) echo "Unsupported Docker architecture: $arch" >&2; exit 1;; esac
+ printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\\n' "$arch" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
+ apt-get update
+ # Do not silently uninstall an existing alternative Docker installation.
+ if command -v docker >/dev/null; then
+  apt-get install -y docker-compose-plugin docker-buildx-plugin
+ else
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+ fi
+ systemctl enable --now docker
+fi
+docker compose version >/dev/null
+docker info >/dev/null || { echo "Docker daemon is unavailable." >&2; exit 1; }
+apt-get install -y git python3 openssl curl
 INSTALL_DIR=/opt/xmesh-node
 if [[ -d /root/XMesh-Node/.git ]]; then INSTALL_DIR=/root/XMesh-Node; fi
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
