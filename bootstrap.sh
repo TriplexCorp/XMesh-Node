@@ -66,12 +66,12 @@ PUB="$(openssl pkey -in "$KEY" -pubout -outform DER | tail -c 32 | od -An -tx1 -
 [[ -r /dev/tty ]] || { echo "Interactive TTY required for secure token entry." >&2; exit 1; }
 printf 'Paste the one-time enrollment token (input hidden): ' > /dev/tty
 IFS= read -r -s TOKEN < /dev/tty
-printf '\\n' > /dev/tty
+printf '\n' > /dev/tty
 [[ "$TOKEN" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid enrollment token" >&2; exit 2; }
 # Proof of private-key possession. Never send the private key to the panel.
 PROOF_FILE="$(mktemp /tmp/xmesh-proof.XXXXXXXX)"
 trap 'rm -f "$PROOF_FILE"' EXIT
-printf 'XMESH-ENROLL-V1\\n%s\\n%s\\n' "$TOKEN" "$PUB" > "$PROOF_FILE"
+printf 'XMESH-ENROLL-V1\n%s\n%s\n' "$TOKEN" "$PUB" > "$PROOF_FILE"
 PROOF="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$PROOF_FILE" | od -An -tx1 -v | tr -d '[:space:]')"
 [[ "${#PROOF}" -eq 128 ]] || { echo "Could not create Ed25519 enrollment proof" >&2; exit 1; }
 JSON="$(printf '%s' "$TOKEN" | python3 -c 'import json,sys; print(json.dumps({"token":sys.stdin.read(),"publicKey":sys.argv[1],"proof":sys.argv[2]}))' "$PUB" "$PROOF")"
@@ -109,7 +109,7 @@ fd,tmp=tempfile.mkstemp(prefix=".config.",dir=".")
 try:
  with os.fdopen(fd,"w") as f:
   json.dump(d,f,indent=2)
-  f.write("\\n")
+  f.write("\n")
  os.replace(tmp,p)
 except:
  os.unlink(tmp)
