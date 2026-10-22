@@ -13,6 +13,31 @@ Standalone edge node for **XMesh Nexus**. Initial implementation: a TLS ClientHe
 
 **Important:** This is NOT a magical way to put every transport on the same 443 socket. TCP vs UDP can coexist, but QUIC/H3 and other UDP protocols cannot be safely demultiplexed without protocol-aware handling. Distinct TLS clients sharing exactly the same SNI + ALPN also cannot be told apart reliably. For Reality, XHTTP, Trojan, WebSocket, TLS sites, etc., route to distinct loopback listeners with distinct SNI when available.
 
+## Recommended installation: Docker Compose
+
+XMesh Node is **Docker-first**. Neither Go nor a host systemd unit is required.
+
+```bash
+git clone https://github.com/TriplexCorp/XMesh-Node.git
+cd XMesh-Node
+bash install.sh                    # creates config.json on first run
+nano config.json                  # set your REAL SNI and loopback backends
+bash install.sh                    # builds Go within Docker and launches
+docker compose logs -f xmesh-node
+```
+
+On updates run `git pull --ff-only && docker compose up -d --build`.
+To check configuration without starting a daemon:
+```bash
+docker compose run --rm --no-deps xmesh-node -check -config /etc/xmesh-node/config.json
+```
+
+**Networking:** Compose intentionally uses `network_mode: host`, so the node reaches Xray/Caddy listeners on host `127.0.0.1`. This means no `ports:` section, and any existing listener on host TCP/443 or UDP/443 conflicts with the node. Stop/move that listener first; keep backends on distinct loopback ports. Host mode reduces network isolation, so only deploy a trusted image and lock down the VPS. If you later need container-to-container routing, use a dedicated Docker network and update the loopback-only backend validation accordingly.
+
+The JSON routing configuration is not a secret and is readable by the unprivileged container. Do not place passwords or private keys in it. Settings remain in the bind-mounted `config.json` across rebuilds.
+
+## Legacy host build (optional)
+
 ## Build
 
 Requires Go 1.23 or newer.
