@@ -1,0 +1,4 @@
+config.json
+xmesh-node
+*.log
+.env
