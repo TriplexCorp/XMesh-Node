@@ -22,4 +22,6 @@ services:
       - /tmp:rw,noexec,nosuid,size=16m
     volumes:
       - ./config.json:/etc/xmesh-node/config.json:ro
+      # Reuses the existing signed metrics-agent key when running on the same VPS.
+      - /etc/xmesh-node-metrics:/etc/xmesh-node-metrics:ro
     stop_grace_period: 20s
