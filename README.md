@@ -13,6 +13,43 @@ Standalone edge node for **XMesh Nexus**. Initial implementation: a TLS ClientHe
 
 **Important:** This is NOT a magical way to put every transport on the same 443 socket. TCP vs UDP can coexist, but QUIC/H3 and other UDP protocols cannot be safely demultiplexed without protocol-aware handling. Distinct TLS clients sharing exactly the same SNI + ALPN also cannot be told apart reliably. For Reality, XHTTP, Trojan, WebSocket, TLS sites, etc., route to distinct loopback listeners with distinct SNI when available.
 
+## Connect XMesh Node to XMesh Nexus (signed heartbeat)
+
+The panel and the node now support a **signed heartbeat**. This reports whether the
+router process is alive; it is **not yet remote Xray supervision or configuration rollout**.
+
+1. Create a node in XMesh Nexus and open **Nodes → Configure metrics**. Register
+   the **Ed25519 public key** from the metrics agent installed on the same VPS.
+   The panel node ID must match the metrics agent's `XMESH_NODE_ID`.
+2. On the node host, configure these additional fields in `config.json`:
+
+```json
+{
+  "panel_url": "https://panel.example.com",
+  "node_id": 1,
+  "private_key_file": "/etc/xmesh-node-metrics/node.key"
+}
+```
+
+**Merge these fields into your existing JSON**; do not replace SNI routing fields.
+`panel_url` must be the externally reachable HTTPS origin. With the default
+Docker Compose, the agent's key directory is mounted read-only into the
+container. Never place the private key into a Git repository or paste it into
+the panel.
+
+3. Run `docker compose up -d --build` and `docker compose logs --tail=40`.
+   Signed heartbeats are sent immediately and every 60 seconds. XMesh Nexus
+   marks the node offline when no heartbeat arrives for 150 seconds.
+   `HTTP 401` means the Ed25519 public key is unregistered, mismatched, or
+   the node's timestamp is outside the allowed window. Synchronize NTP and
+   verify the ID.
+
+If the metrics agent is not installed on that host, create an Ed25519
+PKCS#8 private key using OpenSSL and register its public key in the panel.
+Do not modify or replace an existing metrics agent key without updating
+its registration. The current node and metrics reporter use one registered
+identity for a given panel node.
+
 ## Recommended installation: Docker Compose
 
 XMesh Node is **Docker-first**. Neither Go nor a host systemd unit is required.
