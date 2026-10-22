@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 if [[ $EUID -ne 0 ]]; then exec sudo bash "$0" "$@"; fi
-if [[ $# -ne 3 ]]; then echo "Usage: bash install.sh https://panel.example.com NODE_ID ONE_TIME_TOKEN" >&2; exit 2; fi
+if [[ $# -ne 3 ]]; then echo "Usage: bash bootstrap.sh https://panel.example.com NODE_ID ONE_TIME_TOKEN" >&2; exit 2; fi
 PANEL="${1%/}"; NODE="$2"; TOKEN="$3"
 [[ "$PANEL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "Expected HTTPS panel origin" >&2; exit 2; }
 [[ "$NODE" =~ ^[1-9][0-9]*$ && "$TOKEN" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid node ID or token" >&2; exit 2; }
@@ -11,6 +11,7 @@ docker compose version >/dev/null
 command -v python3 >/dev/null
 command -v openssl >/dev/null
 command -v curl >/dev/null
+command -v systemctl >/dev/null || { echo "systemd is required for the metrics collector" >&2; exit 1; }
 INSTALL_DIR=/opt/xmesh-node
 if [[ -d /root/XMesh-Node/.git ]]; then INSTALL_DIR=/root/XMesh-Node; fi
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
@@ -18,6 +19,17 @@ if [[ ! -d "$INSTALL_DIR/.git" ]]; then
  git clone --depth 1 https://github.com/TriplexCorp/XMesh-Node.git "$INSTALL_DIR"
 else
  git -C "$INSTALL_DIR" pull --ff-only
+fi
+# Validate any existing configuration BEFORE consuming the one-use token.
+if [[ -f "$INSTALL_DIR/config.json" ]]; then
+ python3 - "$INSTALL_DIR/config.json" "$NODE" <<'PY'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as f: d=json.load(f)
+if not isinstance(d,dict): raise SystemExit("config.json must contain an object")
+previous=d.get("node_id")
+if previous is not None and int(previous)!=int(sys.argv[2]):
+ raise SystemExit("Refusing to move an existing node to a different ID; use the original node or migrate deliberately.")
+PY
 fi
 mkdir -p /etc/xmesh-node-metrics
 KEY=/etc/xmesh-node-metrics/node.key
@@ -55,7 +67,16 @@ if d.get("listen_tcp") and d.get("default_tcp"):
  if d["listen_tcp"].rsplit(":",1)[-1]==d["default_tcp"].rsplit(":",1)[-1]:
   d["default_tcp"]="127.0.0.1:9443"
   print("Corrected self-referential default TCP backend to 127.0.0.1:9443")
-with open(p,"w") as f:json.dump(d,f,indent=2)
+import os,tempfile
+fd,tmp=tempfile.mkstemp(prefix=".config.",dir=".")
+try:
+ with os.fdopen(fd,"w") as f:
+  json.dump(d,f,indent=2)
+  f.write("\\n")
+ os.replace(tmp,p)
+except:
+ os.unlink(tmp)
+ raise
 PY
 fi
 chmod 644 config.json
