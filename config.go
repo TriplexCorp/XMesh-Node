@@ -42,6 +42,12 @@ func loadConfig(path string)(Config,error){
  if c.MaxUDPSessions==0{c.MaxUDPSessions=2048}
  if c.HelloTimeoutSeconds<1||c.HelloTimeoutSeconds>30||c.IdleTimeoutSeconds<10||c.IdleTimeoutSeconds>3600||c.MaxTCPConnections<1||c.MaxTCPConnections>100000||c.MaxUDPSessions<1||c.MaxUDPSessions>100000{return c,errors.New("invalid limits or timeouts")}
  if c.DefaultTCP==""{return c,errors.New("default_tcp is required")}
+ // A loopback backend on the same port as our listener creates an infinite relay loop.
+ _,listenPort,listenErr:=net.SplitHostPort(c.ListenTCP)
+ _,backendPort,backendErr:=net.SplitHostPort(c.DefaultTCP)
+ if listenErr==nil&&backendErr==nil&&listenPort==backendPort{
+  return c,errors.New("default_tcp must not point back to XMesh Node listening port")
+ }
  for _,x:=range append([]Route{{Backend:c.DefaultTCP}},c.Routes...){
   if e:=checkBackend(x.Backend);e!=nil{return c,e}
   if x.SNI!=""{s:=strings.ToLower(x.SNI);if strings.ContainsAny(s," /:\\")||strings.Count(s,"*")>1||(strings.Contains(s,"*")&&!strings.HasPrefix(s,"*.")){return c,fmt.Errorf("invalid SNI rule %q",x.SNI)}}
