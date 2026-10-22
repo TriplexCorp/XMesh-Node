@@ -75,9 +75,9 @@ printf 'XMESH-ENROLL-V1\\n%s\\n%s\\n' "$TOKEN" "$PUB" > "$PROOF_FILE"
 PROOF="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$PROOF_FILE" | od -An -tx1 -v | tr -d '[:space:]')"
 [[ "${#PROOF}" -eq 128 ]] || { echo "Could not create Ed25519 enrollment proof" >&2; exit 1; }
 JSON="$(printf '%s' "$TOKEN" | python3 -c 'import json,sys; print(json.dumps({"token":sys.stdin.read(),"publicKey":sys.argv[1],"proof":sys.argv[2]}))' "$PUB" "$PROOF")"
-curl --proto '=https' --tlsv1.2 -fsS --max-time 20 \
+printf '%s' "$JSON" | curl --proto '=https' --tlsv1.2 -fsS --max-time 20 \
  -H 'Content-Type: application/json' \
- --data-binary "$JSON" "$PANEL/api/v1/node/enroll" >/dev/null
+ --data-binary @- "$PANEL/api/v1/node/enroll" >/dev/null
 unset TOKEN JSON PROOF
 cd "$INSTALL_DIR"
 # Preserve existing routing settings and never overwrite a user-edited configuration.
