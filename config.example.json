@@ -1,0 +1,24 @@
+{
+  "listen_tcp": ":443",
+  "listen_udp": ":443",
+  "default_tcp": "127.0.0.1:8443",
+  "routes": [
+    {
+      "sni": "vpn.example.com",
+      "backend": "127.0.0.1:10443"
+    },
+    {
+      "sni": "*.example.net",
+      "alpn": [
+        "h2",
+        "http/1.1"
+      ],
+      "backend": "127.0.0.1:9443"
+    }
+  ],
+  "udp_backend": "127.0.0.1:9444",
+  "hello_timeout_seconds": 5,
+  "idle_timeout_seconds": 120,
+  "max_tcp_connections": 4096,
+  "max_udp_sessions": 2048
+}
