@@ -2,6 +2,31 @@
 
 Standalone edge node for **XMesh Nexus**. Initial implementation: a TLS ClientHello TCP passthrough multiplexer on port 443, with a separately configured UDP/443 forwarder.
 
+## Быстрое подключение из XMesh Nexus (Docker + метрики)
+
+В панели откройте **Узлы → Подключить ноду и метрики** и скопируйте одноразовую команду. Выполните её от имени администратора целевого VPS. Токен действует **10 минут**, не публикуйте команду в переписках и логах.
+
+Установщик автоматически:
+- использует существующий `/root/XMesh-Node` или устанавливает исходники в `/opt/xmesh-node`;
+- проверяет существующий `config.json` и не допускает незаметную смену ID ноды;
+- сохраняет ранее созданный ключ Ed25519 и регистрирует **только публичный** ключ в панели;
+- собирает и запускает контейнер Docker, а затем подключает системные метрики через таймер systemd;
+- проверяет JSON-конфигурацию перед запуском Docker.
+
+**Требуются:** Docker Engine с Compose plugin, Linux с systemd, Git, curl, OpenSSL и Python 3. Go на сервере не нужен. Скрипт не останавливает Nginx и не занимает TCP/443 без отдельной настройки. По умолчанию выбирается TCP/8443.
+
+Если ключ для данного узла уже зарегистрирован, установщик может использовать **тот же ключ**, но не заменит другой действующий ключ. Для замены нужно явно отозвать прежнюю привязку в панели.
+
+Проверка после установки:
+
+```bash
+docker logs --tail 30 xmesh-node
+systemctl status xmesh-node-metrics.timer
+journalctl -u xmesh-node-metrics.service -n 30 --no-pager
+```
+
+Наличие heartbeat означает только связь с маршрутизатором. Удалённое управление Xray-core и полноценный QUIC/UDP-мультиплексор пока не реализованы.
+
 ## What it does
 
 - Routes TCP TLS connections by **exact SNI** or **wildcard suffix** without terminating TLS, with optional ALPN selection.
