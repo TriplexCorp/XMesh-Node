@@ -63,11 +63,13 @@ docker compose build
 docker compose run --rm --no-deps xmesh-node -check -config /etc/xmesh-node/config.json
 docker compose up -d --no-build
 docker compose ps
-if ! systemctl list-unit-files xmesh-node-metrics.timer --no-legend 2>/dev/null | grep -q '^xmesh-node-metrics.timer'; then
- echo "Installing signed system metrics collector..."
- METRICS_INSTALLER="$(mktemp /tmp/xmesh-metrics.XXXXXXXX)"
- trap 'rm -f "$METRICS_INSTALLER"' EXIT
- curl --proto '=https' --tlsv1.2 -fsSLo "$METRICS_INSTALLER" https://raw.githubusercontent.com/TriplexCorp/XMesh-Nexus/main/deploy/install-node-metrics-agent.sh
- bash "$METRICS_INSTALLER" "$PANEL" "$NODE"
-fi
+# One installer, two services: always reconcile system metrics agent configuration.
+# Re-running the metrics installer preserves the Ed25519 identity, but updates
+# panel URL, node ID, timers and collector to the current release.
+echo "Configuring XMesh system metrics collector..."
+METRICS_INSTALLER="$(mktemp /tmp/xmesh-metrics.XXXXXXXX)"
+trap 'rm -f "$METRICS_INSTALLER"' EXIT
+curl --proto '=https' --tlsv1.2 -fsSLo "$METRICS_INSTALLER" https://raw.githubusercontent.com/TriplexCorp/XMesh-Nexus/main/deploy/install-node-metrics-agent.sh
+bash "$METRICS_INSTALLER" "$PANEL" "$NODE"
+systemctl enable --now xmesh-node-metrics.timer
 echo "Node enrolled. Router initially listens on :8443; port 443 is NOT taken over automatically."
