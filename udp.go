@@ -8,42 +8,87 @@ import (
  "time"
 )
 
-type udpSession struct{conn *net.UDPConn;last time.Time}
-func serveUDP(ctx context.Context,c Config)error{
- listen,e:=net.ListenPacket("udp",c.ListenUDP);if e!=nil{return e};defer listen.Close()
- remote,e:=net.ResolveUDPAddr("udp",c.UDPBackend);if e!=nil{return e}
+type udpSession struct {
+ conn *net.UDPConn
+ last time.Time
+}
+
+func serveUDP(ctx context.Context, c Config) error {
+ listen, err := net.ListenPacket("udp", c.ListenUDP)
+ if err != nil { return err }
+ defer listen.Close()
+ remote, err := net.ResolveUDPAddr("udp", c.UDPBackend)
+ if err != nil { return err }
+
  var mu sync.Mutex
- sessions:=map[string]*udpSession{}
- timeout:=time.Duration(c.IdleTimeoutSeconds)*time.Second
- go func(){<-ctx.Done();listen.Close();mu.Lock();for _,s:=range sessions{s.conn.Close()};mu.Unlock()}()
- go func(){ticker:=time.NewTicker(30*time.Second);defer ticker.Stop();for{select{case <-ctx.Done():return;case <-ticker.C:
-  mu.Lock();for k,s:=range sessions{if time.Since(s.last)>timeout{s.conn.Close();delete(sessions,k)}};mu.Unlock()
- }}()
- buf:=make([]byte,65535)
- log.Printf("UDP %s forwarding to %s",c.ListenUDP,c.UDPBackend)
- for{
-  n,client,e:=listen.ReadFrom(buf);if e!=nil{if ctx.Err()!=nil{return nil};return e}
-  key:=client.String()
+ sessions := make(map[string]*udpSession)
+ timeout := time.Duration(c.IdleTimeoutSeconds) * time.Second
+
+ go func() {
+  <-ctx.Done()
+  listen.Close()
   mu.Lock()
-  session:=sessions[key]
-  if session==nil&&len(sessions)<c.MaxUDPSessions{
-   uc,err:=net.DialUDP("udp",nil,remote)
-   if err==nil{
-    session=&udpSession{conn:uc,last:time.Now()}
-    sessions[key]=session
-    upstream:=uc
-    go func(client net.Addr,key string){
-     resp:=make([]byte,65535)
-     for{
-      upstream.SetReadDeadline(time.Now().Add(timeout))
-      m,err:=upstream.Read(resp);if err!=nil{break}
-      listen.WriteTo(resp[:m],client)
+  defer mu.Unlock()
+  for _, s := range sessions { s.conn.Close() }
+ }()
+ go func() {
+  tick := time.NewTicker(30 * time.Second)
+  defer tick.Stop()
+  for {
+   select {
+   case <-ctx.Done():
+    return
+   case <-tick.C:
+    mu.Lock()
+    for key, session := range sessions {
+     if time.Since(session.last) > timeout {
+      session.conn.Close()
+      delete(sessions, key)
      }
-     mu.Lock();if s:=sessions[key];s!=nil&&s.conn==upstream{delete(sessions,key)};mu.Unlock();upstream.Close()
-    }(client,key)
+    }
+    mu.Unlock()
    }
   }
-  if session!=nil{session.last=time.Now();session.conn.SetWriteDeadline(time.Now().Add(5*time.Second));session.conn.Write(buf[:n])}
+ }()
+
+ buf := make([]byte, 65535)
+ log.Printf("UDP %s forwarding to %s", c.ListenUDP, c.UDPBackend)
+ for {
+  n, client, err := listen.ReadFrom(buf)
+  if err != nil {
+   if ctx.Err() != nil { return nil }
+   return err
+  }
+  key := client.String()
+  mu.Lock()
+  session := sessions[key]
+  if session == nil && len(sessions) < c.MaxUDPSessions {
+   socket, dialErr := net.DialUDP("udp", nil, remote)
+   if dialErr == nil {
+    session = &udpSession{conn:socket, last:time.Now()}
+    sessions[key] = session
+    go func(src net.Addr, id string, upstream *net.UDPConn) {
+     replies := make([]byte, 65535)
+     for {
+      upstream.SetReadDeadline(time.Now().Add(timeout))
+      size, readErr := upstream.Read(replies)
+      if readErr != nil { break }
+      listen.WriteTo(replies[:size], src)
+     }
+     mu.Lock()
+     if current := sessions[id]; current != nil && current.conn == upstream {
+      delete(sessions, id)
+     }
+     mu.Unlock()
+     upstream.Close()
+    }(client, key, socket)
+   }
+  }
+  if session != nil {
+   session.last = time.Now()
+   session.conn.SetWriteDeadline(time.Now().Add(5*time.Second))
+   session.conn.Write(buf[:n])
+  }
   mu.Unlock()
  }
 }
