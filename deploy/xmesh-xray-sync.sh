@@ -68,7 +68,16 @@ PY
 # A 0600 configuration may contain Reality private keys. Keep it private on host.
 # Run Xray as root inside the confined container (all Linux capabilities dropped)
 # so the read-only bind mount remains accessible without chmod 0644.
+# Use the administrator-pinned version when available. This prevents a
+# configuration update or container recovery from silently reverting to latest.
 IMAGE=ghcr.io/xtls/xray-core:latest
+if [[ -f "$STATE/pinned-image" ]];then
+ IFS= read -r IMAGE < "$STATE/pinned-image" || true
+ [[ "$IMAGE" =~ ^ghcr[.]io/xtls/xray-core:[0-9]+[.][0-9]+[.][0-9]+([._+-][A-Za-z0-9._+-]+)?$ ]] || {
+  echo "Invalid pinned Xray image identity; refusing to deploy latest" >&2
+  exit 1
+ }
+fi
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
 docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
  "$IMAGE" run -test -config /etc/xray/config.json
