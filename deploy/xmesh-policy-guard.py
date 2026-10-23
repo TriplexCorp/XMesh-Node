@@ -9,6 +9,7 @@ accounting requires a centrally coordinated lease ledger.
 """
 import argparse
 import base64
+import fcntl
 import hashlib
 import grp
 import json
@@ -211,7 +212,8 @@ def get_counters():
         for (user_id, _), values in inbound.items():
             grouped[user_id] = grouped.get(user_id, 0) + sum(values.values())
         return grouped, runtime_id, inbound
-    except (OSError, subprocess.SubprocessError, ValueError, UnicodeError, json.JSONDecodeError):
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        print(f"XMesh StatsService unavailable ({type(exc).__name__}); user traffic cannot be verified", file=sys.stderr)
         return None, None, None
 
 
@@ -250,8 +252,8 @@ def store_metrics_snapshot(ledger, node_id, now_ms):
         # A partially installed metrics agent cannot access the file.
         pass
 
-def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbound_counters=None):
-    """Pure admission decision; caller persists the ledger before applying JSON."""
+def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=None):
+    """Accumulate durable per-user bytes without changing admission policy."""
     if not isinstance(ledger, dict):
         ledger = {}
     history = ledger.get("users", {})
@@ -287,6 +289,16 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
                     item["total" + suffix] = max(0, int(item.get("total" + suffix, 0))) + (
                         raw - last if raw >= last else raw)
                     item["last" + suffix] = raw
+    return ledger
+
+
+def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbound_counters=None):
+    """Pure admission decision; caller persists the ledger before applying JSON."""
+    if not isinstance(ledger, dict):
+        ledger = {}
+    ledger = integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters)
+    history = ledger["users"]
+    now_ms = ledger["maxSeenMs"]
     users = policy["users"]
     allowed = {}
     denied = {}
@@ -351,7 +363,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["prepare", "offline", "commit"])
+    parser.add_argument("action", choices=["prepare", "offline", "commit", "sample"])
     parser.add_argument("--state", required=True)
     parser.add_argument("--node-id", type=int, required=True)
     parser.add_argument("--response")
@@ -361,6 +373,30 @@ def main():
     args = parser.parse_args()
     state = Path(args.state)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.action == "sample":
+        # Share the synchronizer's lock: both jobs mutate the SAME ledger.
+        # Sample-only polling must never rewrite policy, authorization or Xray config.
+        lock_fd = os.open(state / "lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return  # The reconciler is already collecting and applying policy.
+            ledger_file = state / "policy-usage.json"
+            if not ledger_file.exists():
+                print("XMesh user meter: waiting for the first signed policy", file=sys.stderr)
+                return
+            counters, runtime_id, inbound_counters = get_counters()
+            if counters is None or inbound_counters is None:
+                raise RuntimeError("Xray StatsService query failed; counters not published")
+            ledger = load_json(ledger_file)
+            ledger = integrate_counters(ledger, counters, runtime_id, int(time.time() * 1000), inbound_counters)
+            write_atomic(ledger_file, canonical(ledger))
+            store_metrics_snapshot(ledger, args.node_id, int(time.time() * 1000))
+            print(f"XMesh user meter: sampled {len(inbound_counters)} user/inbound counters", file=sys.stderr)
+        finally:
+            os.close(lock_fd)
+        return
     if args.action == "commit":
         pending = state / "policy-envelope.json.pending"
         if not pending.exists():
