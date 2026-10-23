@@ -109,7 +109,7 @@ config={"panel_url":sys.argv[1],"node_id":int(sys.argv[2]),
 with open("config.json","w") as f:json.dump(config,f,indent=2)
 PY
 else
- python3 - "$PANEL" "$NODE" <<'PY'
+ python3 - "$PANEL" "$NODE" "$NODE_PORT" <<'PY'
 import json,sys
 p="config.json"
 with open(p) as f:d=json.load(f)
