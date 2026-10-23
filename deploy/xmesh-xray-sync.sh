@@ -24,10 +24,31 @@ CONFIG_FILE="$(mktemp "$STATE/config.XXXXXXXX")"
 trap 'rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"' EXIT
 printf 'XMESH1\nPOST\n%s\n%s\n%s\n%s\n%s\n' "$PATH_API" "$XMESH_NODE_ID" "$STAMP" "$NONCE" "$HASH" > "$SIGN_FILE"
 SIG="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$SIGN_FILE" | od -An -tx1 -v | tr -d ' \n')"
-curl -fsS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
+HTTP_STATUS="$(curl -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
  -H "Content-Type: application/json" -H "X-XMesh-Timestamp: $STAMP" \
  -H "X-XMesh-Nonce: $NONCE" -H "X-XMesh-Signature: $SIG" \
- --data-binary "$REQUEST" -o "$RESP_FILE"
+ --data-binary "$REQUEST" -o "$RESP_FILE" -w '%{http_code}')" || {
+ echo "Cannot reach XMesh desired-config API; preserving existing Xray configuration." >&2
+ exit 1
+}
+if [[ "$HTTP_STATUS" != 200 ]]; then
+ # Never print arbitrary API responses: they could contain confidential data.
+ # Only display a bounded, known server-side error message.
+ python3 - "$RESP_FILE" "$HTTP_STATUS" <<'PY'
+import json,sys
+status=sys.argv[2]
+try:
+ with open(sys.argv[1],encoding="utf-8") as f: payload=json.load(f)
+ msg=payload.get("error") or payload.get("message") or ""
+ if not isinstance(msg,str):msg=""
+except (OSError,ValueError):
+ msg=""
+msg="".join(c for c in msg if c.isprintable())[:240]
+print("XMesh desired-config rejected request (HTTP %s): %s"%(status,msg or "check node profile and local Xray port"),file=sys.stderr)
+print("Existing Xray configuration was not modified.",file=sys.stderr)
+PY
+ exit 1
+fi
 python3 - "$RESP_FILE" "$CONFIG_FILE" "$XMESH_NODE_ID" <<'PY'
 import json,sys,ipaddress
 data=json.load(open(sys.argv[1]))
