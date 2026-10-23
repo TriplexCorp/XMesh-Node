@@ -207,5 +207,24 @@ else
  exit 1
 fi
 echo "Xray desired-state sync installed and first run completed."
+# The system metrics installer runs before the managed Xray policy guard exists.
+# Therefore its conditional user-meter activation is skipped on a virgin node.
+# Activate the dedicated sampler only after both the guard AND managed Xray
+# are installed, so a completely new node gets real per-user accounting.
+echo "Enabling automatic per-user Xray accounting..."
+[[ -r /usr/local/libexec/xmesh-policy-guard.py ]] || {
+  echo "ERROR: Xray user stats guard missing; refusing incomplete enrollment." >&2
+  exit 1
+}
+[[ -f /etc/systemd/system/xmesh-node-user-meter.service &&
+   -f /etc/systemd/system/xmesh-node-user-meter.timer ]] || {
+  echo "ERROR: User traffic sampler service missing; update metrics installer." >&2
+  exit 1
+}
+systemctl enable --now xmesh-node-user-meter.timer
+# An initial query may return no users until actual client traffic occurs.
+if ! systemctl start xmesh-node-user-meter.service; then
+  echo "WARNING: Xray personal traffic collection is not ready; inspect journalctl -u xmesh-node-user-meter.service -n 50" >&2
+fi
 
 echo "Node enrolled. Router TCP listener configured for :$NODE_PORT (verify docker compose ps and ss -ltn)."
