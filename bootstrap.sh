@@ -171,6 +171,13 @@ curl --proto '=https' --tlsv1.2 -fsSLo "$GUARD_TMP" \
 python3 -m py_compile "$GUARD_TMP"
 install -o root -g root -m 0700 "$GUARD_TMP" /usr/local/libexec/xmesh-policy-guard.py
 rm -f "$GUARD_TMP"
+# Install independent bounded GeoData fetcher before the first signed sync.
+GEO_TMP="$(mktemp /tmp/xmesh-geodata.XXXXXXXX)"
+curl --proto '=https' --tlsv1.2 -fsSLo "$GEO_TMP" \
+ https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/main/deploy/xmesh-geodata-sync.py
+python3 -m py_compile "$GEO_TMP"
+install -o root -g root -m 0700 "$GEO_TMP" /usr/local/libexec/xmesh-geodata-sync.py
+rm -f "$GEO_TMP"
 install -d -o root -g root -m 0700 /var/lib/xmesh-xray-sync
 cat > /etc/systemd/system/xmesh-xray-sync.service <<'SERVICE'
 [Unit]
