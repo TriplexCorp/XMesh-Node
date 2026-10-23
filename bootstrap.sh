@@ -161,6 +161,17 @@ echo "Installing managed Xray reconciliation agent..."
 curl --proto '=https' --tlsv1.2 -fsSLo /usr/local/sbin/xmesh-xray-sync \
  https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/main/deploy/xmesh-xray-sync.sh
 chmod 0700 /usr/local/sbin/xmesh-xray-sync
+# Install the independent, signed offline policy verifier before enabling sync.
+# Missing or invalid verifier must fail installation rather than silently run
+# a node without subscription expiration/quota enforcement.
+install -d -o root -g root -m 0755 /usr/local/libexec
+GUARD_TMP="$(mktemp /tmp/xmesh-policy.XXXXXXXX)"
+curl --proto '=https' --tlsv1.2 -fsSLo "$GUARD_TMP" \
+ https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/main/deploy/xmesh-policy-guard.py
+python3 -m py_compile "$GUARD_TMP"
+install -o root -g root -m 0700 "$GUARD_TMP" /usr/local/libexec/xmesh-policy-guard.py
+rm -f "$GUARD_TMP"
+install -d -o root -g root -m 0700 /var/lib/xmesh-xray-sync
 cat > /etc/systemd/system/xmesh-xray-sync.service <<'SERVICE'
 [Unit]
 Description=XMesh managed Xray profile reconciliation
