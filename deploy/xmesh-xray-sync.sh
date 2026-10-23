@@ -92,4 +92,34 @@ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];
  fi
  exit 1
 fi
-echo "Xray deployed on 127.0.0.1:$PORT; routing must be configured separately."
+# Only auto-route a virgin router configuration. Never replace user SNI routes.
+ROUTER=/opt/xmesh-node/config.json
+[[ -f /root/XMesh-Node/config.json ]] && ROUTER=/root/XMesh-Node/config.json
+if [[ -f "$ROUTER" ]];then
+ python3 - "$ROUTER" "$PORT" <<'PY'
+import json,sys,os,tempfile
+path=sys.argv[1];port=int(sys.argv[2])
+with open(path) as f:d=json.load(f)
+old=d.get("default_tcp")
+if d.get("routes") or old not in (None,"127.0.0.1:9443",f"127.0.0.1:{port}"):
+ print("Router has custom routes/default; leaving router configuration unchanged.")
+else:
+ target=f"127.0.0.1:{port}"
+ if old!=target:
+  d["default_tcp"]=target
+  fd,temp=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".config.")
+  try:
+   with os.fdopen(fd,"w") as f:json.dump(d,f,indent=2)
+   os.chmod(temp,0o644)
+   os.replace(temp,path)
+  finally:
+   if os.path.exists(temp):os.unlink(temp)
+  print("Default TCP backend updated to",target)
+PY
+ if [[ -f /root/XMesh-Node/config.json ]];then ROUTER_DIR=/root/XMesh-Node;else ROUTER_DIR=/opt/xmesh-node;fi
+ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-node 2>/dev/null)" == true ]];then
+   (cd "$ROUTER_DIR" && docker compose up -d --no-build xmesh-node)
+ fi
+fi
+echo "Xray deployed on 127.0.0.1:$PORT; configured safe default router when applicable."
+
