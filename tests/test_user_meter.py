@@ -16,7 +16,7 @@ class MeterTests(unittest.TestCase):
         state = guard.integrate_counters(state, {"7": 300}, "docker-a", 1000,
             {("7", "DE_VLESS"): {"uplink": 100, "downlink": 200}})
         self.assertEqual(state["users"]["7"]["total"], 300)
-        key = '["7","DE_VLESS"]'
+        key = '[7,"DE_VLESS"]'
         self.assertEqual(state["inbounds"][key]["totalUp"], 100)
         self.assertEqual(state["inbounds"][key]["totalDown"], 200)
         # Repeated samples must not count the same bytes twice.
