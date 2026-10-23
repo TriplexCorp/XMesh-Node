@@ -23,6 +23,11 @@ if (( NODE_PORT == 443 )); then
  echo "NOTE: TCP/443 can be owned by XMesh Node OR another listener, not both on the same address."
  echo "Place Xray and other services behind XMesh Node on separate loopback ports."
 fi
+# Wait for Ubuntu unattended upgrades instead of failing on a temporary dpkg lock.
+# apt-get's native lock timeout avoids deleting lock files or killing apt processes.
+apt_get() {
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"
+}
 # Prepare dependencies before redeeming the short-lived enrollment token.
 command -v apt-get >/dev/null || { echo "Automatic bootstrap currently supports Ubuntu with apt." >&2; exit 1; }
 . /etc/os-release
@@ -31,26 +36,26 @@ command -v systemctl >/dev/null || { echo "systemd is required for the metrics c
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
  echo "Installing Docker Engine and Compose from Docker's official Ubuntu repository..."
- apt-get update
- apt-get install -y ca-certificates curl gnupg
+ apt_get update
+ apt_get install -y ca-certificates curl gnupg
  install -m 0755 -d /etc/apt/keyrings
  curl --proto '=https' --tlsv1.2 -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
  chmod a+r /etc/apt/keyrings/docker.asc
  arch="$(dpkg --print-architecture)"
  case "$arch" in amd64|arm64|armhf|s390x|ppc64el) ;; *) echo "Unsupported Docker architecture: $arch" >&2; exit 1;; esac
  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' "$arch" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
- apt-get update
+ apt_get update
  # Do not silently uninstall an existing alternative Docker installation.
  if command -v docker >/dev/null; then
-  apt-get install -y docker-compose-plugin docker-buildx-plugin
+  apt_get install -y docker-compose-plugin docker-buildx-plugin
  else
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
  fi
  systemctl enable --now docker
 fi
 docker compose version >/dev/null
 docker info >/dev/null || { echo "Docker daemon is unavailable." >&2; exit 1; }
-apt-get install -y git python3 openssl curl
+apt_get install -y git python3 openssl curl
 INSTALL_DIR=/opt/xmesh-node
 if [[ -d /root/XMesh-Node/.git ]]; then INSTALL_DIR=/root/XMesh-Node; fi
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
