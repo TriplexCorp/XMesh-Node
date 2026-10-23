@@ -145,7 +145,17 @@ if [[ -f "$STATE/pinned-image" ]];then
   exit 1
  }
 fi
-docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
+if [[ "$OFFLINE_POLICY" == true ]];then
+ # A disconnected node must never download or switch to a different Xray image.
+ # Reconcile cached authorizations using the exact locally installed image.
+ IMAGE="$(docker inspect -f '{{.Image}}' xmesh-managed-xray 2>/dev/null)" || {
+  echo "Offline policy requires an existing managed Xray image." >&2;exit 1
+ }
+ [[ "$IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+ docker image inspect "$IMAGE" >/dev/null 2>&1 || exit 1
+else
+ docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
+fi
 docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
  "$IMAGE" run -test -config /etc/xray/config.json
 NEW_HASH="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
