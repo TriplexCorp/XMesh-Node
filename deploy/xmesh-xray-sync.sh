@@ -143,15 +143,17 @@ fi
 # autonomous guard has already verified the signature above, before URLs are read.
 # A failed refresh preserves the last verified files; new rules cannot silently
 # deploy without their required datasets.
-if [[ "$OFFLINE_POLICY" == false && "$POLICY_ENABLED" == true ]] && \
- python3 - "$RESP_FILE" <<'PY'
+GEO_SOURCE="$RESP_FILE"
+if [[ "$OFFLINE_POLICY" == true ]];then GEO_SOURCE="$STATE/policy-envelope.json";fi
+if [[ "$POLICY_ENABLED" == true ]] && \
+ python3 - "$GEO_SOURCE" <<'PY'
 import json,sys
 with open(sys.argv[1],encoding="utf-8") as f: response=json.load(f)
 sys.exit(0 if isinstance(response.get("policy",{}).get("geoData"),dict) else 1)
 PY
 then
  [[ -r "$GEO_WORKER" ]] || { echo "GeoData helper missing: update the node agent." >&2;exit 1; }
- python3 "$GEO_WORKER" prepare "$STATE" "$RESP_FILE"
+ python3 "$GEO_WORKER" prepare "$STATE" "$GEO_SOURCE"
 fi
 GEO_BIND=()
 if compgen -G "$STATE/assets/*.dat" >/dev/null;then
