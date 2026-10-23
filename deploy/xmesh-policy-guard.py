@@ -115,12 +115,15 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
         uid = user.get("xrayId")
         expiry_ms = user.get("expireAtMs")
         panel_usage = user.get("panelUsedBytes")
+        limit = user.get("limitBytes", 0)
         budget = user.get("offlineBudgetBytes")
         if type(user_id) is not int or user_id <= 0 or not isinstance(uid, str) or not re.fullmatch(
                 r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", uid):
             raise ValueError("Invalid policy user identity")
         if type(expiry_ms) is not int or expiry_ms < 0 or type(panel_usage) is not int or panel_usage < 0:
             raise ValueError("Invalid user expiry or usage")
+        if type(limit) is not int or limit < 0:
+            raise ValueError("Invalid signed subscription traffic limit")
         if budget is not None and (type(budget) is not int or not 0 <= budget <= 64 * 1024 * 1024):
             raise ValueError("Invalid offline budget")
         if user_id in seen_id or uid in seen_uuid:
@@ -279,9 +282,20 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         total = max(0, int(record.get("total", 0)))
         previous = int(record.get("panelUsedBytes", -1))
         budget = user["offlineBudgetBytes"]
-        # Only fresh authoritative accounting can replenish an offline lease.
-        # Repeated identical pulls cannot reset a locally depleted budget.
-        if "anchor" not in record or (not offline and user["panelUsedBytes"] > previous):
+        limit = user.get("limitBytes", 0)
+        expires = user["expireAtMs"]
+        fresh = not offline and policy["issuedAtMs"] > int(record.get("authorizedAtMs", -1))
+        # A genuine, newer signed panel revision may acknowledge usage, renew
+        # expiry, increase the plan, or reset metering. An identical policy
+        # poll never refills a depleted local allowance.
+        newly_authorized = (
+            fresh and (
+                user["panelUsedBytes"] != previous or
+                limit > int(record.get("limitBytes", 0)) or
+                expires > int(record.get("expireAtMs", 0))
+            )
+        )
+        if "anchor" not in record or newly_authorized:
             record["anchor"] = total
             record["budget"] = budget
             record["panelUsedBytes"] = user["panelUsedBytes"]
@@ -291,6 +305,10 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
                 record["budget"] = None
             elif record.get("budget") is not None:
                 record["budget"] = min(int(record["budget"]), budget)
+        if not offline:
+            record["authorizedAtMs"] = max(int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
+            record["limitBytes"] = limit
+            record["expireAtMs"] = expires
         reason = None
         if user["expireAtMs"] and now_ms >= user["expireAtMs"]:
             reason = "expired"
