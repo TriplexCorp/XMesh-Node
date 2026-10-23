@@ -31,6 +31,37 @@ HTTP_STATUS="$(curl -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
  echo "Cannot reach XMesh desired-config API; preserving existing Xray configuration." >&2
  exit 1
 }
+if [[ "$HTTP_STATUS" == 403 ]];then
+ # A signed request was authenticated, but the control plane denied this node.
+ # The only supported 403 reason is a disabled node. A disabled node MUST
+ # cease serving traffic even if the separate control timer is unavailable.
+ if python3 - "$RESP_FILE" <<'PY'
+import json,sys
+try:
+ with open(sys.argv[1],encoding="utf-8") as f:data=json.load(f)
+ msg=data.get("error") or data.get("message") or ""
+except (OSError,ValueError,TypeError):
+ sys.exit(1)
+sys.exit(0 if isinstance(msg,str) and msg.startswith("Node disabled:") else 1)
+PY
+ then
+  echo "Node disabled by control plane: enforcing Xray shutdown." >&2
+  if docker inspect xmesh-managed-xray >/dev/null 2>&1;then
+   docker update --restart=no xmesh-managed-xray >/dev/null
+   docker stop -t 3 xmesh-managed-xray >/dev/null
+   if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != false ]];then
+    echo "CRITICAL: Xray is still running after stop" >&2;exit 1
+   fi
+   printf 'docker\n' > "$STATE/forced-stop"
+   chmod 600 "$STATE/forced-stop"
+  else
+   # The managed container is absent; do not touch unrelated Xray instances.
+   echo "No XMesh-managed Xray container to stop." >&2
+  fi
+  echo "Managed Xray is stopped. Waiting for explicit reactivation." >&2
+  exit 0
+ fi
+fi
 if [[ "$HTTP_STATUS" != 200 ]]; then
  # Never print arbitrary API responses: they could contain confidential data.
  # Only display a bounded, known server-side error message.
