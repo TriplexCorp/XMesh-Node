@@ -150,4 +150,34 @@ trap 'rm -f "$METRICS_INSTALLER"' EXIT
 curl --proto '=https' --tlsv1.2 -fsSLo "$METRICS_INSTALLER" https://raw.githubusercontent.com/TriplexCorp/XMesh-Nexus/main/deploy/install-node-metrics-agent.sh
 bash "$METRICS_INSTALLER" "$PANEL" "$NODE"
 systemctl enable --now xmesh-node-metrics.timer
+# The panel is the source of truth for the assigned XRAY STUDIO profile.
+# Agent pulls via signed HTTPS requests. No inbound admin port is exposed.
+echo "Installing managed Xray reconciliation agent..."
+curl --proto '=https' --tlsv1.2 -fsSLo /usr/local/sbin/xmesh-xray-sync \
+ https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/main/deploy/xmesh-xray-sync.sh
+chmod 0700 /usr/local/sbin/xmesh-xray-sync
+cat > /etc/systemd/system/xmesh-xray-sync.service <<'SERVICE'
+[Unit]
+Description=XMesh managed Xray profile reconciliation
+After=docker.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xmesh-xray-sync
+SERVICE
+cat > /etc/systemd/system/xmesh-xray-sync.timer <<'TIMER'
+[Unit]
+Description=Reconcile assigned Xray configuration from XMesh Nexus
+[Timer]
+OnBootSec=35s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=xmesh-xray-sync.service
+[Install]
+WantedBy=timers.target
+TIMER
+systemctl daemon-reload
+systemctl enable --now xmesh-xray-sync.timer
+echo "Xray desired-state sync installed. Check: journalctl -u xmesh-xray-sync.service -n 30"
+
 echo "Node enrolled. Router TCP listener configured for :$NODE_PORT (verify docker compose ps and ss -ltn)."
