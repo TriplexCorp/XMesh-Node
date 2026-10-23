@@ -2,11 +2,27 @@
 set -Eeuo pipefail
 umask 077
 if [[ $EUID -ne 0 ]]; then exec sudo bash "$0" "$@"; fi
-if [[ $# -ne 2 ]]; then echo "Usage: bash bootstrap.sh https://panel.example.com NODE_ID (token requested securely)" >&2; exit 2; fi
-PANEL="${1%/}"; NODE="$2"
+if [[ $# -lt 2 || $# -gt 3 ]]; then echo "Usage: bash bootstrap.sh https://panel.example.com NODE_ID [suggested-node-port] (token requested securely)" >&2; exit 2; fi
+PANEL="${1%/}"; NODE="$2"; SUGGESTED_PORT="${3:-8443}"
 TOKEN=""
 [[ "$PANEL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "Expected HTTPS panel origin" >&2; exit 2; }
 [[ "$NODE" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid node ID" >&2; exit 2; }
+# Port is the TCP entrypoint for XMesh Node, not a separate metrics listener.
+[[ "$SUGGESTED_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$SUGGESTED_PORT >= 1 && 10#$SUGGESTED_PORT <= 65535 )) || { echo "Invalid suggested port" >&2; exit 2; }
+if [[ -t 0 ]]; then
+ read -r -p "TCP port for XMesh Node [$SUGGESTED_PORT]: " INPUT_PORT
+ NODE_PORT="${INPUT_PORT:-$SUGGESTED_PORT}"
+else
+ NODE_PORT="$SUGGESTED_PORT"
+ echo "Non-interactive installation: using TCP port $NODE_PORT."
+fi
+[[ "$NODE_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$NODE_PORT >= 1 && 10#$NODE_PORT <= 65535 )) || { echo "Port must be 1–65535" >&2; exit 2; }
+NODE_PORT="$((10#$NODE_PORT))"
+echo "XMesh Node will be configured to listen on TCP/$NODE_PORT."
+if (( NODE_PORT == 443 )); then
+ echo "NOTE: TCP/443 can be owned by XMesh Node OR another listener, not both on the same address."
+ echo "Place Xray and other services behind XMesh Node on separate loopback ports."
+fi
 # Prepare dependencies before redeeming the short-lived enrollment token.
 command -v apt-get >/dev/null || { echo "Automatic bootstrap currently supports Ubuntu with apt." >&2; exit 1; }
 . /etc/os-release
@@ -82,11 +98,11 @@ unset TOKEN JSON PROOF
 cd "$INSTALL_DIR"
 # Preserve existing routing settings and never overwrite a user-edited configuration.
 if [[ ! -f config.json ]]; then
- python3 - "$PANEL" "$NODE" <<'PY'
+ python3 - "$PANEL" "$NODE" "$NODE_PORT" <<'PY'
 import json,sys
 config={"panel_url":sys.argv[1],"node_id":int(sys.argv[2]),
 "private_key_file":"/etc/xmesh-node-metrics/node.key",
-"listen_tcp":":8443","listen_udp":"",
+"listen_tcp":":"+sys.argv[3],"listen_udp":"",
 "default_tcp":"127.0.0.1:9443","routes":[],
 "hello_timeout_seconds":5,"idle_timeout_seconds":120,
 "max_tcp_connections":4096,"max_udp_sessions":2048}
@@ -98,6 +114,10 @@ import json,sys
 p="config.json"
 with open(p) as f:d=json.load(f)
 d.update(panel_url=sys.argv[1],node_id=int(sys.argv[2]),private_key_file="/etc/xmesh-node-metrics/node.key")
+requested_port=":"+sys.argv[3]
+if d.get("listen_tcp")!=requested_port:
+ print("Updating node TCP listener from",d.get("listen_tcp"),"to",requested_port)
+ d["listen_tcp"]=requested_port
 # Automatically repair an unsafe self-referential test backend.
 if d.get("listen_tcp") and d.get("default_tcp"):
  from urllib.parse import urlsplit
@@ -130,4 +150,4 @@ trap 'rm -f "$METRICS_INSTALLER"' EXIT
 curl --proto '=https' --tlsv1.2 -fsSLo "$METRICS_INSTALLER" https://raw.githubusercontent.com/TriplexCorp/XMesh-Nexus/main/deploy/install-node-metrics-agent.sh
 bash "$METRICS_INSTALLER" "$PANEL" "$NODE"
 systemctl enable --now xmesh-node-metrics.timer
-echo "Node enrolled. Router initially listens on :8443; port 443 is NOT taken over automatically."
+echo "Node enrolled. Router TCP listener configured for :$NODE_PORT (verify docker compose ps and ss -ltn)."
