@@ -101,6 +101,13 @@ class SignedPolicyTests(unittest.TestCase):
         self.run_guard("commit")
         self.run_guard("offline", NOW + 86400001)
         self.assertEqual(self.num_clients(), 0)
+        # A newly signed renewal with a later expiration restores this user.
+        self.policy["issuedAtMs"] = NOW + 86400002
+        self.policy["validUntilMs"] = self.policy["issuedAtMs"] + 7 * 86400000
+        self.policy["users"][0]["expireAtMs"] = NOW + 3 * 86400000
+        self.write_envelope()
+        self.run_guard("prepare", NOW + 86400003)
+        self.assertEqual(self.num_clients(), 1)
         # Tampering with a body field breaks the detached policy signature.
         body = json.loads(self.envelope.read_text())
         body["policy"]["users"][0]["expireAtMs"] += 1000000000
