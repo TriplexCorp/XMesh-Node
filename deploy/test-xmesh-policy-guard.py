@@ -120,6 +120,26 @@ class SignedPolicyTests(unittest.TestCase):
         self.envelope.write_text(json.dumps(body))
         self.run_guard("prepare", NOW + 1000, success=False)
 
+    def test_signed_policy_rollback_and_revision_collision(self):
+        self.run_guard("prepare")
+        self.run_guard("commit")
+        self.policy["issuedAtMs"] = NOW + 2000
+        self.policy["validUntilMs"] = self.policy["issuedAtMs"] + 7 * 86400000
+        self.write_envelope()
+        self.run_guard("prepare", NOW + 3000)
+        self.run_guard("commit")
+        # A valid but older panel signature must not restore stale rights.
+        self.policy["issuedAtMs"] = NOW + 1000
+        self.policy["validUntilMs"] = self.policy["issuedAtMs"] + 7 * 86400000
+        self.write_envelope()
+        self.assertIn("rollback", self.run_guard("prepare", NOW + 3000, success=False).stderr)
+        # Same revision number with a different valid signature is ambiguous.
+        self.policy["issuedAtMs"] = NOW + 2000
+        self.policy["validUntilMs"] = self.policy["issuedAtMs"] + 7 * 86400000
+        self.policy["users"][0]["expireAtMs"] += 1000
+        self.write_envelope()
+        self.assertIn("Conflicting", self.run_guard("prepare", NOW + 3000, success=False).stderr)
+
     def test_offline_requires_committed_signed_snapshot(self):
         self.run_guard("offline", success=False)
         self.run_guard("prepare")
