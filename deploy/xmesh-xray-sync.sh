@@ -80,6 +80,12 @@ print("Existing Xray configuration was not modified.",file=sys.stderr)
 PY
  exit 1
 fi
+# The control agent owns reactivation. Never bypass its forced-stop marker
+# by recreating a container during ordinary profile reconciliation.
+if [[ -f "$STATE/forced-stop" ]];then
+ echo "Xray forced-stop marker present; awaiting signed control-agent reactivation." >&2
+ exit 0
+fi
 python3 - "$RESP_FILE" "$CONFIG_FILE" "$XMESH_NODE_ID" <<'PY'
 import json,sys,ipaddress
 data=json.load(open(sys.argv[1]))
