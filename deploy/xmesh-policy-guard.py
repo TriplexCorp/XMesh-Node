@@ -129,6 +129,11 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
     inbounds = config.get("inbounds")
     if not isinstance(inbounds, list) or len(inbounds) != 1:
         raise ValueError("Unsupported Xray inbound layout")
+    if inbounds[0].get("listen") != "127.0.0.1" or not (
+            type(inbounds[0].get("port")) is int and 1 <= inbounds[0]["port"] <= 65535):
+        raise ValueError("Untrusted Xray listener/port")
+    if inbounds[0]["port"] != document.get("port"):
+        raise ValueError("Policy port and Xray listener disagree")
     clients = inbounds[0].get("settings", {}).get("clients", [])
     if not isinstance(clients, list) or {c.get("id") for c in clients} != seen_uuid:
         raise ValueError("Signed policy and VLESS clients differ")
@@ -208,6 +213,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms):
             record["anchor"] = total
             record["budget"] = budget
             record["panelUsedBytes"] = user["panelUsedBytes"]
+            record["revoked"] = False
         else:
             if budget is None:
                 record["budget"] = None
@@ -223,6 +229,11 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms):
                 reason = "quota"
         if offline and now_ms > policy["validUntilMs"] and budget is not None:
             reason = "policy-expired"
+        if reason and offline:
+            # Persist quota denial across reconnects and process restarts.
+            record["revoked"] = True
+        if record.get("revoked"):
+            reason = reason or "locally-revoked"
         if reason:
             denied[user["xrayId"]] = reason
         else:
@@ -247,11 +258,11 @@ def main():
     state = Path(args.state)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     if args.action == "commit":
-        for name in ("base-config.json", "policy-envelope.json"):
-            pending = state / (name + ".pending")
-            if not pending.exists():
-                raise ValueError("Missing validated pending policy snapshot")
-            os.replace(pending, state / name)
+        pending = state / "policy-envelope.json.pending"
+        if not pending.exists():
+            raise ValueError("Missing validated pending policy snapshot")
+        # A single atomic rename keeps config and policy bound together.
+        os.replace(pending, state / "policy-envelope.json")
         return
     now_ms = int(time.time() * 1000) if args.now_ms is None else args.now_ms
     if not args.output:
@@ -265,9 +276,7 @@ def main():
     else:
         doc = load_json(state / "policy-envelope.json")
         policy = verify_envelope(doc, state, args.node_id)
-        base = load_json(state / "base-config.json")
-        if canonical(base) != canonical(doc["config"]):
-            raise ValueError("Cached base configuration does not match signed snapshot")
+        base = doc["config"]
     ledger_file = state / "policy-usage.json"
     ledger = load_json(ledger_file) if ledger_file.exists() else {}
     if args.stats_file:
@@ -279,7 +288,6 @@ def main():
     write_atomic(ledger_file, canonical(ledger))
     write_atomic(args.output, canonical(effective))
     if args.action == "prepare":
-        write_atomic(state / "base-config.json.pending", canonical(base))
         write_atomic(state / "policy-envelope.json.pending", canonical(doc))
     print("XMesh policy: " + ("offline" if args.action == "offline" else "connected")
           + f", authorized={len(effective['inbounds'][0]['settings']['clients'])}, blocked={len(denied)}",
