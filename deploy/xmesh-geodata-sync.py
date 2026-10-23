@@ -125,6 +125,9 @@ def prepare(state, response):
     hours = manifest.get("intervalHours", DEFAULT_UPDATE_HOURS)
     if isinstance(hours, bool) or not isinstance(hours, int) or not 6 <= hours <= 168:
         fail("Invalid GeoData interval.")
+    refresh_revision = manifest.get("refreshRevision", 0)
+    if type(refresh_revision) is not int or not 0 <= refresh_revision <= 9223372036854775807:
+        fail("Invalid signed GeoData refresh revision.")
     sources = manifest.get("files")
     if not isinstance(sources, list) or not 1 <= len(sources) <= 10:
         fail("Invalid GeoData source list.")
@@ -152,7 +155,7 @@ def prepare(state, response):
             status = json.loads(status_file.read_text("utf-8"))
         except (ValueError, OSError):
             status = {}
-    signature = hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+    signature = hashlib.sha256(json.dumps({"files": entries, "refreshRevision": refresh_revision}, sort_keys=True).encode()).hexdigest()
     now = int(time.time())
     if (status.get("manifestHash") == signature
             and now - status.get("checkedAt", 0) < hours * 3600
@@ -186,7 +189,8 @@ def prepare(state, response):
             shutil.rmtree(next_dir)
         persist_json(status_file, {
             "state": "pending" if changed else "current",
-            "manifestHash": signature, "checkedAt": now, "files": digests,
+            "manifestHash": signature, "refreshRevision": refresh_revision,
+            "checkedAt": now, "files": digests,
             "lastError": None
         })
     except Exception as exc:
