@@ -127,8 +127,14 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
         seen_uuid.add(uid)
     # A signed policy may only list users actually in the signed configuration.
     inbounds = config.get("inbounds")
-    if not isinstance(inbounds, list) or len(inbounds) != 1:
+    if not isinstance(inbounds, list) or len(inbounds) not in (1, 2):
         raise ValueError("Unsupported Xray inbound layout")
+    if len(inbounds) == 2:
+        api = inbounds[1]
+        if (api.get("tag") != "xmesh_stats_in" or api.get("listen") != "127.0.0.1"
+                or api.get("port") != 10085 or api.get("protocol") != "dokodemo-door"
+                or config.get("api", {}).get("tag") != "xmesh_stats_api"):
+            raise ValueError("Unsafe private stats listener")
     if inbounds[0].get("listen") != "127.0.0.1" or not (
             type(inbounds[0].get("port")) is int and 1 <= inbounds[0]["port"] <= 65535):
         raise ValueError("Untrusted Xray listener/port")
