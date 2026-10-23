@@ -44,9 +44,12 @@ for entry in cfg.get("inbounds",[]):
  if entry.get("listen")!="127.0.0.1":raise SystemExit("Public inbound denied")
 with open(sys.argv[2],"w") as f:json.dump(cfg,f,indent=2)
 PY
+# A 0600 configuration may contain Reality private keys. Keep it private on host.
+# Run Xray as root inside the confined container (all Linux capabilities dropped)
+# so the read-only bind mount remains accessible without chmod 0644.
 IMAGE=ghcr.io/xtls/xray-core:latest
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
-docker run --rm --network none --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
+docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
  "$IMAGE" run -test -config /etc/xray/config.json
 NEW_HASH="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
 ACTIVE="$STATE/config.json"
@@ -66,7 +69,7 @@ if [[ -f "$ACTIVE" ]];then cp "$ACTIVE" "$PREVIOUS";fi
 install -m 0600 "$CONFIG_FILE" "$ACTIVE"
 docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
 if ! docker run -d --name xmesh-managed-xray --restart unless-stopped \
- --network host --read-only --security-opt no-new-privileges \
+ --network host --user 0:0 --read-only --security-opt no-new-privileges \
  --cap-drop ALL -v "$ACTIVE:/etc/xray/config.json:ro" \
  "$IMAGE" run -config /etc/xray/config.json;then
  echo "Xray start failed; attempting rollback." >&2
@@ -74,7 +77,7 @@ if ! docker run -d --name xmesh-managed-xray --restart unless-stopped \
   cp "$PREVIOUS" "$ACTIVE"
   docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
-   --read-only --security-opt no-new-privileges --cap-drop ALL \
+   --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
    -v "$ACTIVE:/etc/xray/config.json:ro" "$IMAGE" run -config /etc/xray/config.json || true
  fi
  exit 1
@@ -87,7 +90,7 @@ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];
  if [[ -f "$PREVIOUS" ]];then
   cp "$PREVIOUS" "$ACTIVE"
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
-   --read-only --security-opt no-new-privileges --cap-drop ALL \
+   --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
    -v "$ACTIVE:/etc/xray/config.json:ro" "$IMAGE" run -config /etc/xray/config.json || true
  fi
  exit 1
