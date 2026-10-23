@@ -10,6 +10,7 @@ accounting requires a centrally coordinated lease ledger.
 import argparse
 import base64
 import hashlib
+import grp
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import unquote
 
 PUBLIC_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 USER_PATTERN = re.compile(r"^user>>>xmesh-u([1-9][0-9]*)--([^>]+)>>>traffic>>>(uplink|downlink)$")
@@ -150,7 +152,7 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
 
 
 def get_counters():
-    """Return (monotonic Xray per-user raw counters, runtime ID) or (None,None)."""
+    """Return user totals, runtime identity and raw per-inbound Xray counters."""
     try:
         container = subprocess.run(["docker", "inspect", "-f",
                                     "{{.Id}} {{.State.StartedAt}}", "xmesh-managed-xray"],
@@ -164,24 +166,74 @@ def get_counters():
         stats = payload.get("stat", [])
         if not isinstance(stats, list) or len(stats) > 12000:
             raise ValueError("Invalid Xray counters")
-        grouped = {}
+        inbound = {}
         for row in stats:
             if not isinstance(row, dict):
                 continue
             match = USER_PATTERN.fullmatch(row.get("name", ""))
             if match is None:
                 continue
-            val = row.get("value")
-            if type(val) is not int or not 0 <= val <= (1 << 63) - 1:
+            raw_value = row.get("value")
+            if type(raw_value) is int:
+                val = raw_value
+            elif isinstance(raw_value, str) and re.fullmatch(r"[0-9]{1,19}", raw_value):
+                val = int(raw_value)
+            else:
                 continue
-            user_id = match.group(1)
-            grouped[user_id] = grouped.get(user_id, 0) + val
-        return grouped, runtime_id
-    except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
-        return None, None
+            if not 0 <= val <= (1 << 63) - 1:
+                continue
+            user_id, tag, direction = match.groups()
+            tag = unquote(tag, encoding="utf-8", errors="strict")
+            if not tag or len(tag) > 128 or any(ord(c) < 32 for c in tag):
+                continue
+            raw = inbound.setdefault((user_id, tag), {"uplink": 0, "downlink": 0})
+            raw[direction] = val
+        if len(inbound) > MAX_USERS:
+            raise ValueError("Too many per-inbound counters")
+        grouped = {}
+        for (user_id, _), values in inbound.items():
+            grouped[user_id] = grouped.get(user_id, 0) + sum(values.values())
+        return grouped, runtime_id, inbound
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeError, json.JSONDecodeError):
+        return None, None, None
 
 
-def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms):
+def store_metrics_snapshot(ledger, node_id, now_ms):
+    """Publish durable monotonic counters to the unprivileged signed metrics agent."""
+    rows = []
+    totals = {}
+    for key, value in ledger.get("inbounds", {}).items():
+        try:
+            user_id, tag = json.loads(key)
+            if type(user_id) is not int or user_id <= 0 or not isinstance(tag, str):
+                continue
+            uplink = max(0, int(value["totalUp"]))
+            downlink = max(0, int(value["totalDown"]))
+        except (ValueError, TypeError, KeyError):
+            continue
+        rows.append({"userId": user_id, "inboundTag": tag,
+                     "uplinkBytes": uplink, "downlinkBytes": downlink})
+        total = totals.setdefault(user_id, [0, 0])
+        total[0] += uplink
+        total[1] += downlink
+    rows.sort(key=lambda row: (row["userId"], row["inboundTag"]))
+    payload = {"nodeId": node_id, "sampledAtMs": now_ms,
+               "userInboundTraffic": rows,
+               "userTraffic": [{"userId": u, "uplinkBytes": pair[0],
+                                "downlinkBytes": pair[1]} for u, pair in sorted(totals.items())]}
+    snapshot = Path("/run/xmesh-node-user-metrics.json")
+    if not snapshot.parent.is_dir():
+        return
+    write_atomic(snapshot, canonical(payload))
+    try:
+        group_id = grp.getgrnam("xmesh-metrics").gr_gid
+        os.chown(snapshot, 0, group_id)
+        os.chmod(snapshot, 0o640)
+    except KeyError:
+        # A partially installed metrics agent cannot access the file.
+        pass
+
+def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbound_counters=None):
     """Pure admission decision; caller persists the ledger before applying JSON."""
     if not isinstance(ledger, dict):
         ledger = {}
@@ -197,6 +249,9 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms):
             # A restarted container has fresh, lower Xray cumulative counters.
             for record in history.values():
                 record["last"] = 0
+            for record in ledger.get("inbounds", {}).values():
+                record["lastUp"] = 0
+                record["lastDown"] = 0
         ledger["runtimeId"] = runtime_id
         for user_id, value in counters.items():
             record = history.setdefault(user_id, {})
@@ -204,6 +259,17 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms):
             record["total"] = max(0, int(record.get("total", 0))) + (
                 value - last if value >= last else value)
             record["last"] = value
+        if inbound_counters is not None:
+            inbound_history = ledger.setdefault("inbounds", {})
+            for (user_id, tag), count in inbound_counters.items():
+                cache_key = json.dumps([int(user_id), tag], separators=(",", ":"))
+                item = inbound_history.setdefault(cache_key, {})
+                for direction, suffix in (("uplink", "Up"), ("downlink", "Down")):
+                    raw = count[direction]
+                    last = max(0, int(item.get("last" + suffix, 0)))
+                    item["total" + suffix] = max(0, int(item.get("total" + suffix, 0))) + (
+                        raw - last if raw >= last else raw)
+                    item["last" + suffix] = raw
     users = policy["users"]
     allowed = {}
     denied = {}
@@ -286,12 +352,14 @@ def main():
     ledger_file = state / "policy-usage.json"
     ledger = load_json(ledger_file) if ledger_file.exists() else {}
     if args.stats_file:
-        counters, runtime_id = load_json(args.stats_file), "unit-test"
+        counters, runtime_id, inbound_counters = load_json(args.stats_file), "unit-test", None
     else:
-        counters, runtime_id = get_counters()
+        counters, runtime_id, inbound_counters = get_counters()
     effective, ledger, denied = enforce(policy, base, ledger, counters, runtime_id,
-                                        args.action == "offline", now_ms)
+                                        args.action == "offline", now_ms, inbound_counters)
     write_atomic(ledger_file, canonical(ledger))
+    if inbound_counters is not None:
+        store_metrics_snapshot(ledger, args.node_id, now_ms)
     write_atomic(args.output, canonical(effective))
     if args.action == "prepare":
         write_atomic(state / "policy-envelope.json.pending", canonical(doc))
