@@ -99,7 +99,9 @@ fi
 ROUTER=/opt/xmesh-node/config.json
 [[ -f /root/XMesh-Node/config.json ]] && ROUTER=/root/XMesh-Node/config.json
 if [[ -f "$ROUTER" ]];then
- python3 - "$ROUTER" "$PORT" <<'PY'
+ ROUTER_FLAG="$STATE/router-updated"
+ rm -f "$ROUTER_FLAG"
+ python3 - "$ROUTER" "$PORT" "$ROUTER_FLAG" <<'PY'
 import json,sys,os,tempfile
 path=sys.argv[1];port=int(sys.argv[2])
 with open(path) as f:d=json.load(f)
@@ -115,13 +117,15 @@ else:
    with os.fdopen(fd,"w") as f:json.dump(d,f,indent=2)
    os.chmod(temp,0o644)
    os.replace(temp,path)
+   with open(sys.argv[3],"w") as marker: marker.write("updated")
   finally:
    if os.path.exists(temp):os.unlink(temp)
   print("Default TCP backend updated to",target)
 PY
  if [[ -f /root/XMesh-Node/config.json ]];then ROUTER_DIR=/root/XMesh-Node;else ROUTER_DIR=/opt/xmesh-node;fi
- if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-node 2>/dev/null)" == true ]];then
-   (cd "$ROUTER_DIR" && docker compose up -d --no-build xmesh-node)
+ if [[ -f "$ROUTER_FLAG" ]] && [[ "$(docker inspect -f '{{.State.Running}}' xmesh-node 2>/dev/null)" == true ]];then
+   (cd "$ROUTER_DIR" && docker compose restart xmesh-node)
+   rm -f "$ROUTER_FLAG"
  fi
 fi
 echo "Xray deployed on 127.0.0.1:$PORT; configured safe default router when applicable."
