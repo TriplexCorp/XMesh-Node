@@ -27,7 +27,8 @@ if [[ -r "$POLICY_GUARD" && "${XMESH_AUTONOMOUS_POLICY:-1}" == 1 ]];then
  POLICY_ENABLED=true
 fi
 OFFLINE_POLICY=false
-trap 'rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"' EXIT
+GEO_WORKER=/usr/local/libexec/xmesh-geodata-sync.py
+trap 'if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"' EXIT
 printf 'XMESH1\nPOST\n%s\n%s\n%s\n%s\n%s\n' "$PATH_API" "$XMESH_NODE_ID" "$STAMP" "$NONCE" "$HASH" > "$SIGN_FILE"
 SIG="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$SIGN_FILE" | od -An -tx1 -v | tr -d ' \n')"
 HTTP_STATUS="$(curl --proto '=https' --tlsv1.2 -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
@@ -138,6 +139,24 @@ for entry in cfg.get("inbounds",[]):
 with open(sys.argv[2],"w") as f:json.dump(cfg,f,indent=2)
 PY
 fi
+# An active signed GeoData manifest is downloaded by the node itself. The
+# autonomous guard has already verified the signature above, before URLs are read.
+# A failed refresh preserves the last verified files; new rules cannot silently
+# deploy without their required datasets.
+if [[ "$OFFLINE_POLICY" == false && "$POLICY_ENABLED" == true ]] && \
+ python3 - "$RESP_FILE" <<'PY'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as f: response=json.load(f)
+sys.exit(0 if isinstance(response.get("policy",{}).get("geoData"),dict) else 1)
+PY
+then
+ [[ -r "$GEO_WORKER" ]] || { echo "GeoData helper missing: update the node agent." >&2;exit 1; }
+ python3 "$GEO_WORKER" prepare "$STATE" "$RESP_FILE"
+fi
+GEO_BIND=()
+if compgen -G "$STATE/assets/*.dat" >/dev/null;then
+ GEO_BIND=(-e XRAY_LOCATION_ASSET=/usr/local/share/xray -v "$STATE/assets:/usr/local/share/xray:ro")
+fi
 # A 0600 configuration may contain Reality private keys. Keep it private on host.
 # Run Xray as root inside the confined container (all Linux capabilities dropped)
 # so the read-only bind mount remains accessible without chmod 0644.
@@ -162,15 +181,19 @@ if [[ "$OFFLINE_POLICY" == true ]];then
 else
  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
 fi
-docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
- "$IMAGE" run -test -config /etc/xray/config.json
+if ! docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
+ "${GEO_BIND[@]}" "$IMAGE" run -test -config /etc/xray/config.json;then
+ echo "GeoData/config validation failed; keeping previous Xray and files." >&2
+ exit 1
+fi
 NEW_HASH="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
 ACTIVE="$STATE/config.json"
 OLD_HASH="$(test -f "$ACTIVE" && sha256sum "$ACTIVE" | cut -d' ' -f1 || true)"
-if [[ "$NEW_HASH" == "$OLD_HASH" ]] && docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null | grep -qx true; then
+if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" ]] && docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null | grep -qx true; then
  if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
   python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
  fi
+ if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
  echo "Xray configuration unchanged, container healthy."
  exit 0
 fi
@@ -186,28 +209,30 @@ install -m 0600 "$CONFIG_FILE" "$ACTIVE"
 docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
 if ! docker run -d --name xmesh-managed-xray --restart unless-stopped \
  --network host --user 0:0 --read-only --security-opt no-new-privileges \
- --cap-drop ALL -v "$ACTIVE:/etc/xray/config.json:ro" \
+ --cap-drop ALL -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" \
  "$IMAGE" run -config /etc/xray/config.json;then
  echo "Xray start failed; attempting rollback." >&2
+ if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE";fi
  if [[ -f "$PREVIOUS" ]];then
   cp "$PREVIOUS" "$ACTIVE"
   docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
    --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "$IMAGE" run -config /etc/xray/config.json || true
+   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
  fi
  exit 1
 fi
 sleep 2
 if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];then
  echo "New Xray instance exited; attempting rollback." >&2
+ if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE";fi
  docker logs --tail 20 xmesh-managed-xray >&2 || true
  docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
  if [[ -f "$PREVIOUS" ]];then
   cp "$PREVIOUS" "$ACTIVE"
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
    --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "$IMAGE" run -config /etc/xray/config.json || true
+   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
  fi
  exit 1
 fi
@@ -247,5 +272,6 @@ fi
 if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
  python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
 fi
+if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
 echo "Xray deployed on 127.0.0.1:$PORT; configured safe default router when applicable."
 
