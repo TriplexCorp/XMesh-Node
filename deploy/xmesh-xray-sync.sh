@@ -52,8 +52,9 @@ PY
    if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != false ]];then
     echo "CRITICAL: Xray is still running after stop" >&2;exit 1
    fi
-   printf 'docker\n' > "$STATE/forced-stop"
-   chmod 600 "$STATE/forced-stop"
+   install -d -m 0700 /var/lib/xmesh-node-control
+   printf 'docker\n' > /var/lib/xmesh-node-control/forced-stop
+   chmod 600 /var/lib/xmesh-node-control/forced-stop
   else
    # The managed container is absent; do not touch unrelated Xray instances.
    echo "No XMesh-managed Xray container to stop." >&2
@@ -82,7 +83,7 @@ PY
 fi
 # The control agent owns reactivation. Never bypass its forced-stop marker
 # by recreating a container during ordinary profile reconciliation.
-if [[ -f "$STATE/forced-stop" ]];then
+if [[ -f /var/lib/xmesh-node-control/forced-stop ]];then
  echo "Xray forced-stop marker present; awaiting signed control-agent reactivation." >&2
  exit 0
 fi
