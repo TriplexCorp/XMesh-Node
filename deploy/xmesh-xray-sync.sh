@@ -122,7 +122,13 @@ if data.get("nodeId")!=int(sys.argv[3]): raise SystemExit("Wrong node identity")
 cfg=data.get("config")
 if not isinstance(cfg,dict):raise SystemExit("Invalid configuration")
 ibs=cfg.get("inbounds")
-if not isinstance(ibs,list) or len(ibs)!=1:raise SystemExit("Exactly one inbound required")
+if not isinstance(ibs,list) or len(ibs) not in (1,2):raise SystemExit("Invalid managed inbound count")
+if len(ibs)==2:
+ api=ibs[1]
+ if (api.get("tag")!="xmesh_stats_in" or api.get("listen")!="127.0.0.1" or
+     api.get("port")!=10085 or api.get("protocol")!="dokodemo-door" or
+     cfg.get("api",{}).get("tag")!="xmesh_stats_api"):
+  raise SystemExit("Unexpected additional inbound; only loopback StatsService allowed")
 ib=ibs[0]
 if ib.get("listen")!="127.0.0.1" or ib.get("port")!=data.get("port"):raise SystemExit("Unsafe inbound listen/port")
 if not isinstance(data.get("port"),int) or not 1<=data["port"]<=65535:raise SystemExit("Invalid port")
