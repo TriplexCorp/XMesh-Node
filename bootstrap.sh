@@ -174,15 +174,17 @@ cat > /etc/systemd/system/xmesh-xray-sync.timer <<'TIMER'
 [Unit]
 Description=Reconcile assigned Xray configuration from XMesh Nexus
 [Timer]
-OnBootSec=35s
-OnUnitActiveSec=60s
-AccuracySec=10s
+OnBootSec=10s
+OnUnitInactiveSec=10s
+AccuracySec=1s
 Unit=xmesh-xray-sync.service
 [Install]
 WantedBy=timers.target
 TIMER
 systemctl daemon-reload
-systemctl enable --now xmesh-xray-sync.timer
+systemctl enable xmesh-xray-sync.timer
+# Existing installations must reload the timer cadence, not merely enable it.
+systemctl restart xmesh-xray-sync.timer
 echo "Running first Xray configuration sync now..."
 if systemctl start xmesh-xray-sync.service; then
  echo "Xray synchronization completed. Managed container:"
