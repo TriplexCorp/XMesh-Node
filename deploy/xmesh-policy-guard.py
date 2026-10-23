@@ -98,6 +98,20 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
     elif not first_contact:
         raise ValueError("No pinned policy signing identity")
     check_signature(policy, document.get("policySignature"), key)
+    # Never accept an older still-valid signed snapshot after a newer policy
+    # has been committed. Replaying it could restore previously revoked UUIDs.
+    if first_contact:
+        committed = state_dir / "policy-envelope.json"
+        if committed.exists():
+            previous = load_json(committed)
+            old_policy = previous.get("policy", {})
+            old_issued = old_policy.get("issuedAtMs")
+            if type(old_issued) is not int:
+                raise ValueError("Stored policy revision is invalid")
+            if issued < old_issued:
+                raise ValueError("Signed policy rollback rejected")
+            if issued == old_issued and canonical(document) != canonical(previous):
+                raise ValueError("Conflicting signed policy revision")
     digest = policy.get("configSha256")
     if not isinstance(digest, str) or not HEX_SHA.fullmatch(digest):
         raise ValueError("Invalid policy configuration digest")
