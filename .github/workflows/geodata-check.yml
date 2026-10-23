@@ -1,0 +1,27 @@
+name: Node GeoData smoke tests
+on:
+  push:
+    paths:
+      - 'deploy/xmesh-geodata-sync.py'
+      - 'deploy/xmesh-xray-sync.sh'
+      - 'bootstrap.sh'
+      - 'tests/test_geodata_sync.py'
+      - '.github/workflows/geodata-check.yml'
+  pull_request:
+    paths:
+      - 'deploy/xmesh-geodata-sync.py'
+      - 'deploy/xmesh-xray-sync.sh'
+      - 'bootstrap.sh'
+      - 'tests/test_geodata_sync.py'
+  workflow_dispatch:
+jobs:
+  geodata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse shell installers
+        run: bash -n deploy/xmesh-xray-sync.sh bootstrap.sh
+      - name: Compile and test Python GeoData worker
+        run: |
+          python3 -m py_compile deploy/xmesh-geodata-sync.py
+          python3 -m unittest discover -s tests -p test_geodata_sync.py -v
