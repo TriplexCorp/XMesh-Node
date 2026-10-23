@@ -388,7 +388,7 @@ def main():
                 return
             counters, runtime_id, inbound_counters = get_counters()
             if counters is None or inbound_counters is None:
-                raise RuntimeError("Xray StatsService query failed; counters not published")
+                raise ValueError("Xray StatsService query failed; counters not published")
             ledger = load_json(ledger_file)
             ledger = integrate_counters(ledger, counters, runtime_id, int(time.time() * 1000), inbound_counters)
             write_atomic(ledger_file, canonical(ledger))
@@ -440,5 +440,5 @@ if __name__ == "__main__":
     try:
         main()
     except (ValueError, TypeError, KeyError, OSError, subprocess.SubprocessError) as exc:
-        print(f"XMesh offline policy rejected: {exc}", file=sys.stderr)
+        print(f"XMesh policy/user meter: {exc}", file=sys.stderr)
         sys.exit(1)
