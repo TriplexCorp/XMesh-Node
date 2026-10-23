@@ -21,16 +21,23 @@ HASH="$(printf %s "$REQUEST" | openssl dgst -sha256 -r | awk '{print $1}')"
 SIGN_FILE="$(mktemp "$STATE/sign.XXXXXXXX")"
 RESP_FILE="$(mktemp "$STATE/response.XXXXXXXX")"
 CONFIG_FILE="$(mktemp "$STATE/config.XXXXXXXX")"
+POLICY_GUARD=/usr/local/libexec/xmesh-policy-guard.py
+POLICY_ENABLED=false
+if [[ -r "$POLICY_GUARD" && "${XMESH_AUTONOMOUS_POLICY:-1}" == 1 ]];then
+ POLICY_ENABLED=true
+fi
+OFFLINE_POLICY=false
 trap 'rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"' EXIT
 printf 'XMESH1\nPOST\n%s\n%s\n%s\n%s\n%s\n' "$PATH_API" "$XMESH_NODE_ID" "$STAMP" "$NONCE" "$HASH" > "$SIGN_FILE"
 SIG="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$SIGN_FILE" | od -An -tx1 -v | tr -d ' \n')"
-HTTP_STATUS="$(curl -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
+HTTP_STATUS="$(curl --proto '=https' --tlsv1.2 -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
  -H "Content-Type: application/json" -H "X-XMesh-Timestamp: $STAMP" \
  -H "X-XMesh-Nonce: $NONCE" -H "X-XMesh-Signature: $SIG" \
- --data-binary "$REQUEST" -o "$RESP_FILE" -w '%{http_code}')" || {
- echo "Cannot reach XMesh desired-config API; preserving existing Xray configuration." >&2
- exit 1
-}
+ --data-binary "$REQUEST" -o "$RESP_FILE" -w '%{http_code}')" || HTTP_STATUS=000
+if [[ "$HTTP_STATUS" == 000 ]];then
+ echo "Panel unavailable; preserving current Xray and checking cached offline policy." >&2
+ OFFLINE_POLICY=true
+fi
 if [[ "$HTTP_STATUS" == 403 ]];then
  # A signed request was authenticated, but the control plane denied this node.
  # The only supported 403 reason is a disabled node. A disabled node MUST
@@ -63,7 +70,10 @@ PY
   exit 0
  fi
 fi
-if [[ "$HTTP_STATUS" != 200 ]]; then
+if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true && "$HTTP_STATUS" != 403 ]];then
+ OFFLINE_POLICY=true
+fi
+if [[ "$HTTP_STATUS" != 200 && "$OFFLINE_POLICY" == false ]]; then
  # Never print arbitrary API responses: they could contain confidential data.
  # Only display a bounded, known server-side error message.
  python3 - "$RESP_FILE" "$HTTP_STATUS" <<'PY'
@@ -87,6 +97,21 @@ if [[ -f /var/lib/xmesh-node-control/forced-stop ]];then
  echo "Xray forced-stop marker present; awaiting signed control-agent reactivation." >&2
  exit 0
 fi
+if [[ "$POLICY_ENABLED" == true ]];then
+ if [[ "$OFFLINE_POLICY" == true ]];then
+  python3 "$POLICY_GUARD" offline --state "$STATE" --node-id "$XMESH_NODE_ID" --output "$CONFIG_FILE" || {
+   echo "No valid cached offline policy; leaving existing Xray intact." >&2;exit 1
+  }
+ else
+  python3 "$POLICY_GUARD" prepare --state "$STATE" --node-id "$XMESH_NODE_ID" \
+   --response "$RESP_FILE" --output "$CONFIG_FILE" || {
+   echo "Invalid signed desired policy; refusing to replace active Xray." >&2;exit 1
+  }
+ fi
+else
+ if [[ "$OFFLINE_POLICY" == true ]];then
+  echo "Panel offline and no autonomous policy guard installed; preserving current Xray." >&2;exit 1
+ fi
 python3 - "$RESP_FILE" "$CONFIG_FILE" "$XMESH_NODE_ID" <<'PY'
 import json,sys,ipaddress
 data=json.load(open(sys.argv[1]))
@@ -103,6 +128,7 @@ for entry in cfg.get("inbounds",[]):
  if entry.get("listen")!="127.0.0.1":raise SystemExit("Public inbound denied")
 with open(sys.argv[2],"w") as f:json.dump(cfg,f,indent=2)
 PY
+fi
 # A 0600 configuration may contain Reality private keys. Keep it private on host.
 # Run Xray as root inside the confined container (all Linux capabilities dropped)
 # so the read-only bind mount remains accessible without chmod 0644.
@@ -123,6 +149,9 @@ NEW_HASH="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
 ACTIVE="$STATE/config.json"
 OLD_HASH="$(test -f "$ACTIVE" && sha256sum "$ACTIVE" | cut -d' ' -f1 || true)"
 if [[ "$NEW_HASH" == "$OLD_HASH" ]] && docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null | grep -qx true; then
+ if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
+  python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
+ fi
  echo "Xray configuration unchanged, container healthy."
  exit 0
 fi
@@ -195,6 +224,9 @@ PY
    (cd "$ROUTER_DIR" && docker compose restart xmesh-node)
    rm -f "$ROUTER_FLAG"
  fi
+fi
+if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
+ python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
 fi
 echo "Xray deployed on 127.0.0.1:$PORT; configured safe default router when applicable."
 
