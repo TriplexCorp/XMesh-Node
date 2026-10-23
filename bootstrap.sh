@@ -178,6 +178,16 @@ WantedBy=timers.target
 TIMER
 systemctl daemon-reload
 systemctl enable --now xmesh-xray-sync.timer
-echo "Xray desired-state sync installed. Check: journalctl -u xmesh-xray-sync.service -n 30"
+echo "Running first Xray configuration sync now..."
+if systemctl start xmesh-xray-sync.service; then
+ echo "Xray synchronization completed. Managed container:"
+ docker ps --filter name=xmesh-managed-xray --format '{{.Names}}: {{.Status}}'
+else
+ echo "ERROR: Xray profile was NOT applied. XMesh router remains installed." >&2
+ journalctl -u xmesh-xray-sync.service -n 35 --no-pager >&2 || true
+ echo "Fix the error above, then run: systemctl start xmesh-xray-sync.service" >&2
+ exit 1
+fi
+echo "Xray desired-state sync installed and first run completed."
 
 echo "Node enrolled. Router TCP listener configured for :$NODE_PORT (verify docker compose ps and ss -ltn)."
