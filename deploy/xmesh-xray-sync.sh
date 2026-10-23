@@ -70,7 +70,10 @@ PY
   exit 0
  fi
 fi
-if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true && "$HTTP_STATUS" != 403 ]];then
+# An unrelated 403 (e.g. reverse proxy/WAF) must not disable local
+# quota/expiry enforcement. Only the recognized disabled-node response above
+# can authoritatively stop the entire Xray instance.
+if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true ]];then
  OFFLINE_POLICY=true
 fi
 if [[ "$HTTP_STATUS" != 200 && "$OFFLINE_POLICY" == false ]]; then
