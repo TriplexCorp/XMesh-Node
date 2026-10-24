@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Read-only attestation of an actually running XMesh-managed Xray config.
+"""Attest a running Xray instance against its signed desired policy.
 
-Policy envelope is verified by xmesh-policy-guard before commit; only read it,
-never accept unsigned remote revision claims. No secrets leave this process.
+The local autonomous policy guard may REMOVE clients from the signed base
+configuration. It must never add clients or modify other configuration fields.
+Only the signed base revision is reported to the control plane.
 """
 import hashlib
+import importlib.util
 import json
 import pathlib
 import re
@@ -14,16 +16,74 @@ import sys
 STATE = pathlib.Path("/var/lib/xmesh-xray-sync")
 ACTIVE = STATE / "config.json"
 ENVELOPE = STATE / "policy-envelope.json"
+GUARD = pathlib.Path("/usr/local/libexec/xmesh-policy-guard.py")
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False).encode("utf-8")
+
+
+def is_restricted_copy(base, active):
+    if not isinstance(base, dict) or not isinstance(active, dict):
+        return False
+    base_rest = dict(base)
+    active_rest = dict(active)
+    original_inbounds = base_rest.pop("inbounds", None)
+    running_inbounds = active_rest.pop("inbounds", None)
+    if canonical(base_rest) != canonical(active_rest):
+        return False
+    if not isinstance(original_inbounds, list) or not isinstance(running_inbounds, list):
+        return False
+    if len(original_inbounds) != len(running_inbounds):
+        return False
+    for original, running in zip(original_inbounds, running_inbounds):
+        if not isinstance(original, dict) or not isinstance(running, dict):
+            return False
+        original = dict(original)
+        running = dict(running)
+        old_settings = original.pop("settings", None)
+        new_settings = running.pop("settings", None)
+        if canonical(original) != canonical(running):
+            return False
+        if not isinstance(old_settings, dict) or not isinstance(new_settings, dict):
+            return False
+        old_settings = dict(old_settings)
+        new_settings = dict(new_settings)
+        old_clients = old_settings.pop("clients", None)
+        new_clients = new_settings.pop("clients", None)
+        if canonical(old_settings) != canonical(new_settings):
+            return False
+        if old_clients is None and new_clients is None:
+            continue
+        if not isinstance(old_clients, list) or not isinstance(new_clients, list):
+            return False
+        remaining = [canonical(client) for client in old_clients]
+        for client in new_clients:
+            encoded = canonical(client)
+            if encoded not in remaining:
+                return False
+            remaining.remove(encoded)
+    return True
+
 
 def main():
     try:
-        envelope = json.loads(ENVELOPE.read_text())
+        spec = importlib.util.spec_from_file_location("xmesh_policy_guard", GUARD)
+        if spec is None or spec.loader is None:
+            return 1
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        envelope = json.loads(ENVELOPE.read_text(encoding="utf-8"))
+        node_id = envelope["policy"]["nodeId"]
+        guard.verify_envelope(envelope, STATE, node_id, first_contact=False)
         revision = envelope["policy"]["configSha256"]
         if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
             return 1
-        config = json.loads(ACTIVE.read_text())
-        canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-        if hashlib.sha256(canonical).hexdigest() != revision:
+        if hashlib.sha256(canonical(envelope["config"])).hexdigest() != revision:
+            return 1
+        running = json.loads(ACTIVE.read_text(encoding="utf-8"))
+        if not is_restricted_copy(envelope["config"], running):
             return 1
         proc = subprocess.run(
             ["docker", "inspect", "xmesh-managed-xray"],
@@ -32,18 +92,19 @@ def main():
         item = json.loads(proc.stdout)[0]
         if item.get("State", {}).get("Running") is not True:
             return 1
-        mounts = item.get("Mounts", [])
         if not any(
             mount.get("Destination") == "/etc/xray/config.json"
             and pathlib.Path(mount.get("Source", "")).resolve() == ACTIVE.resolve()
             and mount.get("RW") is False
-            for mount in mounts
+            for mount in item.get("Mounts", [])
         ):
             return 1
         print(revision)
         return 0
-    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
+    except (OSError, ValueError, TypeError, KeyError, IndexError,
+            AttributeError, subprocess.SubprocessError):
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())
