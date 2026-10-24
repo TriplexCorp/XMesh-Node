@@ -9,6 +9,7 @@ import (
  "syscall"
  "context"
  "time"
+ "runtime"
 )
 
 func main(){
@@ -21,6 +22,8 @@ func main(){
  defer listener.Close()
  ctx,cancel:=signal.NotifyContext(context.Background(),syscall.SIGTERM,syscall.SIGINT);defer cancel()
  if c.PanelURL!="" {go heartbeatLoop(ctx,c)}
+ // Bounded, low-frequency diagnostics make Go heap and goroutine growth visible.
+ go runtimeHealthLoop(ctx)
  if c.ListenUDP!=""{go func(){if e:=serveUDP(ctx,c);e!=nil&&ctx.Err()==nil{log.Printf("UDP listener failed: %v",e);cancel()}}()}
  go func(){<-ctx.Done();listener.Close()}()
  log.Printf("XMesh Node listening TCP %s / UDP %s",c.ListenTCP,c.ListenUDP)
@@ -45,3 +48,23 @@ func handleTCP(client net.Conn,c Config){
  pipeTCP(client,upstream,time.Duration(c.IdleTimeoutSeconds)*time.Second)
 }
 var _ = os.ErrClosed
+
+ 
+// Report Go router runtime resource usage without exposing node keys,
+// per-user identifiers, or configuration. This does not measure Xray-core,
+// which is an independent Go process.
+func runtimeHealthLoop(ctx context.Context) {
+ ticker:=time.NewTicker(5*time.Minute)
+ defer ticker.Stop()
+ for {
+  select {
+  case <-ctx.Done():
+   return
+  case <-ticker.C:
+   var m runtime.MemStats
+   runtime.ReadMemStats(&m)
+   log.Printf("Go router runtime: heap_alloc_bytes=%d heap_inuse_bytes=%d heap_sys_bytes=%d gc_cycles=%d goroutines=%d",
+    m.HeapAlloc,m.HeapInuse,m.HeapSys,m.NumGC,runtime.NumGoroutine())
+  }
+ }
+}
