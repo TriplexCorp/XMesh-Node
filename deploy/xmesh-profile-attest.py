@@ -67,43 +67,66 @@ def is_restricted_copy(base, active):
     return True
 
 
-def main():
+def check():
+    if not GUARD.is_file() or not ENVELOPE.is_file():
+        return None, "policy_missing"
+    if not ACTIVE.is_file():
+        return None, "active_config_missing"
     try:
         spec = importlib.util.spec_from_file_location("xmesh_policy_guard", GUARD)
         if spec is None or spec.loader is None:
-            return 1
+            return None, "guard_unavailable"
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
         envelope = json.loads(ENVELOPE.read_text(encoding="utf-8"))
         node_id = envelope["policy"]["nodeId"]
         guard.verify_envelope(envelope, STATE, node_id, first_contact=False)
-        revision = envelope["policy"]["configSha256"]
-        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
-            return 1
-        if hashlib.sha256(canonical(envelope["config"])).hexdigest() != revision:
-            return 1
+    except (OSError, ValueError, TypeError, KeyError, AttributeError,
+            subprocess.SubprocessError):
+        return None, "policy_invalid"
+    revision = envelope["policy"].get("configSha256")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
+        return None, "revision_invalid"
+    if hashlib.sha256(canonical(envelope["config"])).hexdigest() != revision:
+        return None, "policy_hash_mismatch"
+    try:
         running = json.loads(ACTIVE.read_text(encoding="utf-8"))
-        if not is_restricted_copy(envelope["config"], running):
-            return 1
+    except (OSError, ValueError):
+        return None, "active_config_invalid"
+    if not is_restricted_copy(envelope["config"], running):
+        return None, "active_config_mismatch"
+    try:
         proc = subprocess.run(
             ["docker", "inspect", "xmesh-managed-xray"],
             check=True, capture_output=True, text=True, timeout=5,
         )
         item = json.loads(proc.stdout)[0]
         if item.get("State", {}).get("Running") is not True:
-            return 1
+            return None, "xray_stopped"
+        mounts = item.get("Mounts", [])
         if not any(
             mount.get("Destination") == "/etc/xray/config.json"
             and pathlib.Path(mount.get("Source", "")).resolve() == ACTIVE.resolve()
             and mount.get("RW") is False
-            for mount in item.get("Mounts", [])
+            for mount in mounts
         ):
-            return 1
-        print(revision)
-        return 0
+            return None, "mount_mismatch"
     except (OSError, ValueError, TypeError, KeyError, IndexError,
-            AttributeError, subprocess.SubprocessError):
+            subprocess.SubprocessError):
+        return None, "container_unavailable"
+    return revision, "verified"
+
+
+def main():
+    revision, status = check()
+    if "--json" in sys.argv[1:]:
+        print(json.dumps({"revision": revision, "status": status}, separators=(",", ":")))
+        return 0
+    if revision is None:
+        print("XMesh profile attestation: " + status, file=sys.stderr)
         return 1
+    print(revision)
+    return 0
 
 
 if __name__ == "__main__":
