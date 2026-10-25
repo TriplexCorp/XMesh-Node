@@ -104,7 +104,7 @@ def account_uuid(entry, credential_key, identities):
         return None
     email = entry.get("email")
     if isinstance(email, str) and email.startswith("xmesh-u"):
-        match = re.fullmatch(r"xmesh-u([1-9][0-9]*)--[^\\s]+", email)
+        match = re.fullmatch(r"xmesh-u([1-9][0-9]*)--[^\s]+", email)
         if match is None:
             return None
         user = identities.get(int(match.group(1)))
