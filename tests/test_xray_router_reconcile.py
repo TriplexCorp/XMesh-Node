@@ -131,6 +131,23 @@ class RouterReconcileTests(unittest.TestCase):
         self.assertEqual(action, "changed")
         self.assertEqual(result["routes"], routes)
 
+    def test_return_to_tcp_disables_previous_managed_udp_listener(self):
+        action, result = self.check_router(
+            old="127.0.0.1:5000", network="tcp", udp_marker=5000,
+            udp_listener=":443", udp_backend="127.0.0.1:5000")
+        self.assertEqual(action, "changed")
+        self.assertEqual(result["listen_udp"], "")
+        self.assertEqual(result["udp_backend"], "")
+        self.assertEqual(result["default_tcp"], "127.0.0.1:5000")
+
+    def test_return_to_tcp_preserves_custom_udp_listener(self):
+        action, result = self.check_router(
+            old="127.0.0.1:5000", network="tcp", udp_marker=5000,
+            udp_listener=":443", udp_backend="127.0.0.1:9444")
+        self.assertEqual(action, "aligned")
+        self.assertEqual(result["listen_udp"], ":443")
+        self.assertEqual(result["udp_backend"], "127.0.0.1:9444")
+
     def test_shell_integration_contract(self):
         self.assertIn("if ! reconcile_router_default;then", SOURCE)
         self.assertIn("docker compose up -d --no-deps --force-recreate xmesh-node", SOURCE)
