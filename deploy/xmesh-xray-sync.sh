@@ -265,6 +265,13 @@ else:
     elif old != target:
         router["default_tcp"] = target
         action = "changed"
+    # If we previously enabled UDP for Hysteria, do not leave that public
+    # listener pointing to a stale service after switching back to TCP.
+    existing_udp = router.get("udp_backend", "")
+    if router.get("listen_udp", "") == ":443" and existing_udp and existing_udp == marked(udp_marker):
+        router["listen_udp"] = ""
+        router["udp_backend"] = ""
+        action = "changed" if action != "unmanaged" else action
 if action == "changed":
     mode = os.stat(router_path).st_mode & 0o777
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(router_path), prefix=".xmesh-router.")
