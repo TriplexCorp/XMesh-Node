@@ -160,6 +160,12 @@ GEO_BIND=()
 if compgen -G "$STATE/assets/*.dat" >/dev/null;then
  GEO_BIND=(-e XRAY_LOCATION_ASSET=/usr/local/share/xray -v "$STATE/assets:/usr/local/share/xray:ro")
 fi
+# Let's Encrypt live/ symlinks resolve into archive/. Mount the whole tree
+# read-only for both validation and the managed Xray container.
+TLS_BIND=()
+if [[ -d /etc/letsencrypt/live && -d /etc/letsencrypt/archive ]];then
+ TLS_BIND=(-v /etc/letsencrypt:/etc/letsencrypt:ro)
+fi
 # A 0600 configuration may contain Reality private keys. Keep it private on host.
 # Run Xray as root inside the confined container (all Linux capabilities dropped)
 # so the read-only bind mount remains accessible without chmod 0644.
@@ -185,7 +191,7 @@ else
  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
 fi
 if ! docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
- "${GEO_BIND[@]}" "$IMAGE" run -test -config /etc/xray/config.json;then
+ "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -test -config /etc/xray/config.json;then
  echo "GeoData/config validation failed; keeping previous Xray and files." >&2
  exit 1
 fi
@@ -286,7 +292,13 @@ PY
  printf '%s\n' "$PORT" > "$STATE/router-managed-port"
  chmod 600 "$STATE/router-managed-port"
 }
-if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" ]] && docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null | grep -qx true; then
+TLS_MOUNT_OK=true
+if [[ ${#TLS_BIND[@]} -gt 0 ]];then
+ if [[ "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/letsencrypt"}}{{.Source}}{{end}}{{end}}' xmesh-managed-xray 2>/dev/null || true)" != /etc/letsencrypt ]];then
+  TLS_MOUNT_OK=false
+ fi
+fi
+if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" && "$TLS_MOUNT_OK" == true ]] && docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null | grep -qx true; then
  if ! reconcile_router_default;then
   echo "Xray is healthy but TCP router remains out of sync." >&2;exit 1
  fi
@@ -316,7 +328,7 @@ if ! docker run -d --name xmesh-managed-xray --restart unless-stopped \
   docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
    --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
+   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
  fi
  exit 1
 fi
@@ -330,7 +342,7 @@ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];
   cp "$PREVIOUS" "$ACTIVE"
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
    --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
+   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
  fi
  exit 1
 fi
@@ -342,7 +354,7 @@ if ! reconcile_router_default;then
   docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
    --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
+   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
  fi
  exit 1
 fi
