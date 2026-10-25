@@ -319,7 +319,7 @@ install -m 0600 "$CONFIG_FILE" "$ACTIVE"
 docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
 if ! docker run -d --name xmesh-managed-xray --restart unless-stopped \
  --network host --user 0:0 --read-only --security-opt no-new-privileges \
- --cap-drop ALL -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" \
+ --cap-drop ALL -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" \
  "$IMAGE" run -config /etc/xray/config.json;then
  echo "Xray start failed; attempting rollback." >&2
  if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE";fi
