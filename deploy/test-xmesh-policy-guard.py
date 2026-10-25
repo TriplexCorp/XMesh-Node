@@ -78,6 +78,68 @@ class SignedPolicyTests(unittest.TestCase):
     def num_clients(self):
         return len(json.loads(self.output.read_text())["inbounds"][0]["settings"]["clients"])
 
+    def configure_protocol(self, protocol, *, method=None):
+        credential = {"vless": "id", "vmess": "id", "trojan": "password",
+                      "shadowsocks": "password", "hysteria": "auth",
+                      "masque": "pass"}[protocol]
+        value = "TEST-SS2022-PSK" if method else UID
+        entry = {credential: value, "email": "xmesh-u1--hysteria-main", "level": 0}
+        settings = {"version": 2, "users": [entry]}
+        if method is not None:
+            settings["method"] = method
+        if protocol == "vless":
+            settings = {"decryption": "none", "clients": [entry]}
+        self.config["inbounds"][0]["protocol"] = protocol
+        self.config["inbounds"][0]["settings"] = settings
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+
+    def test_signed_multi_protocol_accounts_and_offline_cutoff(self):
+        for protocol in ("vless", "vmess", "trojan", "shadowsocks", "hysteria", "masque"):
+            with self.subTest(protocol=protocol):
+                self.configure_protocol(protocol)
+                self.run_guard("prepare")
+                self.run_guard("commit")
+                field = "clients" if protocol == "vless" else "users"
+                effective = json.loads(self.output.read_text())["inbounds"][0]
+                self.assertEqual(len(effective["settings"][field]), 1)
+                self.stats.write_text('{"1":150}')
+                self.run_guard("offline", NOW + 10000)
+                effective = json.loads(self.output.read_text())["inbounds"][0]
+                self.assertEqual(effective["settings"][field], [])
+                # Reset isolated per-protocol state so each variant is tested
+                # with its own first-contact signed policy.
+                for child in self.state.iterdir():
+                    if child.is_file():
+                        child.unlink()
+                self.stats.write_text('{"1":0}')
+
+    def test_signed_hysteria_rejects_extra_unlisted_user(self):
+        self.configure_protocol("hysteria")
+        self.config["inbounds"][0]["settings"]["users"].append({
+            "auth": "550e8400-e29b-41d4-a716-446655440099",
+            "email": "xmesh-u99--hysteria-main"
+        })
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.assertIn("proxy accounts differ", self.run_guard("prepare", success=False).stderr)
+
+    def test_hysteria_credentials_cannot_swap_signed_user_id(self):
+        self.configure_protocol("hysteria")
+        self.config["inbounds"][0]["settings"]["users"][0]["auth"] = "550e8400-e29b-41d4-a716-446655440099"
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.assertIn("proxy accounts differ", self.run_guard("prepare", success=False).stderr)
+
+    def test_shadowsocks_2022_uses_signed_user_mapping(self):
+        self.configure_protocol("shadowsocks", method="2022-blake3-aes-128-gcm")
+        self.run_guard("prepare")
+        self.run_guard("commit")
+        self.assertEqual(len(json.loads(self.output.read_text())["inbounds"][0]["settings"]["users"]), 1)
+        self.stats.write_text('{"1":150}')
+        self.run_guard("offline", NOW + 10000)
+        self.assertEqual(json.loads(self.output.read_text())["inbounds"][0]["settings"]["users"], [])
+
     def test_disconnected_limit_and_sticky_denial(self):
         self.run_guard("prepare")
         self.run_guard("commit")
