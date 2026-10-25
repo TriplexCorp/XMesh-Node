@@ -271,7 +271,7 @@ if action == "changed":
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(router, f, indent=2)
-            f.write("\\n")
+            f.write("\n")
         os.chmod(tmp, mode)
         os.replace(tmp, router_path)
     finally:
