@@ -200,6 +200,7 @@ ACTIVE="$STATE/config.json"
 PREVIOUS="$STATE/previous.json"
 OLD_HASH="$(test -f "$ACTIVE" && sha256sum "$ACTIVE" | cut -d' ' -f1 || true)"
 PORT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inbounds"][0]["port"])' "$CONFIG_FILE")"
+INBOUND_NETWORK="$(python3 -c 'import json,sys;i=json.load(open(sys.argv[1]))["inbounds"][0];print("udp" if i.get("protocol")=="hysteria" or i.get("streamSettings",{}).get("network") in ("hysteria","quic") else "tcp")' "$CONFIG_FILE")"
 
 # Reconcile even when Xray's JSON is unchanged: the router may have drifted.
 # Discover the *mounted* path, not a stale copy in /root/XMesh-Node.
@@ -217,49 +218,65 @@ reconcile_router_default() {
  backup="$(mktemp "$STATE/router-backup.XXXXXXXX")"
  cp -p "$router" "$backup"
  # BEGIN ROUTER_PORT_RECONCILER
- if ! python3 - "$router" "$PORT" "$PREVIOUS" "$STATE/router-managed-port" "$flag" <<'PY'
+ if ! python3 - "$router" "$PORT" "$INBOUND_NETWORK" "$PREVIOUS" "$STATE/router-managed-port" "$STATE/router-managed-udp-port" "$flag" <<'PY'
 import json, os, sys, tempfile
-router_path, port, previous_path, marker_path, flag_path = sys.argv[1:]
-port = int(port)
+router_path, port_str, network, previous_path, tcp_marker, udp_marker, flag_path = sys.argv[1:]
+port = int(port_str)
 target = f"127.0.0.1:{port}"
 with open(router_path, encoding="utf-8") as f:
     router = json.load(f)
-old = router.get("default_tcp")
 routes = router.get("routes", [])
-previous = None
+def marked(path):
+    try:
+        with open(path, encoding="ascii") as f:
+            n = int(f.read().strip())
+        return f"127.0.0.1:{n}" if 1 <= n <= 65535 else None
+    except (OSError, ValueError):
+        return None
+previous_tcp = previous_udp = None
 try:
     with open(previous_path, encoding="utf-8") as f:
-        cfg = json.load(f)
-    previous = f"127.0.0.1:{int(cfg['inbounds'][0]['port'])}"
+        inbound = json.load(f)["inbounds"][0]
+    old_port = int(inbound["port"])
+    old_network = "udp" if inbound.get("protocol") == "hysteria" or inbound.get("streamSettings", {}).get("network") in ("hysteria", "quic") else "tcp"
+    if old_network == "udp":
+        previous_udp = f"127.0.0.1:{old_port}"
+    else:
+        previous_tcp = f"127.0.0.1:{old_port}"
 except (OSError, ValueError, TypeError, KeyError, IndexError):
     pass
-recorded = None
-try:
-    with open(marker_path, encoding="ascii") as f:
-        recorded_port = int(f.read().strip())
-    if 1 <= recorded_port <= 65535:
-        recorded = f"127.0.0.1:{recorded_port}"
-except (OSError, ValueError):
-    pass
-if not isinstance(routes, list) or routes or (old != target and old not in
-        (None, "127.0.0.1:9443", previous, recorded)):
-    action = "unmanaged"
-elif old == target:
-    action = "aligned"
+action = "aligned"
+if network == "udp":
+    old_listener = router.get("listen_udp", "")
+    old_backend = router.get("udp_backend", "")
+    owned = (not old_listener and not old_backend) or (
+        old_listener == ":443" and old_backend in (target, previous_udp, marked(udp_marker)))
+    if not owned:
+        action = "unmanaged"
+    elif old_listener != ":443" or old_backend != target:
+        router["listen_udp"] = ":443"
+        router["udp_backend"] = target
+        action = "changed"
 else:
-    router["default_tcp"] = target
+    old = router.get("default_tcp")
+    if not isinstance(routes, list) or routes or (
+        old != target and old not in (None, "127.0.0.1:9443", previous_tcp, marked(tcp_marker))):
+        action = "unmanaged"
+    elif old != target:
+        router["default_tcp"] = target
+        action = "changed"
+if action == "changed":
     mode = os.stat(router_path).st_mode & 0o777
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(router_path), prefix=".xmesh-router.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(router, f, indent=2)
-            f.write("\n")
+            f.write("\\n")
         os.chmod(tmp, mode)
         os.replace(tmp, router_path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-    action = "changed"
 with open(flag_path, "w", encoding="ascii") as f:
     f.write(action)
 PY
@@ -273,7 +290,7 @@ PY
  rm -f "$flag"
  if [[ "$action" == unmanaged ]];then
   rm -f "$backup"
-  echo "Custom SNI routes or unowned router default; refusing port switch to $PORT." >&2
+  echo "Custom or unowned $INBOUND_NETWORK router forwarding; refusing port switch to $PORT." >&2
   return 1
  fi
  if [[ "$action" == changed ]];then
@@ -286,11 +303,16 @@ PY
    echo "Router recreation failed; restored previous route." >&2
    return 1
   fi
-  echo "Router remounted with default_tcp=127.0.0.1:$PORT."
+  echo "Router remounted for $INBOUND_NETWORK -> 127.0.0.1:$PORT."
  fi
  rm -f "$backup"
- printf '%s\n' "$PORT" > "$STATE/router-managed-port"
- chmod 600 "$STATE/router-managed-port"
+ if [[ "$INBOUND_NETWORK" == udp ]];then
+  printf '%s\n' "$PORT" > "$STATE/router-managed-udp-port"
+  chmod 600 "$STATE/router-managed-udp-port"
+ else
+  printf '%s\n' "$PORT" > "$STATE/router-managed-port"
+  chmod 600 "$STATE/router-managed-port"
+ fi
 }
 TLS_MOUNT_OK=true
 if [[ ${#TLS_BIND[@]} -gt 0 ]];then
@@ -300,7 +322,7 @@ if [[ ${#TLS_BIND[@]} -gt 0 ]];then
 fi
 if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" && "$TLS_MOUNT_OK" == true ]] && docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null | grep -qx true; then
  if ! reconcile_router_default;then
-  echo "Xray is healthy but TCP router remains out of sync." >&2;exit 1
+  echo "Xray is healthy but $INBOUND_NETWORK router remains out of sync." >&2;exit 1
  fi
  if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
   python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
@@ -310,7 +332,7 @@ if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" && "$TLS_MOUNT_OK"
  exit 0
 fi
 # Never interrupt unrelated processes on the requested local port.
-if ss -ltnH | awk '{print $4}' | grep -Eq "(^|:)$PORT$" &&
+if ss -l"$([[ "$INBOUND_NETWORK" == udp ]] && printf u || printf t)"nH | awk '{print $4}' | grep -Eq "(^|:)$PORT$" &&
    ! docker inspect xmesh-managed-xray >/dev/null 2>&1; then
  echo "Port $PORT is already occupied; refusing deployment." >&2; exit 1
 fi
@@ -348,7 +370,7 @@ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];
 fi
 # The public router must follow the validated local Xray listener.
 if ! reconcile_router_default;then
- echo "CRITICAL: TCP router was not reconciled; rolling Xray back." >&2
+ echo "CRITICAL: $INBOUND_NETWORK router was not reconciled; rolling Xray back." >&2
  if [[ -f "$PREVIOUS" ]];then
   cp "$PREVIOUS" "$ACTIVE"
   docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
@@ -362,4 +384,4 @@ if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
  python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
 fi
 if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
-echo "Xray deployed on 127.0.0.1:$PORT; TCP router reconciled."
+echo "Xray deployed on 127.0.0.1:$PORT ($INBOUND_NETWORK); router reconciled."
