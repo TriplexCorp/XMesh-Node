@@ -76,6 +76,59 @@ def check_signature(policy, signature, pubkey):
             raise ValueError("Policy signature verification failed")
 
 
+def configured_accounts(inbound):
+    """Map signed Xray runtime entries to panel UUIDs; fail closed on unknown users.
+
+    Entries with an xmesh-u<ID>--<tag> email identify the panel user even when
+    the transport credential is not a UUID (e.g. Shadowsocks 2022). For
+    VLESS's older email-less clients, the UUID itself remains authoritative.
+    """
+    protocol = inbound.get("protocol")
+    if protocol not in ("vless", "vmess", "trojan", "shadowsocks", "hysteria", "masque"):
+        raise ValueError("Unsupported signed proxy protocol")
+    field = "clients" if protocol == "vless" else "users"
+    settings = inbound.get("settings")
+    if not isinstance(settings, dict):
+        raise ValueError("Invalid signed proxy settings")
+    entries = settings.get(field)
+    if not isinstance(entries, list):
+        raise ValueError("Invalid signed proxy accounts")
+    key = {"vless": "id", "vmess": "id", "trojan": "password",
+           "shadowsocks": "password", "hysteria": "auth",
+           "masque": "pass"}[protocol]
+    return entries, key
+
+
+def account_uuid(entry, credential_key, identities):
+    if not isinstance(entry, dict):
+        return None
+    email = entry.get("email")
+    if isinstance(email, str) and email.startswith("xmesh-u"):
+        match = re.fullmatch(r"xmesh-u([1-9][0-9]*)--[^\\s]+", email)
+        if match is None:
+            return None
+        user = identities.get(int(match.group(1)))
+        if user is None:
+            return None
+        credential = entry.get(credential_key)
+        if not isinstance(credential, str) or not credential:
+            return None
+        # These five protocols use the user's Xray UUID as the credential.
+        # Shadowsocks 2022 has an independent per-user PSK.
+        if credential_key != "password" or "ss2022" not in identities.get("_transport", ""):
+            if identities.get("_protocol") != "shadowsocks" and credential != user:
+                return None
+            if identities.get("_protocol") == "shadowsocks" and identities.get("_method", "").startswith("2022-"):
+                pass
+            elif credential != user:
+                return None
+        return user
+    credential = entry.get(credential_key)
+    if identities.get("_protocol") == "shadowsocks" and identities.get("_method", "").startswith("2022-"):
+        return None
+    return credential if isinstance(credential, str) else None
+
+
 def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms=None):
     if not isinstance(document, dict):
         raise ValueError("Policy envelope is not an object")
@@ -160,9 +213,15 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
         raise ValueError("Untrusted Xray listener/port")
     if inbounds[0]["port"] != document.get("port"):
         raise ValueError("Policy port and Xray listener disagree")
-    clients = inbounds[0].get("settings", {}).get("clients", [])
-    if not isinstance(clients, list) or {c.get("id") for c in clients} != seen_uuid:
-        raise ValueError("Signed policy and VLESS clients differ")
+    inbound = inbounds[0]
+    accounts, credential_key = configured_accounts(inbound)
+    identities = {u["userId"]: u["xrayId"] for u in users}
+    identities["_protocol"] = inbound["protocol"]
+    identities["_method"] = inbound["settings"].get("method", "")
+    resolved = [account_uuid(account, credential_key, identities) for account in accounts]
+    if (len(resolved) != len(seen_uuid) or None in resolved
+            or len(set(resolved)) != len(resolved) or set(resolved) != seen_uuid):
+        raise ValueError("Signed policy and proxy accounts differ")
     if not pinned.exists():
         # TOFU is permitted only for a fresh, TLS-validated signed response.
         write_atomic(pinned, (key + "\n").encode("ascii"))
@@ -356,8 +415,13 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
             allowed[user["xrayId"]] = user["userId"]
     effective = json.loads(json.dumps(config))
     inbound = effective["inbounds"][0]
-    clients = inbound.get("settings", {}).get("clients", [])
-    inbound["settings"]["clients"] = [c for c in clients if c.get("id") in allowed]
+    accounts, credential_key = configured_accounts(inbound)
+    identities = {u["userId"]: u["xrayId"] for u in policy["users"]}
+    identities["_protocol"] = inbound["protocol"]
+    identities["_method"] = inbound["settings"].get("method", "")
+    field = "clients" if inbound["protocol"] == "vless" else "users"
+    inbound["settings"][field] = [entry for entry in accounts
+        if account_uuid(entry, credential_key, identities) in allowed]
     return effective, ledger, denied
 
 
@@ -432,7 +496,7 @@ def main():
     if args.action == "prepare":
         write_atomic(state / "policy-envelope.json.pending", canonical(doc))
     print("XMesh policy: " + ("offline" if args.action == "offline" else "connected")
-          + f", authorized={len(effective['inbounds'][0]['settings']['clients'])}, blocked={len(denied)}",
+          + f", authorized={len(configured_accounts(effective['inbounds'][0])[0])}, blocked={len(denied)}",
           file=sys.stderr)
 
 
