@@ -2,6 +2,23 @@
 
 Standalone edge node for **XMesh Nexus**. Initial implementation: a TLS ClientHello TCP passthrough multiplexer on port 443, with a separately configured UDP/443 forwarder.
 
+## Подписанная офлайн-политика и Hysteria 2
+
+`xmesh-policy-guard.py` проверяет подписанный профиль Xray и сопоставляет
+`policy.users` с фактически созданными пользователями протокола:
+VLESS использует `settings.clients[].id`, Hysteria2 — `settings.users[].auth`,
+другие поддерживаемые протоколы используют свой тип учётных данных.
+Сопоставление по имени `xmesh-u<ID>--<tag>` связывает учётную запись
+с ID пользователя панели; для паролей SS2022 используется отдельный PSK,
+а не UUID. Проверка не разрешает дополнительные учётные записи и не
+отключает Ed25519, проверку digest или локальные ограничения трафика.
+Ранее VLESS-only проверка выдавала `Signed policy and VLESS clients differ`,
+поэтому Hysteria не доходила до проверки Xray и маршрутизатора.
+
+Для диагностики используйте `journalctl -u xmesh-xray-sync.service -n 70 --no-pager`.
+Пока подпись, состав пользователей и конфигурация не согласованы, предыдущая
+рабочая конфигурация Xray намеренно сохраняется.
+
 ## Hysteria 2: автоматическое UDP-проксирование
 
 При синхронизации профиля Xray с одним inbound протокола `hysteria` агент определяет UDP-транспорт и согласует `listen_udp: ":443"` и `udp_backend: "127.0.0.1:<xrayLocalPort>"` в установленном `config.json` маршрутизатора. Изменение применяется с пересозданием `xmesh-node` (файл подключён Docker bind-mount). При переходе обратно на TCP ранее управляемый UDP-listener отключается; самостоятельно настроенный UDP-backend не перезаписывается. TCP `default_tcp` при UDP-профиле не перенаправляется автоматически.
