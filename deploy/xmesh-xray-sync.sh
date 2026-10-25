@@ -75,6 +75,7 @@ fi
 # quota/expiry enforcement. Only the recognized disabled-node response above
 # can authoritatively stop the entire Xray instance.
 if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true ]];then
+ echo "XMesh desired-config returned HTTP $HTTP_STATUS; using signed offline policy; panel changes NOT applied." >&2
  OFFLINE_POLICY=true
 fi
 if [[ "$HTTP_STATUS" != 200 && "$OFFLINE_POLICY" == false ]]; then
@@ -190,22 +191,117 @@ if ! docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-
 fi
 NEW_HASH="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
 ACTIVE="$STATE/config.json"
+PREVIOUS="$STATE/previous.json"
 OLD_HASH="$(test -f "$ACTIVE" && sha256sum "$ACTIVE" | cut -d' ' -f1 || true)"
+PORT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inbounds"][0]["port"])' "$CONFIG_FILE")"
+
+# Reconcile even when Xray's JSON is unchanged: the router may have drifted.
+# Discover the *mounted* path, not a stale copy in /root/XMesh-Node.
+reconcile_router_default() {
+ local router dir flag backup action
+ router="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/xmesh-node/config.json"}}{{.Source}}{{end}}{{end}}' xmesh-node 2>/dev/null || true)"
+ if [[ -z "$router" || ! -f "$router" ]];then
+  echo "Router config bind mount missing; cannot verify TCP forwarding." >&2;return 1
+ fi
+ dir="$(dirname "$router")"
+ if [[ ! -f "$dir/compose.yaml" && ! -f "$dir/docker-compose.yml" ]];then
+  echo "Router Compose file missing; no unsafe port switch." >&2;return 1
+ fi
+ flag="$(mktemp "$STATE/router-action.XXXXXXXX")"
+ backup="$(mktemp "$STATE/router-backup.XXXXXXXX")"
+ cp -p "$router" "$backup"
+ # BEGIN ROUTER_PORT_RECONCILER
+ if ! python3 - "$router" "$PORT" "$PREVIOUS" "$STATE/router-managed-port" "$flag" <<'PY'
+import json, os, sys, tempfile
+router_path, port, previous_path, marker_path, flag_path = sys.argv[1:]
+port = int(port)
+target = f"127.0.0.1:{port}"
+with open(router_path, encoding="utf-8") as f:
+    router = json.load(f)
+old = router.get("default_tcp")
+routes = router.get("routes", [])
+previous = None
+try:
+    with open(previous_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    previous = f"127.0.0.1:{int(cfg['inbounds'][0]['port'])}"
+except (OSError, ValueError, TypeError, KeyError, IndexError):
+    pass
+recorded = None
+try:
+    with open(marker_path, encoding="ascii") as f:
+        recorded_port = int(f.read().strip())
+    if 1 <= recorded_port <= 65535:
+        recorded = f"127.0.0.1:{recorded_port}"
+except (OSError, ValueError):
+    pass
+if not isinstance(routes, list) or routes or (old != target and old not in
+        (None, "127.0.0.1:9443", previous, recorded)):
+    action = "unmanaged"
+elif old == target:
+    action = "aligned"
+else:
+    router["default_tcp"] = target
+    mode = os.stat(router_path).st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(router_path), prefix=".xmesh-router.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(router, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, router_path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    action = "changed"
+with open(flag_path, "w", encoding="ascii") as f:
+    f.write(action)
+PY
+ then
+  rm -f "$flag" "$backup"
+  echo "Router config validation/update failed." >&2
+  return 1
+ fi
+ # END ROUTER_PORT_RECONCILER
+ action="$(cat "$flag")"
+ rm -f "$flag"
+ if [[ "$action" == unmanaged ]];then
+  rm -f "$backup"
+  echo "Custom SNI routes or unowned router default; refusing port switch to $PORT." >&2
+  return 1
+ fi
+ if [[ "$action" == changed ]];then
+  # Atomic JSON rename changes inode: restart alone retains the old file mount.
+  if ! (cd "$dir" && docker compose up -d --no-deps --force-recreate xmesh-node) ||
+     [[ "$(docker inspect -f '{{.State.Running}}' xmesh-node 2>/dev/null)" != true ]];then
+   cp -p "$backup" "$router"
+   (cd "$dir" && docker compose up -d --no-deps --force-recreate xmesh-node) || true
+   rm -f "$backup"
+   echo "Router recreation failed; restored previous route." >&2
+   return 1
+  fi
+  echo "Router remounted with default_tcp=127.0.0.1:$PORT."
+ fi
+ rm -f "$backup"
+ printf '%s\n' "$PORT" > "$STATE/router-managed-port"
+ chmod 600 "$STATE/router-managed-port"
+}
 if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" ]] && docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null | grep -qx true; then
+ if ! reconcile_router_default;then
+  echo "Xray is healthy but TCP router remains out of sync." >&2;exit 1
+ fi
  if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
   python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
  fi
  if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
- echo "Xray configuration unchanged, container healthy."
+ echo "Xray configuration unchanged, container healthy, router reconciled."
  exit 0
 fi
 # Never interrupt unrelated processes on the requested local port.
-PORT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inbounds"][0]["port"])' "$CONFIG_FILE")"
 if ss -ltnH | awk '{print $4}' | grep -Eq "(^|:)$PORT$" &&
    ! docker inspect xmesh-managed-xray >/dev/null 2>&1; then
  echo "Port $PORT is already occupied; refusing deployment." >&2; exit 1
 fi
-PREVIOUS="$STATE/previous.json"
 if [[ -f "$ACTIVE" ]];then cp "$ACTIVE" "$PREVIOUS";fi
 install -m 0600 "$CONFIG_FILE" "$ACTIVE"
 docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
@@ -238,42 +334,20 @@ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];
  fi
  exit 1
 fi
-# Only auto-route a virgin router configuration. Never replace user SNI routes.
-ROUTER=/opt/xmesh-node/config.json
-[[ -f /root/XMesh-Node/config.json ]] && ROUTER=/root/XMesh-Node/config.json
-if [[ -f "$ROUTER" ]];then
- ROUTER_FLAG="$STATE/router-updated"
- rm -f "$ROUTER_FLAG"
- python3 - "$ROUTER" "$PORT" "$ROUTER_FLAG" <<'PY'
-import json,sys,os,tempfile
-path=sys.argv[1];port=int(sys.argv[2])
-with open(path) as f:d=json.load(f)
-old=d.get("default_tcp")
-if d.get("routes") or old not in (None,"127.0.0.1:9443",f"127.0.0.1:{port}"):
- print("Router has custom routes/default; leaving router configuration unchanged.")
-else:
- target=f"127.0.0.1:{port}"
- if old!=target:
-  d["default_tcp"]=target
-  fd,temp=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".config.")
-  try:
-   with os.fdopen(fd,"w") as f:json.dump(d,f,indent=2)
-   os.chmod(temp,0o644)
-   os.replace(temp,path)
-   with open(sys.argv[3],"w") as marker: marker.write("updated")
-  finally:
-   if os.path.exists(temp):os.unlink(temp)
-  print("Default TCP backend updated to",target)
-PY
- if [[ -f /root/XMesh-Node/config.json ]];then ROUTER_DIR=/root/XMesh-Node;else ROUTER_DIR=/opt/xmesh-node;fi
- if [[ -f "$ROUTER_FLAG" ]] && [[ "$(docker inspect -f '{{.State.Running}}' xmesh-node 2>/dev/null)" == true ]];then
-   (cd "$ROUTER_DIR" && docker compose restart xmesh-node)
-   rm -f "$ROUTER_FLAG"
+# The public router must follow the validated local Xray listener.
+if ! reconcile_router_default;then
+ echo "CRITICAL: TCP router was not reconciled; rolling Xray back." >&2
+ if [[ -f "$PREVIOUS" ]];then
+  cp "$PREVIOUS" "$ACTIVE"
+  docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
+  docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
+   --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
+   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
  fi
+ exit 1
 fi
 if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
  python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
 fi
 if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
-echo "Xray deployed on 127.0.0.1:$PORT; configured safe default router when applicable."
-
+echo "Xray deployed on 127.0.0.1:$PORT; TCP router reconciled."
