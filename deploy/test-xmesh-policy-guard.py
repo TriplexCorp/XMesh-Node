@@ -114,6 +114,16 @@ class SignedPolicyTests(unittest.TestCase):
                         child.unlink()
                 self.stats.write_text('{"1":0}')
 
+    def test_signed_hysteria_email_with_s_in_tag(self):
+        # Regression: raw regex [^\\\\s] accidentally rejected the letter s.
+        self.configure_protocol("hysteria")
+        self.config["inbounds"][0]["settings"]["users"][0]["email"] = "xmesh-u1--hysteria-main"
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.run_guard("prepare")
+        self.run_guard("commit")
+        self.assertEqual(len(json.loads(self.output.read_text())["inbounds"][0]["settings"]["users"]), 1)
+
     def test_signed_hysteria_rejects_extra_unlisted_user(self):
         self.configure_protocol("hysteria")
         self.config["inbounds"][0]["settings"]["users"].append({
