@@ -113,15 +113,11 @@ def account_uuid(entry, credential_key, identities):
         credential = entry.get(credential_key)
         if not isinstance(credential, str) or not credential:
             return None
-        # These five protocols use the user's Xray UUID as the credential.
         # Shadowsocks 2022 has an independent per-user PSK.
-        if credential_key != "password" or "ss2022" not in identities.get("_transport", ""):
-            if identities.get("_protocol") != "shadowsocks" and credential != user:
-                return None
-            if identities.get("_protocol") == "shadowsocks" and identities.get("_method", "").startswith("2022-"):
-                pass
-            elif credential != user:
-                return None
+        if identities["_protocol"] == "shadowsocks" and identities["_method"].startswith("2022-"):
+            return user
+        if credential != user:
+            return None
         return user
     credential = entry.get(credential_key)
     if identities.get("_protocol") == "shadowsocks" and identities.get("_method", "").startswith("2022-"):
