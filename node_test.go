@@ -2,6 +2,9 @@ package main
 
 import (
  "encoding/binary"
+ "os"
+ "path/filepath"
+ "strings"
  "net"
  "testing"
  "time"
@@ -46,4 +49,31 @@ func TestClientHelloParser(t *testing.T){
  a.SetReadDeadline(time.Now().Add(time.Second))
  raw,host,alpn,err:=peekHello(a)
  if err!=nil||host!="vpn.example.com"||len(alpn)!=1||alpn[0]!="h2"||string(raw)!=string(record){t.Fatalf("got host=%q alpn=%v err=%v",host,alpn,err)}
+}
+
+func TestTransportSpecificSelfLoopRejection(t *testing.T) {
+ cases:=[]struct{
+  name string
+  config string
+  problem string
+ }{
+  {"default tcp loop", `{"listen_tcp":":443","default_tcp":"127.0.0.1:443"}`, "default_tcp"},
+  {"SNI TCP loop", `{"listen_tcp":":443","default_tcp":"127.0.0.1:5000","routes":[{"sni":"example.org","backend":"127.0.0.1:443"}]}`, "loops back"},
+  {"UDP loop", `{"listen_tcp":":443","default_tcp":"127.0.0.1:5000","listen_udp":":443","udp_backend":"127.0.0.1:443"}`, "udp_backend"},
+  {"Dual VLESS/Hysteria", `{"listen_tcp":":443","default_tcp":"127.0.0.1:5000","listen_udp":":443","udp_backend":"127.0.0.1:5001"}`, ""},
+  {"Shared private port across TCP and UDP", `{"listen_tcp":":443","default_tcp":"127.0.0.1:5000","listen_udp":":443","udp_backend":"127.0.0.1:5000"}`, ""},
+  {"UDP backend alone may use TCP public port", `{"listen_tcp":":443","default_tcp":"127.0.0.1:5000","listen_udp":":8443","udp_backend":"127.0.0.1:443"}`, ""},
+ }
+ for _,tt:=range cases {
+  t.Run(tt.name,func(t *testing.T){
+   path:=filepath.Join(t.TempDir(),"router.json")
+   if err:=os.WriteFile(path,[]byte(tt.config),0600);err!=nil{t.Fatal(err)}
+   _,err:=loadConfig(path)
+   if tt.problem==""{
+    if err!=nil{t.Fatalf("valid transport-specific mapping was rejected: %v",err)}
+   }else if err==nil || !strings.Contains(err.Error(),tt.problem){
+    t.Fatalf("want error containing %q, got %v",tt.problem,err)
+   }
+  })
+ }
 }

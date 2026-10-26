@@ -72,6 +72,12 @@ class PendingEnrollmentTest(unittest.TestCase):
         self.assertIn("No previously issued signed offline policy", SYNC)
         self.assertIn('rm -f "$STATE/awaiting-profile"', SYNC)
 
+    def test_managed_bootstrap_does_not_register_duplicate_router_heartbeat(self):
+        self.assertNotIn('config={"panel_url":', BOOTSTRAP)
+        self.assertNotIn('d.update(panel_url=', BOOTSTRAP)
+        self.assertIn('for legacy in ("panel_url", "node_id", "private_key_file"):', BOOTSTRAP)
+        self.assertIn("install-node-metrics-agent.sh", BOOTSTRAP)
+
     def test_bootstrap_reports_pending_as_success(self):
         self.assertIn("OnUnitInactiveSec=60s", BOOTSTRAP)
         self.assertIn("No XRAY STUDIO profile assigned yet (normal on a fresh panel)", BOOTSTRAP)

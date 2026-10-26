@@ -50,9 +50,26 @@ func loadConfig(path string)(Config,error){
  }
  for _,x:=range append([]Route{{Backend:c.DefaultTCP}},c.Routes...){
   if e:=checkBackend(x.Backend);e!=nil{return c,e}
+  // Every TCP route (not just default_tcp) must avoid the local listener.
+  // TCP and UDP may share the *number* 443; check each protocol separately.
+  if listenErr==nil {
+   _,routePort,routeErr:=net.SplitHostPort(x.Backend)
+   if routeErr==nil&&routePort==listenPort{
+    return c,fmt.Errorf("TCP backend %q loops back to XMesh Node listener",x.Backend)
+   }
+  }
   if x.SNI!=""{s:=strings.ToLower(x.SNI);if strings.ContainsAny(s," /:\\")||strings.Count(s,"*")>1||(strings.Contains(s,"*")&&!strings.HasPrefix(s,"*.")){return c,fmt.Errorf("invalid SNI rule %q",x.SNI)}}
  }
- if c.ListenUDP!=""{if c.UDPBackend==""{return c,errors.New("udp_backend required when listen_udp is enabled")};if e:=checkBackend(c.UDPBackend);e!=nil{return c,e}}
+ if c.ListenUDP!=""{
+  if c.UDPBackend==""{return c,errors.New("udp_backend required when listen_udp is enabled")}
+  if e:=checkBackend(c.UDPBackend);e!=nil{return c,e}
+  _,udpListenPort,udpListenErr:=net.SplitHostPort(c.ListenUDP)
+  _,udpBackendPort,udpBackendErr:=net.SplitHostPort(c.UDPBackend)
+  if udpListenErr!=nil{return c,fmt.Errorf("invalid UDP listener: %w",udpListenErr)}
+  if udpBackendErr==nil&&udpListenPort==udpBackendPort{
+   return c,errors.New("udp_backend must not point back to XMesh Node UDP listening port")
+  }
+ }
  return c,nil
 }
 func checkBackend(address string)error{

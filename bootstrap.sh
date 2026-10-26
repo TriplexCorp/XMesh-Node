@@ -120,9 +120,9 @@ cd "$INSTALL_DIR"
 if [[ ! -f config.json ]]; then
  python3 - "$PANEL" "$NODE" "$NODE_PORT" <<'PY'
 import json,sys
-config={"panel_url":sys.argv[1],"node_id":int(sys.argv[2]),
-"private_key_file":"/etc/xmesh-node-metrics/node.key",
-"listen_tcp":":"+sys.argv[3],"listen_udp":"",
+# Signed heartbeats in managed deployments belong to node-control, not
+# the Go edge router. Two reporters on the same node ID corrupt health state.
+config={"listen_tcp":":"+sys.argv[3],"listen_udp":"",
 "default_tcp":"127.0.0.1:9443","routes":[],
 "hello_timeout_seconds":5,"idle_timeout_seconds":120,
 "max_tcp_connections":4096,"max_udp_sessions":2048}
@@ -133,7 +133,10 @@ else
 import json,sys
 p="config.json"
 with open(p) as f:d=json.load(f)
-d.update(panel_url=sys.argv[1],node_id=int(sys.argv[2]),private_key_file="/etc/xmesh-node-metrics/node.key")
+# Remove legacy duplicate reporter settings from previously enrolled nodes.
+# The separately installed control agent retains the signed node identity.
+for legacy in ("panel_url", "node_id", "private_key_file"):
+ d.pop(legacy, None)
 requested_port=":"+sys.argv[3]
 if d.get("listen_tcp")!=requested_port:
  print("Updating node TCP listener from",d.get("listen_tcp"),"to",requested_port)
