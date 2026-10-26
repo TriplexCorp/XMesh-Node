@@ -19,7 +19,7 @@ class RouterReconcileTests(unittest.TestCase):
     def check_router(self, old="127.0.0.1:10443", new=5000,
                      previous=10443, previous_network="tcp", network="tcp",
                      routes=None, marker=None, udp_listener="", udp_backend="",
-                     udp_marker=None, public_port=443):
+                     udp_marker=None, public_port=443, tcp_port=None, udp_port=None):
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td)
             router = directory / "config.json"
@@ -41,8 +41,11 @@ class RouterReconcileTests(unittest.TestCase):
                 tcp_marker.write_text(str(marker), encoding="ascii")
             if udp_marker is not None:
                 udp_marker_path.write_text(str(udp_marker), encoding="ascii")
+            if tcp_port is None and udp_port is None:
+                tcp_port = new if network in ("tcp", "both") else "-"
+                udp_port = new if network in ("udp", "both") else "-"
             completed = subprocess.run(
-                [sys.executable, "-", str(router), str(new), network,
+                [sys.executable, "-", str(router), str(tcp_port), str(udp_port),
                  str(previous_path), str(tcp_marker), str(udp_marker_path),
                  str(flag_path)],
                 input=PYTHON, text=True, capture_output=True, check=False,
@@ -155,9 +158,42 @@ class RouterReconcileTests(unittest.TestCase):
         self.assertEqual(result["listen_udp"], ":8443")
         self.assertEqual(result["udp_backend"], "127.0.0.1:5000")
 
+    def test_dual_tcp_udp_backends_and_independent_ports(self):
+        action, result = self.check_router(
+            old="127.0.0.1:10443", previous=10443,
+            tcp_port=5000, udp_port=5001)
+        self.assertEqual(action, "changed")
+        self.assertEqual(result["default_tcp"], "127.0.0.1:5000")
+        self.assertEqual(result["udp_backend"], "127.0.0.1:5001")
+        self.assertEqual(result["listen_udp"], ":443")
+
+    def test_dual_existing_managed_routes_are_idempotent(self):
+        action, result = self.check_router(
+            old="127.0.0.1:5000", previous=None,
+            udp_listener=":443", udp_backend="127.0.0.1:5001",
+            tcp_port=5000, udp_port=5001)
+        self.assertEqual(action, "aligned")
+        self.assertEqual(result["udp_backend"], "127.0.0.1:5001")
+
+    def test_dual_does_not_steal_custom_udp_forwarding(self):
+        action, result = self.check_router(
+            old="127.0.0.1:10443", previous=10443,
+            udp_listener=":443", udp_backend="127.0.0.1:9001",
+            tcp_port=5000, udp_port=5001)
+        self.assertEqual(action, "unmanaged")
+        self.assertEqual(result["default_tcp"], "127.0.0.1:10443")
+        self.assertEqual(result["udp_backend"], "127.0.0.1:9001")
+
+    def test_dual_udp_uses_configured_public_port(self):
+        action, result = self.check_router(
+            old="127.0.0.1:9443", previous=None, public_port=8443,
+            tcp_port=5000, udp_port=5001)
+        self.assertEqual(action, "changed")
+        self.assertEqual(result["listen_udp"], ":8443")
+
     def test_h3_network_detection_contract(self):
         self.assertIn('network in ("masque","xhttp")', SOURCE)
-        self.assertIn('alpn==["h3"]', SOURCE)
+        self.assertIn('and "h3" in alpn', SOURCE)
 
     def test_shell_integration_contract(self):
         self.assertIn("if ! reconcile_router_default;then", SOURCE)
@@ -165,7 +201,7 @@ class RouterReconcileTests(unittest.TestCase):
         self.assertNotIn("docker compose restart xmesh-node", SOURCE)
         self.assertIn('XMesh desired-config returned HTTP $HTTP_STATUS', SOURCE)
         self.assertIn("router-managed-udp-port", SOURCE)
-        self.assertIn('"$INBOUND_NETWORK" == udp', SOURCE)
+        self.assertIn('"$UDP_PORT" != "-"', SOURCE)
 
 
 if __name__ == "__main__":
