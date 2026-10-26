@@ -199,6 +199,8 @@ After=docker.service network-online.target
 Wants=network-online.target
 [Service]
 Type=oneshot
+# First issuance can include apt installation and HTTP-01 validation.
+TimeoutStartSec=10min
 ExecStart=/usr/local/sbin/xmesh-xray-sync
 SERVICE
 cat > /etc/systemd/system/xmesh-xray-sync.timer <<'TIMER'
