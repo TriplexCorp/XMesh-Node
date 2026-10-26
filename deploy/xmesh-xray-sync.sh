@@ -71,29 +71,87 @@ PY
   exit 0
  fi
 fi
+# HTTP 202 is a normal, authenticated enrollment state: the operator has
+# registered the node but has not yet assigned an XRAY STUDIO profile.
+# Never treat it as a signed policy or start a placeholder Xray process.
+if [[ "$HTTP_STATUS" == 202 ]];then
+ if ! python3 - "$RESP_FILE" "$XMESH_NODE_ID" <<'PY'
+import json,sys
+try:
+ with open(sys.argv[1],encoding="utf-8") as f: response=json.load(f)
+ valid=(isinstance(response,dict) and response.get("status")=="awaiting_profile"
+        and type(response.get("nodeId")) is int and response["nodeId"]==int(sys.argv[2])
+        and "config" not in response and "policy" not in response)
+except (OSError,ValueError,TypeError):
+ valid=False
+sys.exit(0 if valid else 1)
+PY
+ then
+  echo "Unexpected HTTP 202 body; refusing unverified provisioning state." >&2
+  exit 1
+ fi
+ if ! docker info >/dev/null 2>&1;then
+  echo "Docker unavailable; cannot verify Xray state while awaiting a profile." >&2
+  exit 1
+ fi
+ # If a profile is intentionally unassigned after an earlier deployment,
+ # stop ONLY the XMesh-managed instance. Leaving an old policy serving
+ # clients would contradict the control plane's explicit unassignment.
+ if docker inspect xmesh-managed-xray >/dev/null 2>&1;then
+  docker update --restart=no xmesh-managed-xray >/dev/null
+  if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" == true ]];then
+   docker stop -t 3 xmesh-managed-xray >/dev/null
+  fi
+  if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != false ]];then
+   echo "CRITICAL: Managed Xray did not stop after profile unassignment." >&2
+   exit 1
+  fi
+ fi
+ printf '%s\\n' awaiting_profile > "$STATE/awaiting-profile"
+ chmod 0600 "$STATE/awaiting-profile"
+ echo "Node enrolled and router ready; awaiting XRAY STUDIO profile assignment. Automatic sync will retry." 
+ exit 0
+fi
 # An unrelated 403 (e.g. reverse proxy/WAF) must not disable local
 # quota/expiry enforcement. Only the recognized disabled-node response above
 # can authoritatively stop the entire Xray instance.
+if [[ "$HTTP_STATUS" != 200 && "$HTTP_STATUS" != 000 ]];then
+ # Report only known, fixed user-actionable errors; never dump API bodies,
+ # keys, profile JSON, or arbitrary server-provided strings into logs.
+ python3 - "$RESP_FILE" "$HTTP_STATUS" <<'PY'
+import json,sys
+try:
+ with open(sys.argv[1],encoding="utf-8") as f: response=json.load(f)
+ message=response.get("error","") if isinstance(response,dict) else ""
+except (OSError,ValueError,TypeError):
+ message=""
+mapping=(
+ ("Assign an XRAY STUDIO profile", "Assign an XRAY STUDIO profile in Nexus."),
+ ("Assigned XRAY STUDIO profile was not found", "Reassign the missing XRAY STUDIO profile."),
+ ("Set a valid local Xray port", "Set a valid local Xray port in the node editor."),
+ ("Automatic local-port mapping", "XRAY STUDIO profile must have exactly one managed inbound."),
+ ("TLS node needs managed ACME", "Choose managed TLS or a preinstalled external certificate."),
+ ("Managed TLS requires", "Complete TLS domain and ACME settings in Nexus."),
+ ("Choose either managed ACME TLS", "Only one TLS certificate mode can be selected."),
+ ("Profile has no Xray JSON", "XRAY STUDIO profile needs a valid Xray JSON configuration."),
+ ("Invalid profile JSON", "XRAY STUDIO profile JSON is invalid."),
+ ("Profile has no inbounds", "XRAY STUDIO profile has no inbounds."),
+)
+reason=next((safe for prefix,safe in mapping if isinstance(message,str) and message.startswith(prefix)),
+            "Check XRAY STUDIO profile and node settings in Nexus.")
+print(f"XMesh desired-config HTTP {sys.argv[2]}: {reason}",file=sys.stderr)
+PY
+fi
 if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true ]];then
- echo "XMesh desired-config returned HTTP $HTTP_STATUS; using signed offline policy; panel changes NOT applied." >&2
+ if [[ ! -s "$STATE/policy-envelope.json" ]];then
+  echo "No previously issued signed offline policy; existing Xray untouched." >&2
+  exit 1
+ fi
+ echo "XMesh desired-config returned HTTP $HTTP_STATUS; enforcing last signed offline policy; panel changes NOT applied." >&2
  OFFLINE_POLICY=true
 fi
 if [[ "$HTTP_STATUS" != 200 && "$OFFLINE_POLICY" == false ]]; then
- # Never print arbitrary API responses: they could contain confidential data.
- # Only display a bounded, known server-side error message.
- python3 - "$RESP_FILE" "$HTTP_STATUS" <<'PY'
-import json,sys
-status=sys.argv[2]
-try:
- with open(sys.argv[1],encoding="utf-8") as f: payload=json.load(f)
- msg=payload.get("error") or payload.get("message") or ""
- if not isinstance(msg,str):msg=""
-except (OSError,ValueError):
- msg=""
-msg="".join(c for c in msg if c.isprintable())[:240]
-print("XMesh desired-config rejected request (HTTP %s): %s"%(status,msg or "check node profile and local Xray port"),file=sys.stderr)
-print("Existing Xray configuration was not modified.",file=sys.stderr)
-PY
+ echo "XMesh desired-config rejected request (HTTP $HTTP_STATUS); existing Xray untouched." >&2
  exit 1
 fi
 # The control agent owns reactivation. Never bypass its forced-stop marker
@@ -364,6 +422,7 @@ if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" && "$TLS_MOUNT_OK"
   python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
  fi
  if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
+ if [[ "$OFFLINE_POLICY" == false ]];then rm -f "$STATE/awaiting-profile";fi
  echo "Xray configuration unchanged, container healthy, router reconciled."
  exit 0
 fi
@@ -420,4 +479,5 @@ if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
  python3 "$POLICY_GUARD" commit --state "$STATE" --node-id "$XMESH_NODE_ID"
 fi
 if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
+if [[ "$OFFLINE_POLICY" == false ]];then rm -f "$STATE/awaiting-profile";fi
 echo "Xray deployed on 127.0.0.1:$PORT ($INBOUND_NETWORK); router reconciled."
