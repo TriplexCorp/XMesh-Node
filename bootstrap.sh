@@ -209,7 +209,14 @@ if systemctl start xmesh-xray-sync.service; then
  docker ps --filter name=xmesh-managed-xray --format '{{.Names}}: {{.Status}}'
 else
  echo "ERROR: Xray profile was NOT applied. XMesh router remains installed." >&2
- journalctl -u xmesh-xray-sync.service -n 35 --no-pager >&2 || true
+ SYNC_LOG="$(journalctl -u xmesh-xray-sync.service -n 80 --no-pager 2>&1 || true)"
+ printf '%s\n' "$SYNC_LOG" >&2
+ if printf '%s\n' "$SYNC_LOG" | grep -Eq 'failed to parse certificate|failed to build TLS config|no such file or directory.*(fullchain|privkey)[.]pem'; then
+  echo "TLS CERTIFICATE ERROR: The XRAY STUDIO profile references a certificate or key missing on this new node." >&2
+  echo "Verify DNS for the certificate domain, issue a valid certificate on this node, and ensure both certificateFile and keyFile are readable inside the Xray container." >&2
+  echo "The node mounts /etc/letsencrypt into managed Xray. Do NOT turn off certificate verification or create dummy key files." >&2
+  echo "After provisioning the certificate, retry: systemctl start xmesh-xray-sync.service" >&2
+ fi
  echo "Fix the error above, then run: systemctl start xmesh-xray-sync.service" >&2
  exit 1
 fi
