@@ -156,6 +156,16 @@ then
  [[ -r "$GEO_WORKER" ]] || { echo "GeoData helper missing: update the node agent." >&2;exit 1; }
  python3 "$GEO_WORKER" prepare "$STATE" "$GEO_SOURCE"
 fi
+# The signed policy may request explicitly configured per-node TLS provisioning.
+# Only the verified online response is eligible; cached/offline policies never
+# trigger new ACME issuance. This runs before Xray's config validation.
+TLS_WORKER=/usr/local/libexec/xmesh-tls-provision.py
+if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
+ [[ -r "$TLS_WORKER" ]] || { echo "TLS provisioner missing: update node bootstrap." >&2;exit 1; }
+ python3 "$TLS_WORKER" "$RESP_FILE" "$CONFIG_FILE" || {
+  echo "Managed TLS prerequisites not satisfied; preserving current Xray." >&2;exit 1;
+ }
+fi
 GEO_BIND=()
 if compgen -G "$STATE/assets/*.dat" >/dev/null;then
  GEO_BIND=(-e XRAY_LOCATION_ASSET=/usr/local/share/xray -v "$STATE/assets:/usr/local/share/xray:ro")
@@ -200,7 +210,15 @@ ACTIVE="$STATE/config.json"
 PREVIOUS="$STATE/previous.json"
 OLD_HASH="$(test -f "$ACTIVE" && sha256sum "$ACTIVE" | cut -d' ' -f1 || true)"
 PORT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inbounds"][0]["port"])' "$CONFIG_FILE")"
-INBOUND_NETWORK="$(python3 -c 'import json,sys;i=json.load(open(sys.argv[1]))["inbounds"][0];print("udp" if i.get("protocol")=="hysteria" or i.get("streamSettings",{}).get("network") in ("hysteria","quic") else "tcp")' "$CONFIG_FILE")"
+INBOUND_NETWORK="$(python3 -c '
+import json,sys
+i=json.load(open(sys.argv[1]))["inbounds"][0]
+s=i.get("streamSettings",{})
+network=s.get("network")
+alpn=s.get("tlsSettings",{}).get("alpn",[])
+quic= i.get("protocol")=="hysteria" or network in ("hysteria","quic") or (s.get("security")=="tls" and network in ("masque","xhttp") and alpn==["h3"])
+print("udp" if quic else "tcp")
+' "$CONFIG_FILE")"
 
 # Reconcile even when Xray's JSON is unchanged: the router may have drifted.
 # Discover the *mounted* path, not a stale copy in /root/XMesh-Node.
@@ -226,6 +244,11 @@ target = f"127.0.0.1:{port}"
 with open(router_path, encoding="utf-8") as f:
     router = json.load(f)
 routes = router.get("routes", [])
+# Match the public TCP port chosen in bootstrap, not a fixed UDP/443.
+public_port = int(str(router.get("listen_tcp", ":443")).rsplit(":", 1)[-1])
+if not 1 <= public_port <= 65535:
+    raise ValueError("invalid public router port")
+udp_listen = f":{public_port}"
 def marked(path):
     try:
         with open(path, encoding="ascii") as f:
@@ -238,7 +261,8 @@ try:
     with open(previous_path, encoding="utf-8") as f:
         inbound = json.load(f)["inbounds"][0]
     old_port = int(inbound["port"])
-    old_network = "udp" if inbound.get("protocol") == "hysteria" or inbound.get("streamSettings", {}).get("network") in ("hysteria", "quic") else "tcp"
+    old_stream = inbound.get("streamSettings", {})
+    old_network = "udp" if inbound.get("protocol") == "hysteria" or old_stream.get("network") in ("hysteria", "quic") or (old_stream.get("security") == "tls" and old_stream.get("network") in ("masque", "xhttp") and old_stream.get("tlsSettings", {}).get("alpn", []) == ["h3"]) else "tcp"
     if old_network == "udp":
         previous_udp = f"127.0.0.1:{old_port}"
     else:
@@ -250,11 +274,11 @@ if network == "udp":
     old_listener = router.get("listen_udp", "")
     old_backend = router.get("udp_backend", "")
     owned = (not old_listener and not old_backend) or (
-        old_listener == ":443" and old_backend in (target, previous_udp, marked(udp_marker)))
+        old_listener == udp_listen and old_backend in (target, previous_udp, marked(udp_marker)))
     if not owned:
         action = "unmanaged"
-    elif old_listener != ":443" or old_backend != target:
-        router["listen_udp"] = ":443"
+    elif old_listener != udp_listen or old_backend != target:
+        router["listen_udp"] = udp_listen
         router["udp_backend"] = target
         action = "changed"
 else:
@@ -268,7 +292,7 @@ else:
     # If we previously enabled UDP for Hysteria, do not leave that public
     # listener pointing to a stale service after switching back to TCP.
     existing_udp = router.get("udp_backend", "")
-    if router.get("listen_udp", "") == ":443" and existing_udp and existing_udp == marked(udp_marker):
+    if router.get("listen_udp", "") == udp_listen and existing_udp and existing_udp == marked(udp_marker):
         router["listen_udp"] = ""
         router["udp_backend"] = ""
         action = "changed" if action != "unmanaged" else action
