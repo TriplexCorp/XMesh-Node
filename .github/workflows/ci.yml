@@ -16,6 +16,7 @@ jobs:
       - run: python3 deploy/test-xmesh-policy-guard.py
       - run: python3 tests/test_user_meter.py
       - run: python3 tests/test_bootstrap_meter.py
+      - run: python3 tests/test_pending_enrollment.py
       - run: python3 tests/test_xray_router_reconcile.py
       - run: go test -race ./...
       - run: go vet ./...
