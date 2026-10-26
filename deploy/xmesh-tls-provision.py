@@ -83,6 +83,7 @@ def main():
             "certbot", "certonly", "--standalone", "--preferred-challenges", "http",
             "--non-interactive", "--agree-tos", "--no-eff-email",
             "--email", email, "-d", domain, "--keep-until-expiring",
+            "--deploy-hook", "/usr/local/sbin/xmesh-tls-renew-hook",
         ], timeout=240)
     except subprocess.TimeoutExpired:
         return fail("ACME validation timed out; check DNS and external TCP/80")
