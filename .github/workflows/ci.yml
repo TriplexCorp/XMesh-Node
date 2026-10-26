@@ -10,7 +10,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh
+      - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh
       - run: python3 -m py_compile deploy/xmesh-policy-guard.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
