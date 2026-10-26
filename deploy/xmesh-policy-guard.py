@@ -419,7 +419,8 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
             fresh and (
                 user["panelUsedBytes"] != previous or
                 limit > int(record.get("limitBytes", 0)) or
-                expires > int(record.get("expireAtMs", 0))
+                expires > int(record.get("expireAtMs", 0)) or
+                record.get("revokedReason") == "policy-expired"
             )
         )
         if "anchor" not in record or newly_authorized:
@@ -427,6 +428,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
             record["budget"] = budget
             record["panelUsedBytes"] = user["panelUsedBytes"]
             record["revoked"] = False
+            record.pop("revokedReason", None)
         else:
             if budget is None:
                 record["budget"] = None
@@ -451,6 +453,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         if reason and offline:
             # Persist quota denial across reconnects and process restarts.
             record["revoked"] = True
+            record["revokedReason"] = reason
         if record.get("revoked"):
             reason = reason or "locally-revoked"
         if reason:
