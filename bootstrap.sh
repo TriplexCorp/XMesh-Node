@@ -204,22 +204,53 @@ systemctl enable xmesh-xray-sync.timer
 # Existing installations must reload the timer cadence, not merely enable it.
 systemctl restart xmesh-xray-sync.timer
 echo "Running first Xray configuration sync now..."
-if systemctl start xmesh-xray-sync.service; then
- echo "Xray synchronization completed. Managed container:"
- docker ps --filter name=xmesh-managed-xray --format '{{.Names}}: {{.Status}}'
-else
+# Only logs from this attempt may authorize automatic certificate recovery.
+SYNC_START="$(date --iso-8601=seconds)"
+if ! systemctl start xmesh-xray-sync.service; then
+ SYNC_LOG="$(journalctl -u xmesh-xray-sync.service --since "$SYNC_START" -n 120 --no-pager 2>&1 || true)"
+ # Recover only the exact standard Let's Encrypt layout, never arbitrary file
+ # paths supplied by the remote profile. Certbot validates domain ownership.
+ CERT_DOMAIN="$(printf '%s\\n' "$SYNC_LOG" | python3 -c '
+import re,sys
+text=sys.stdin.read()
+domains=set(re.findall(r"open /etc/letsencrypt/live/([A-Za-z0-9.-]+)/fullchain\\.pem: no such file or directory",text))
+domains={d.lower() for d in domains if len(d)<=253 and "." in d and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",p) for p in d.split("."))}
+print(next(iter(domains)) if len(domains)==1 else "")
+')"
+ if [[ -n "$CERT_DOMAIN" ]];then
+  echo "First Xray sync needs a Let's Encrypt certificate for $CERT_DOMAIN."
+  if ss -H -ltn 'sport = :80' | grep -q .;then
+   echo "Cannot use standalone ACME challenge: TCP/80 is already occupied. Configure the existing web server/ACME integration instead." >&2
+  else
+   if ! command -v certbot >/dev/null;then
+    echo "Installing certbot for first-boot TLS provisioning..."
+    apt_get update && apt_get install -y certbot || echo "Certbot installation failed; manual issuance required." >&2
+   fi
+   if command -v certbot >/dev/null;then
+    echo "Requesting trusted certificate for $CERT_DOMAIN using HTTP-01 (TCP/80)..."
+    if certbot certonly --standalone --preferred-challenges http --non-interactive --agree-tos --register-unsafely-without-email -d "$CERT_DOMAIN" &&
+       [[ -s "/etc/letsencrypt/live/$CERT_DOMAIN/fullchain.pem" && -s "/etc/letsencrypt/live/$CERT_DOMAIN/privkey.pem" ]];then
+     echo "Certificate issued. Retrying managed Xray sync..."
+     systemctl reset-failed xmesh-xray-sync.service || true
+     systemctl start xmesh-xray-sync.service || true
+    else
+     echo "ACME issuance failed: check DNS A/AAAA and incoming TCP/80, or supply your own certificate." >&2
+    fi
+   fi
+  fi
+ fi
+fi
+if systemctl is-failed --quiet xmesh-xray-sync.service || ! docker ps --filter name=xmesh-managed-xray --format '{{.Names}}' | grep -qx 'xmesh-managed-xray';then
  echo "ERROR: Xray profile was NOT applied. XMesh router remains installed." >&2
  SYNC_LOG="$(journalctl -u xmesh-xray-sync.service -n 80 --no-pager 2>&1 || true)"
- printf '%s\n' "$SYNC_LOG" >&2
- if printf '%s\n' "$SYNC_LOG" | grep -Eq 'failed to parse certificate|failed to build TLS config|no such file or directory.*(fullchain|privkey)[.]pem'; then
-  echo "TLS CERTIFICATE ERROR: The XRAY STUDIO profile references a certificate or key missing on this new node." >&2
-  echo "Verify DNS for the certificate domain, issue a valid certificate on this node, and ensure both certificateFile and keyFile are readable inside the Xray container." >&2
-  echo "The node mounts /etc/letsencrypt into managed Xray. Do NOT turn off certificate verification or create dummy key files." >&2
-  echo "After provisioning the certificate, retry: systemctl start xmesh-xray-sync.service" >&2
- fi
+ printf '%s\\n' "$SYNC_LOG" >&2
  echo "Fix the error above, then run: systemctl start xmesh-xray-sync.service" >&2
  exit 1
+else
+ echo "Xray synchronization completed. Managed container:"
+ docker ps --filter name=xmesh-managed-xray --format '{{.Names}}'
 fi
+# Done with first-boot sync; no need to retain its missing-certificate diagnostics.
 echo "Xray desired-state sync installed and first run completed."
 # The system metrics installer runs before the managed Xray policy guard exists.
 # Therefore its conditional user-meter activation is skipped on a virgin node.
