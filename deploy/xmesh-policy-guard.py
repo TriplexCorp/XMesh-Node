@@ -451,9 +451,14 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         if offline and now_ms >= policy["validUntilMs"]:
             reason = "policy-expired"
         if reason and offline:
-            # Persist quota denial across reconnects and process restarts.
+            # Preserve the FIRST denial reason. An already exhausted quota
+            # must not later be relabelled "policy-expired" and silently
+            # reauthorized on a new lease without a real quota change.
+            if not record.get("revoked"):
+                record["revokedReason"] = reason
+            else:
+                record.setdefault("revokedReason", "locally-revoked")
             record["revoked"] = True
-            record["revokedReason"] = reason
         if record.get("revoked"):
             reason = reason or "locally-revoked"
         if reason:
