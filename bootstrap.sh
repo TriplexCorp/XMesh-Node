@@ -201,6 +201,12 @@ curl --proto '=https' --tlsv1.2 -fsSLo "$TLS_TMP" \
 python3 -m py_compile "$TLS_TMP"
 install -o root -g root -m 0700 "$TLS_TMP" /usr/local/libexec/xmesh-tls-provision.py
 rm -f "$TLS_TMP"
+RENEW_TMP="$(mktemp /tmp/xmesh-renew.XXXXXXXX)"
+curl --proto '=https' --tlsv1.2 -fsSLo "$RENEW_TMP" \
+ "https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/$NODE_RELEASE_SHA/deploy/xmesh-tls-renew-hook.sh"
+bash -n "$RENEW_TMP"
+install -o root -g root -m 0700 "$RENEW_TMP" /usr/local/sbin/xmesh-tls-renew-hook
+rm -f "$RENEW_TMP"
 install -d -o root -g root -m 0700 /var/lib/xmesh-xray-sync
 cat > /etc/systemd/system/xmesh-xray-sync.service <<'SERVICE'
 [Unit]
