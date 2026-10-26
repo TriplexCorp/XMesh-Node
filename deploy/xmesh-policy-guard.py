@@ -194,29 +194,75 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
             raise ValueError("Duplicate user policy")
         seen_id.add(user_id)
         seen_uuid.add(uid)
-    # A signed policy may only list users actually in the signed configuration.
+    # Validate both signed proxy listeners (if present), plus the private stats
+    # listener. The policy keeps one user row per person, not per transport.
     inbounds = config.get("inbounds")
-    if not isinstance(inbounds, list) or len(inbounds) not in (1, 2):
+    if not isinstance(inbounds, list) or not 1 <= len(inbounds) <= 3:
         raise ValueError("Unsupported Xray inbound layout")
-    if len(inbounds) == 2:
-        api = inbounds[1]
-        if (api.get("tag") != "xmesh_stats_in" or api.get("listen") != "127.0.0.1"
-                or api.get("port") != 10085 or api.get("protocol") != "dokodemo-door"
+    has_stats = inbounds[-1].get("tag") == "xmesh_stats_in"
+    if has_stats:
+        api = inbounds[-1]
+        if (api.get("listen") != "127.0.0.1" or api.get("port") != 10085
+                or api.get("protocol") != "dokodemo-door"
                 or config.get("api", {}).get("tag") != "xmesh_stats_api"):
             raise ValueError("Unsafe private stats listener")
-    if inbounds[0].get("listen") != "127.0.0.1" or not (
-            type(inbounds[0].get("port")) is int and 1 <= inbounds[0]["port"] <= 65535):
-        raise ValueError("Untrusted Xray listener/port")
-    if inbounds[0]["port"] != document.get("port"):
-        raise ValueError("Policy port and Xray listener disagree")
-    inbound = inbounds[0]
-    accounts, credential_key = configured_accounts(inbound)
+    proxies = inbounds[:-1] if has_stats else inbounds
+    if not 1 <= len(proxies) <= 2 or (len(proxies) == 2 and not has_stats):
+        raise ValueError("Unsupported managed proxy layout")
+
+    def transport_type(inbound):
+        stream = inbound.get("streamSettings", {})
+        if not isinstance(stream, dict):
+            raise ValueError("Invalid signed transport")
+        network = stream.get("network", "raw")
+        alpn = stream.get("tlsSettings", {}).get("alpn", [])
+        protocol = inbound.get("protocol")
+        if protocol == "hysteria" and network == "hysteria" and stream.get("security") == "tls":
+            return "udp"
+        if (protocol in ("vless", "vmess", "trojan", "shadowsocks")
+                and network in ("raw", "tcp", "xhttp", "grpc", "ws", "httpupgrade")
+                and not (network == "xhttp" and "h3" in alpn)):
+            return "tcp"
+        return "other"
+
+    if len(proxies) == 2 and {transport_type(item) for item in proxies} != {"tcp", "udp"}:
+        raise ValueError("Managed pair requires one TCP proxy and one Hysteria2 listener")
+
     identities = {u["userId"]: u["xrayId"] for u in users}
-    identities["_protocol"] = inbound["protocol"]
-    identities["_method"] = inbound["settings"].get("method", "")
-    resolved = [account_uuid(account, credential_key, identities) for account in accounts]
-    if (len(resolved) != len(seen_uuid) or None in resolved
-            or len(set(resolved)) != len(resolved) or set(resolved) != seen_uuid):
+    authorized = set()
+    tags = set()
+    for index, inbound in enumerate(proxies):
+        port = inbound.get("port")
+        if (inbound.get("listen") != "127.0.0.1"
+                or type(port) is not int or not 1 <= port <= 65535
+                or port == 10085):
+            raise ValueError("Untrusted Xray listener/port")
+        if (index == 0 and port != document.get("port")
+                or index == 1 and port != document.get("port", 0) + 1):
+            raise ValueError("Policy port and Xray listener disagree")
+        tag = inbound.get("tag")
+        if len(proxies) == 2 and (not isinstance(tag, str) or not tag or tag in tags
+                                  or tag == "xmesh_stats_in"):
+            raise ValueError("Duplicate or missing managed inbound tag")
+        tags.add(tag)
+        accounts, credential_key = configured_accounts(inbound)
+        scoped = dict(identities)
+        scoped["_protocol"] = inbound["protocol"]
+        scoped["_method"] = inbound["settings"].get("method", "")
+        resolved = [account_uuid(account, credential_key, scoped) for account in accounts]
+        if (None in resolved or len(set(resolved)) != len(resolved)
+                or any(uuid not in seen_uuid for uuid in resolved)):
+            raise ValueError("Signed policy and proxy accounts differ")
+        if len(proxies) == 2:
+            # For managed multi-inbound profiles, do not allow an account
+            # to masquerade as being provisioned for a different inbound tag.
+            from urllib.parse import quote
+            suffix = "--" + quote(tag, safe="-_.~")
+            if any(not isinstance(entry.get("email"), str)
+                   or not entry["email"].endswith(suffix) for entry in accounts):
+                raise ValueError("Signed policy and proxy accounts differ")
+        authorized.update(resolved)
+    if authorized != seen_uuid:
         raise ValueError("Signed policy and proxy accounts differ")
     if not pinned.exists():
         # TOFU is permitted only for a fresh, TLS-validated signed response.
@@ -410,14 +456,19 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         else:
             allowed[user["xrayId"]] = user["userId"]
     effective = json.loads(json.dumps(config))
-    inbound = effective["inbounds"][0]
-    accounts, credential_key = configured_accounts(inbound)
     identities = {u["userId"]: u["xrayId"] for u in policy["users"]}
-    identities["_protocol"] = inbound["protocol"]
-    identities["_method"] = inbound["settings"].get("method", "")
-    field = "clients" if inbound["protocol"] == "vless" else "users"
-    inbound["settings"][field] = [entry for entry in accounts
-        if account_uuid(entry, credential_key, identities) in allowed]
+    for inbound in effective["inbounds"]:
+        if inbound.get("tag") == "xmesh_stats_in":
+            continue
+        accounts, credential_key = configured_accounts(inbound)
+        scoped = dict(identities)
+        scoped["_protocol"] = inbound["protocol"]
+        scoped["_method"] = inbound["settings"].get("method", "")
+        field = "clients" if inbound["protocol"] == "vless" else "users"
+        inbound["settings"][field] = [
+            entry for entry in accounts
+            if account_uuid(entry, credential_key, scoped) in allowed
+        ]
     return effective, ledger, denied
 
 
@@ -492,7 +543,7 @@ def main():
     if args.action == "prepare":
         write_atomic(state / "policy-envelope.json.pending", canonical(doc))
     print("XMesh policy: " + ("offline" if args.action == "offline" else "connected")
-          + f", authorized={len(configured_accounts(effective['inbounds'][0])[0])}, blocked={len(denied)}",
+          + f", authorized={len(policy['users']) - len(denied)}, blocked={len(denied)}",
           file=sys.stderr)
 
 

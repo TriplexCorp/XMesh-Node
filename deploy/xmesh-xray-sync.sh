@@ -182,18 +182,25 @@ if data.get("nodeId")!=int(sys.argv[3]): raise SystemExit("Wrong node identity")
 cfg=data.get("config")
 if not isinstance(cfg,dict):raise SystemExit("Invalid configuration")
 ibs=cfg.get("inbounds")
-if not isinstance(ibs,list) or len(ibs) not in (1,2):raise SystemExit("Invalid managed inbound count")
-if len(ibs)==2:
- api=ibs[1]
- if (api.get("tag")!="xmesh_stats_in" or api.get("listen")!="127.0.0.1" or
-     api.get("port")!=10085 or api.get("protocol")!="dokodemo-door" or
-     cfg.get("api",{}).get("tag")!="xmesh_stats_api"):
-  raise SystemExit("Unexpected additional inbound; only loopback StatsService allowed")
-ib=ibs[0]
-if ib.get("listen")!="127.0.0.1" or ib.get("port")!=data.get("port"):raise SystemExit("Unsafe inbound listen/port")
-if not isinstance(data.get("port"),int) or not 1<=data["port"]<=65535:raise SystemExit("Invalid port")
-# Refuse unrelated public listeners in this managed profile.
-for entry in cfg.get("inbounds",[]):
+if not isinstance(ibs,list) or not 1<=len(ibs)<=3:raise SystemExit("Invalid managed inbound count")
+if len(ibs)>1 and ibs[-1].get("tag")=="xmesh_stats_in":
+ api=ibs[-1]
+ if (api.get("listen")!="127.0.0.1" or api.get("port")!=10085
+     or api.get("protocol")!="dokodemo-door"
+     or cfg.get("api",{}).get("tag")!="xmesh_stats_api"):
+  raise SystemExit("Unexpected StatsService inbound")
+ proxies=ibs[:-1]
+else:
+ proxies=ibs
+if not 1<=len(proxies)<=2:raise SystemExit("Invalid managed proxy count")
+if len(proxies)==2 and len(ibs)!=3:raise SystemExit("Missing managed StatsService")
+port=data.get("port")
+if type(port) is not int or not 1<=port<=65535:raise SystemExit("Invalid port")
+for index, ib in enumerate(proxies):
+ if ib.get("listen")!="127.0.0.1" or ib.get("port")!=port+index:
+  raise SystemExit("Unsafe inbound listen/port")
+ if ib.get("port")==10085:raise SystemExit("StatsService port collision")
+for entry in ibs:
  if entry.get("listen")!="127.0.0.1":raise SystemExit("Public inbound denied")
 with open(sys.argv[2],"w") as f:json.dump(cfg,f,indent=2)
 PY
@@ -272,17 +279,65 @@ NEW_HASH="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
 ACTIVE="$STATE/config.json"
 PREVIOUS="$STATE/previous.json"
 OLD_HASH="$(test -f "$ACTIVE" && sha256sum "$ACTIVE" | cut -d' ' -f1 || true)"
-PORT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inbounds"][0]["port"])' "$CONFIG_FILE")"
-INBOUND_NETWORK="$(python3 -c '
+
+# Derive one exclusive TCP backend and one exclusive UDP backend from the
+# VERIFIED signed Xray configuration. "-": no listener of that transport.
+# Refuse two QUIC backends: the edge router cannot demultiplex UDP by SNI.
+PORTS="$(python3 - "$CONFIG_FILE" <<'PYPORTS'
 import json,sys
-i=json.load(open(sys.argv[1]))["inbounds"][0]
-s=i.get("streamSettings",{})
-network=s.get("network")
-alpn=s.get("tlsSettings",{}).get("alpn",[])
-quic= i.get("protocol")=="hysteria" or network in ("hysteria","quic") or (s.get("security")=="tls" and network in ("masque","xhttp") and "h3" in alpn)
-tcp= network=="xhttp" and any(p in alpn for p in ("h2","http/1.1")) and "h3" in alpn
-print("both" if quic and tcp else "udp" if quic else "tcp")
-' "$CONFIG_FILE")"
+cfg=json.load(open(sys.argv[1],encoding="utf-8"))
+inbounds=cfg.get("inbounds")
+if not isinstance(inbounds,list) or not inbounds:raise SystemExit("Missing managed inbounds")
+stats=inbounds[-1].get("tag")=="xmesh_stats_in"
+proxies=inbounds[:-1] if stats else inbounds
+if not 1<=len(proxies)<=2 or (len(proxies)==2 and not stats):
+ raise SystemExit("Unsupported managed proxy layout")
+if stats and (inbounds[-1].get("port")!=10085 or inbounds[-1].get("listen")!="127.0.0.1"):
+ raise SystemExit("Unsafe stats listener")
+tcp=udp=None
+for index,ib in enumerate(proxies):
+ port=ib.get("port")
+ if (type(port) is not int or not 1<=port<=65535 or port==10085
+     or ib.get("listen")!="127.0.0.1"):
+  raise SystemExit("Invalid private proxy listener")
+ if index and port!=proxies[0]["port"]+1:
+  raise SystemExit("Managed port offset mismatch")
+ stream=ib.get("streamSettings",{})
+ if not isinstance(stream,dict):raise SystemExit("Invalid stream settings")
+ network=stream.get("network","raw")
+ alpn=stream.get("tlsSettings",{}).get("alpn",[])
+ quic=(ib.get("protocol")=="hysteria" or network in ("hysteria","quic")
+       or (stream.get("security")=="tls" and network in ("masque","xhttp") and "h3" in alpn))
+ mixed=network=="xhttp" and any(p in alpn for p in ("h2","http/1.1")) and "h3" in alpn
+ uses_udp=quic
+ uses_tcp=(not quic) or mixed
+ if uses_tcp:
+  if tcp is not None:raise SystemExit("Multiple TCP backends unsupported")
+  tcp=port
+ if uses_udp:
+  if udp is not None:raise SystemExit("Multiple UDP/QUIC backends unsupported")
+  udp=port
+ if len(proxies)==2:
+  kind=("udp" if ib.get("protocol")=="hysteria" and network=="hysteria"
+        and stream.get("security")=="tls" else
+        "tcp" if ib.get("protocol") in ("vless","vmess","trojan","shadowsocks")
+        and network in ("raw","tcp","xhttp","grpc","ws","httpupgrade") and uses_tcp
+        and not uses_udp else "other")
+  if kind=="other":raise SystemExit("Unsupported TCP/Hysteria2 managed pair")
+if len(proxies)==2 and (tcp is None or udp is None):
+ raise SystemExit("Expected TCP and Hysteria2 UDP backends")
+print(tcp if tcp is not None else "-",udp if udp is not None else "-")
+PYPORTS
+)" || { echo "Failed to resolve managed transport ports." >&2;exit 1; }
+read -r TCP_PORT UDP_PORT <<< "$PORTS"
+PORT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inbounds"][0]["port"])' "$CONFIG_FILE")"
+if [[ "$TCP_PORT" != "-" && "$UDP_PORT" != "-" ]];then
+ INBOUND_NETWORK=both
+elif [[ "$UDP_PORT" != "-" ]];then
+ INBOUND_NETWORK=udp
+else
+ INBOUND_NETWORK=tcp
+fi
 
 # Reconcile even when Xray's JSON is unchanged: the router may have drifted.
 # Discover the *mounted* path, not a stale copy in /root/XMesh-Node.
@@ -300,15 +355,21 @@ reconcile_router_default() {
  backup="$(mktemp "$STATE/router-backup.XXXXXXXX")"
  cp -p "$router" "$backup"
  # BEGIN ROUTER_PORT_RECONCILER
- if ! python3 - "$router" "$PORT" "$INBOUND_NETWORK" "$PREVIOUS" "$STATE/router-managed-port" "$STATE/router-managed-udp-port" "$flag" <<'PY'
+ if ! python3 - "$router" "$TCP_PORT" "$UDP_PORT" "$PREVIOUS" "$STATE/router-managed-port" "$STATE/router-managed-udp-port" "$flag" <<'PY'
 import json, os, sys, tempfile
-router_path, port_str, network, previous_path, tcp_marker, udp_marker, flag_path = sys.argv[1:]
-port = int(port_str)
-target = f"127.0.0.1:{port}"
+router_path, tcp_str, udp_str, previous_path, tcp_marker, udp_marker, flag_path = sys.argv[1:]
+def endpoint(value):
+    if value == "-":
+        return None
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("Invalid proxy port")
+    return f"127.0.0.1:{port}"
+tcp_target = endpoint(tcp_str)
+udp_target = endpoint(udp_str)
 with open(router_path, encoding="utf-8") as f:
     router = json.load(f)
 routes = router.get("routes", [])
-# Match the public TCP port chosen in bootstrap, not a fixed UDP/443.
 public_port = int(str(router.get("listen_tcp", ":443")).rsplit(":", 1)[-1])
 if not 1 <= public_port <= 65535:
     raise ValueError("invalid public router port")
@@ -323,42 +384,51 @@ def marked(path):
 previous_tcp = previous_udp = None
 try:
     with open(previous_path, encoding="utf-8") as f:
-        inbound = json.load(f)["inbounds"][0]
-    old_port = int(inbound["port"])
-    old_stream = inbound.get("streamSettings", {})
-    old_alpn = old_stream.get("tlsSettings", {}).get("alpn", [])
-    old_quic = inbound.get("protocol") == "hysteria" or old_stream.get("network") in ("hysteria", "quic") or (old_stream.get("security") == "tls" and old_stream.get("network") in ("masque", "xhttp") and "h3" in old_alpn)
-    old_tcp = old_stream.get("network") == "xhttp" and any(p in old_alpn for p in ("h2", "http/1.1")) and "h3" in old_alpn
-    if old_quic:
-        previous_udp = f"127.0.0.1:{old_port}"
-    if old_tcp or not old_quic:
-        previous_tcp = f"127.0.0.1:{old_port}"
+        former = json.load(f)["inbounds"]
+    if former[-1].get("tag") == "xmesh_stats_in":
+        former = former[:-1]
+    for inbound in former:
+        port = int(inbound["port"])
+        stream = inbound.get("streamSettings", {})
+        network = stream.get("network", "raw")
+        alpn = stream.get("tlsSettings", {}).get("alpn", [])
+        quic = (inbound.get("protocol") == "hysteria" or network in ("hysteria", "quic")
+                or (stream.get("security") == "tls"
+                    and network in ("masque", "xhttp") and "h3" in alpn))
+        mixed = network == "xhttp" and "h3" in alpn and any(
+            p in alpn for p in ("h2", "http/1.1"))
+        if quic:
+            previous_udp = f"127.0.0.1:{port}"
+        if not quic or mixed:
+            previous_tcp = f"127.0.0.1:{port}"
 except (OSError, ValueError, TypeError, KeyError, IndexError):
     pass
 action = "aligned"
-if network in ("tcp", "both"):
+if tcp_target is not None:
     old = router.get("default_tcp")
     if not isinstance(routes, list) or routes or (
-        old != target and old not in (None, "127.0.0.1:9443", previous_tcp, marked(tcp_marker))):
+        old != tcp_target and old not in (None, "127.0.0.1:9443", previous_tcp, marked(tcp_marker))):
         action = "unmanaged"
-    elif old != target:
-        router["default_tcp"] = target
+    elif old != tcp_target:
+        router["default_tcp"] = tcp_target
         action = "changed"
-if network in ("udp", "both"):
+if udp_target is not None:
     old_listener = router.get("listen_udp", "")
     old_backend = router.get("udp_backend", "")
     owned = (not old_listener and not old_backend) or (
-        old_listener == udp_listen and old_backend in (target, previous_udp, marked(udp_marker)))
+        old_listener == udp_listen and old_backend in (
+            udp_target, previous_udp, marked(udp_marker)))
     if not owned:
         action = "unmanaged"
-    elif old_listener != udp_listen or old_backend != target:
+    elif old_listener != udp_listen or old_backend != udp_target:
         router["listen_udp"] = udp_listen
-        router["udp_backend"] = target
+        router["udp_backend"] = udp_target
         action = "changed"
 else:
-    # Never leave a stale UDP listener when switching to TCP-only.
+    # Do not interfere with a separately managed UDP listener.
     existing_udp = router.get("udp_backend", "")
-    if router.get("listen_udp", "") == udp_listen and existing_udp and existing_udp == marked(udp_marker):
+    if (router.get("listen_udp", "") == udp_listen and existing_udp
+            and existing_udp == marked(udp_marker)):
         router["listen_udp"] = ""
         router["udp_backend"] = ""
         if action != "unmanaged":
@@ -388,7 +458,7 @@ PY
  rm -f "$flag"
  if [[ "$action" == unmanaged ]];then
   rm -f "$backup"
-  echo "Custom or unowned $INBOUND_NETWORK router forwarding; refusing port switch to $PORT." >&2
+  echo "Custom or unowned router forwarding; refusing TCP:$TCP_PORT UDP:$UDP_PORT." >&2
   return 1
  fi
  if [[ "$action" == changed ]];then
@@ -401,15 +471,15 @@ PY
    echo "Router recreation failed; restored previous route." >&2
    return 1
   fi
-  echo "Router remounted for $INBOUND_NETWORK -> 127.0.0.1:$PORT."
+  echo "Router remounted for TCP:$TCP_PORT UDP:$UDP_PORT."
  fi
  rm -f "$backup"
- if [[ "$INBOUND_NETWORK" == udp || "$INBOUND_NETWORK" == both ]];then
-  printf '%s\n' "$PORT" > "$STATE/router-managed-udp-port"
+ if [[ "$UDP_PORT" != "-" ]];then
+  printf '%s\n' "$UDP_PORT" > "$STATE/router-managed-udp-port"
   chmod 600 "$STATE/router-managed-udp-port"
  fi
- if [[ "$INBOUND_NETWORK" == tcp || "$INBOUND_NETWORK" == both ]];then
-  printf '%s\n' "$PORT" > "$STATE/router-managed-port"
+ if [[ "$TCP_PORT" != "-" ]];then
+  printf '%s\n' "$TCP_PORT" > "$STATE/router-managed-port"
   chmod 600 "$STATE/router-managed-port"
  fi
 }
@@ -432,9 +502,15 @@ if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" && "$TLS_MOUNT_OK"
  exit 0
 fi
 # Never interrupt unrelated processes on the requested local port.
-if ss -l"$([[ "$INBOUND_NETWORK" == udp ]] && printf u || printf t)"nH | awk '{print $4}' | grep -Eq "(^|:)$PORT$" &&
-   ! docker inspect xmesh-managed-xray >/dev/null 2>&1; then
- echo "Port $PORT is already occupied; refusing deployment." >&2; exit 1
+if ! docker inspect xmesh-managed-xray >/dev/null 2>&1; then
+ for kind in tcp udp;do
+  if [[ "$kind" == tcp ]];then local_port="$TCP_PORT";socket=t;else local_port="$UDP_PORT";socket=u;fi
+  if [[ "$local_port" != "-" ]] &&
+     ss -l"${socket}"nH | awk '{print $4}' | grep -Eq "(^|:)$local_port$";then
+   echo "Managed $kind port $local_port is already occupied." >&2
+   exit 1
+  fi
+ done
 fi
 if [[ -f "$ACTIVE" ]];then cp "$ACTIVE" "$PREVIOUS";fi
 install -m 0600 "$CONFIG_FILE" "$ACTIVE"
@@ -485,4 +561,4 @@ if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
 fi
 if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
 if [[ "$OFFLINE_POLICY" == false ]];then rm -f "$STATE/awaiting-profile";fi
-echo "Xray deployed on 127.0.0.1:$PORT ($INBOUND_NETWORK); router reconciled."
+echo "Xray deployed with TCP:$TCP_PORT UDP:$UDP_PORT; router reconciled."

@@ -114,6 +114,80 @@ class SignedPolicyTests(unittest.TestCase):
                         child.unlink()
                 self.stats.write_text('{"1":0}')
 
+    def configure_dual_profile(self):
+        self.config["inbounds"] = [
+            {"tag": "vless-main", "listen": "127.0.0.1", "port": 28351,
+             "protocol": "vless", "settings": {"decryption": "none",
+                "clients": [{"id": UID, "email": "xmesh-u1--vless-main", "level": 0}]},
+             "streamSettings": {"network": "xhttp", "security": "tls",
+                "tlsSettings": {"alpn": ["h2", "http/1.1"]}}},
+            {"tag": "hysteria-main", "listen": "127.0.0.1", "port": 28352,
+             "protocol": "hysteria", "settings": {"version": 2,
+                "users": [{"auth": UID, "email": "xmesh-u1--hysteria-main", "level": 0}]},
+             "streamSettings": {"network": "hysteria", "security": "tls",
+                "tlsSettings": {"alpn": ["h3"]}}},
+            {"tag": "xmesh_stats_in", "listen": "127.0.0.1", "port": 10085,
+             "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1",
+                 "port": 10085, "network": "tcp"}}
+        ]
+        self.config["api"] = {"tag": "xmesh_stats_api", "services": ["StatsService"]}
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+
+    def test_dual_signed_policy_authorizes_and_revokes_both_transports(self):
+        self.configure_dual_profile()
+        self.run_guard("prepare")
+        active = json.loads(self.output.read_text())["inbounds"]
+        self.assertEqual(len(active[0]["settings"]["clients"]), 1)
+        self.assertEqual(len(active[1]["settings"]["users"]), 1)
+        self.run_guard("commit")
+        self.stats.write_text('{"1":150}')
+        self.run_guard("offline", NOW + 10000)
+        active = json.loads(self.output.read_text())["inbounds"]
+        self.assertEqual(active[0]["settings"]["clients"], [])
+        self.assertEqual(active[1]["settings"]["users"], [])
+        self.assertEqual(active[2]["tag"], "xmesh_stats_in")
+
+    def test_dual_disallows_extra_or_mislabelled_accounts(self):
+        self.configure_dual_profile()
+        self.config["inbounds"][1]["settings"]["users"].append({
+            "auth": "550e8400-e29b-41d4-a716-446655440099",
+            "email": "xmesh-u99--hysteria-main"})
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.assertIn("proxy accounts differ", self.run_guard("prepare", success=False).stderr)
+        self.configure_dual_profile()
+        self.config["inbounds"][1]["settings"]["users"][0]["email"] = "xmesh-u1--vless-main"
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.assertIn("proxy accounts differ", self.run_guard("prepare", success=False).stderr)
+
+    def test_dual_rejects_port_collision_and_competing_quic(self):
+        self.configure_dual_profile()
+        self.config["inbounds"][1]["port"] = 28351
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.assertIn("listener disagree", self.run_guard("prepare", success=False).stderr)
+        self.configure_dual_profile()
+        self.config["inbounds"][0]["streamSettings"]["tlsSettings"]["alpn"] = ["h2", "h3"]
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.assertIn("one TCP", self.run_guard("prepare", success=False).stderr)
+
+    def test_attestation_accepts_only_account_removal_for_both_transports(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "xmesh_profile_attest", ROOT / "xmesh-profile-attest.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.configure_dual_profile()
+        active = json.loads(json.dumps(self.config))
+        active["inbounds"][0]["settings"]["clients"] = []
+        active["inbounds"][1]["settings"]["users"] = []
+        self.assertTrue(module.is_restricted_copy(self.config, active))
+        active["inbounds"][1]["settings"]["users"] = [{"auth": "injected"}]
+        self.assertFalse(module.is_restricted_copy(self.config, active))
+
     def test_signed_hysteria_email_with_s_in_tag(self):
         # Regression: raw regex [^\\\\s] accidentally rejected the letter s.
         self.configure_protocol("hysteria")
