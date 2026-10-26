@@ -49,7 +49,7 @@ class MixedALPNRouterTests(unittest.TestCase):
 
     def test_router_does_not_override_manual_routes(self):
         self.assertIn('action = "unmanaged"', SYNC)
-        self.assertIn('if action == "unmanaged"', SYNC)
+        self.assertIn('if [[ "$action" == unmanaged ]]', SYNC)
         self.assertIn('os.replace(tmp, router_path)', SYNC)
         self.assertIn('docker compose up -d --no-deps --force-recreate xmesh-node', SYNC)
 
