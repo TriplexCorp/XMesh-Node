@@ -266,6 +266,27 @@ class SignedPolicyTests(unittest.TestCase):
         self.envelope.write_text(json.dumps(body))
         self.run_guard("prepare", NOW + 1000, success=False)
 
+    def test_expiring_lease_never_clears_earlier_exhausted_offline_quota(self):
+        self.policy["users"][0]["expireAtMs"] = 0
+        self.write_envelope()
+        self.run_guard("prepare")
+        self.run_guard("commit")
+        self.stats.write_text('{"1":150}')
+        self.run_guard("offline", NOW + 1000)
+        self.assertEqual(self.num_clients(), 0)
+        self.run_guard("offline", self.policy["validUntilMs"])
+        self.assertEqual(self.num_clients(), 0)
+        self.assertEqual(
+            json.loads((self.state / "policy-usage.json").read_text())["users"]["1"]["revokedReason"],
+            "quota")
+        # A newer signed policy without changed entitlement must not refill
+        # a quota that was exhausted BEFORE the previous lease expired.
+        self.policy["issuedAtMs"] = NOW + 7 * 86400000 + 1000
+        self.policy["validUntilMs"] = self.policy["issuedAtMs"] + 7 * 86400000
+        self.write_envelope()
+        self.run_guard("prepare", self.policy["issuedAtMs"] + 1)
+        self.assertEqual(self.num_clients(), 0)
+
     def test_unlimited_user_policy_expires_offline_then_accepts_new_signed_lease(self):
         # Null offlineBudgetBytes is an unlimited traffic quota, not infinite
         # validity for an already expired signed control-plane policy.
