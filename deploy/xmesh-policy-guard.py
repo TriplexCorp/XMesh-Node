@@ -444,7 +444,9 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
                 reason = "unverified-traffic-counter"
             elif total - int(record.get("anchor", 0)) >= int(record.get("budget") or 0):
                 reason = "quota"
-        if offline and now_ms > policy["validUntilMs"] and budget is not None:
+        # A signed policy has a finite validity even for unlimited subscriptions.
+        # An absent offline traffic quota is not an exemption from expiration.
+        if offline and now_ms >= policy["validUntilMs"]:
             reason = "policy-expired"
         if reason and offline:
             # Persist quota denial across reconnects and process restarts.
