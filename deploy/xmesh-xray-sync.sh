@@ -279,8 +279,9 @@ i=json.load(open(sys.argv[1]))["inbounds"][0]
 s=i.get("streamSettings",{})
 network=s.get("network")
 alpn=s.get("tlsSettings",{}).get("alpn",[])
-quic= i.get("protocol")=="hysteria" or network in ("hysteria","quic") or (s.get("security")=="tls" and network in ("masque","xhttp") and alpn==["h3"])
-print("udp" if quic else "tcp")
+quic= i.get("protocol")=="hysteria" or network in ("hysteria","quic") or (s.get("security")=="tls" and network in ("masque","xhttp") and "h3" in alpn)
+tcp= network=="xhttp" and any(p in alpn for p in ("h2","http/1.1")) and "h3" in alpn
+print("both" if quic and tcp else "udp" if quic else "tcp")
 ' "$CONFIG_FILE")"
 
 # Reconcile even when Xray's JSON is unchanged: the router may have drifted.
@@ -325,15 +326,25 @@ try:
         inbound = json.load(f)["inbounds"][0]
     old_port = int(inbound["port"])
     old_stream = inbound.get("streamSettings", {})
-    old_network = "udp" if inbound.get("protocol") == "hysteria" or old_stream.get("network") in ("hysteria", "quic") or (old_stream.get("security") == "tls" and old_stream.get("network") in ("masque", "xhttp") and old_stream.get("tlsSettings", {}).get("alpn", []) == ["h3"]) else "tcp"
-    if old_network == "udp":
+    old_alpn = old_stream.get("tlsSettings", {}).get("alpn", [])
+    old_quic = inbound.get("protocol") == "hysteria" or old_stream.get("network") in ("hysteria", "quic") or (old_stream.get("security") == "tls" and old_stream.get("network") in ("masque", "xhttp") and "h3" in old_alpn)
+    old_tcp = old_stream.get("network") == "xhttp" and any(p in old_alpn for p in ("h2", "http/1.1")) and "h3" in old_alpn
+    if old_quic:
         previous_udp = f"127.0.0.1:{old_port}"
-    else:
+    if old_tcp or not old_quic:
         previous_tcp = f"127.0.0.1:{old_port}"
 except (OSError, ValueError, TypeError, KeyError, IndexError):
     pass
 action = "aligned"
-if network == "udp":
+if network in ("tcp", "both"):
+    old = router.get("default_tcp")
+    if not isinstance(routes, list) or routes or (
+        old != target and old not in (None, "127.0.0.1:9443", previous_tcp, marked(tcp_marker))):
+        action = "unmanaged"
+    elif old != target:
+        router["default_tcp"] = target
+        action = "changed"
+if network in ("udp", "both"):
     old_listener = router.get("listen_udp", "")
     old_backend = router.get("udp_backend", "")
     owned = (not old_listener and not old_backend) or (
@@ -345,20 +356,13 @@ if network == "udp":
         router["udp_backend"] = target
         action = "changed"
 else:
-    old = router.get("default_tcp")
-    if not isinstance(routes, list) or routes or (
-        old != target and old not in (None, "127.0.0.1:9443", previous_tcp, marked(tcp_marker))):
-        action = "unmanaged"
-    elif old != target:
-        router["default_tcp"] = target
-        action = "changed"
-    # If we previously enabled UDP for Hysteria, do not leave that public
-    # listener pointing to a stale service after switching back to TCP.
+    # Never leave a stale UDP listener when switching to TCP-only.
     existing_udp = router.get("udp_backend", "")
     if router.get("listen_udp", "") == udp_listen and existing_udp and existing_udp == marked(udp_marker):
         router["listen_udp"] = ""
         router["udp_backend"] = ""
-        action = "changed" if action != "unmanaged" else action
+        if action != "unmanaged":
+            action = "changed"
 if action == "changed":
     mode = os.stat(router_path).st_mode & 0o777
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(router_path), prefix=".xmesh-router.")
@@ -400,10 +404,11 @@ PY
   echo "Router remounted for $INBOUND_NETWORK -> 127.0.0.1:$PORT."
  fi
  rm -f "$backup"
- if [[ "$INBOUND_NETWORK" == udp ]];then
+ if [[ "$INBOUND_NETWORK" == udp || "$INBOUND_NETWORK" == both ]];then
   printf '%s\n' "$PORT" > "$STATE/router-managed-udp-port"
   chmod 600 "$STATE/router-managed-udp-port"
- else
+ fi
+ if [[ "$INBOUND_NETWORK" == tcp || "$INBOUND_NETWORK" == both ]];then
   printf '%s\n' "$PORT" > "$STATE/router-managed-port"
   chmod 600 "$STATE/router-managed-port"
  fi
