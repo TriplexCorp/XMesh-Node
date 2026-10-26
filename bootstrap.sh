@@ -64,6 +64,11 @@ if [[ ! -d "$INSTALL_DIR/.git" ]]; then
 else
  git -C "$INSTALL_DIR" pull --ff-only
 fi
+# Pin all subsequent node-side scripts to the exact checked-out repository
+# revision. A running bootstrap cannot be replaced by git pull midway.
+NODE_RELEASE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
+[[ "$NODE_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid node release SHA" >&2;exit 1; }
+echo "XMesh Node component revision: $NODE_RELEASE_SHA"
 # Validate any existing configuration BEFORE consuming the one-use token.
 if [[ -f "$INSTALL_DIR/config.json" ]]; then
  python3 - "$INSTALL_DIR/config.json" "$NODE" <<'PY'
@@ -159,7 +164,7 @@ systemctl enable --now xmesh-node-metrics.timer
 # Agent pulls via signed HTTPS requests. No inbound admin port is exposed.
 echo "Installing managed Xray reconciliation agent..."
 curl --proto '=https' --tlsv1.2 -fsSLo /usr/local/sbin/xmesh-xray-sync \
- https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/main/deploy/xmesh-xray-sync.sh
+ https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/$NODE_RELEASE_SHA/deploy/xmesh-xray-sync.sh
 chmod 0700 /usr/local/sbin/xmesh-xray-sync
 # Install the independent, signed offline policy verifier before enabling sync.
 # Missing or invalid verifier must fail installation rather than silently run
@@ -167,17 +172,25 @@ chmod 0700 /usr/local/sbin/xmesh-xray-sync
 install -d -o root -g root -m 0755 /usr/local/libexec
 GUARD_TMP="$(mktemp /tmp/xmesh-policy.XXXXXXXX)"
 curl --proto '=https' --tlsv1.2 -fsSLo "$GUARD_TMP" \
- https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/main/deploy/xmesh-policy-guard.py
+ https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/$NODE_RELEASE_SHA/deploy/xmesh-policy-guard.py
 python3 -m py_compile "$GUARD_TMP"
 install -o root -g root -m 0700 "$GUARD_TMP" /usr/local/libexec/xmesh-policy-guard.py
 rm -f "$GUARD_TMP"
 # Install independent bounded GeoData fetcher before the first signed sync.
 GEO_TMP="$(mktemp /tmp/xmesh-geodata.XXXXXXXX)"
 curl --proto '=https' --tlsv1.2 -fsSLo "$GEO_TMP" \
- https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/main/deploy/xmesh-geodata-sync.py
+ https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/$NODE_RELEASE_SHA/deploy/xmesh-geodata-sync.py
 python3 -m py_compile "$GEO_TMP"
 install -o root -g root -m 0700 "$GEO_TMP" /usr/local/libexec/xmesh-geodata-sync.py
 rm -f "$GEO_TMP"
+# Managed TLS worker is installed before first sync. It uses only the signed
+# explicit per-node domain and ACME contact from the Control Plane.
+TLS_TMP="$(mktemp /tmp/xmesh-tls.XXXXXXXX)"
+curl --proto '=https' --tlsv1.2 -fsSLo "$TLS_TMP" \
+ "https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/$NODE_RELEASE_SHA/deploy/xmesh-tls-provision.py"
+python3 -m py_compile "$TLS_TMP"
+install -o root -g root -m 0700 "$TLS_TMP" /usr/local/libexec/xmesh-tls-provision.py
+rm -f "$TLS_TMP"
 install -d -o root -g root -m 0700 /var/lib/xmesh-xray-sync
 cat > /etc/systemd/system/xmesh-xray-sync.service <<'SERVICE'
 [Unit]
@@ -211,17 +224,13 @@ if systemctl start xmesh-xray-sync.service; then
  echo "Xray synchronization completed. Managed container:"
  docker ps --filter name=xmesh-managed-xray --format '{{.Names}}: {{.Status}}'
 else
- echo "ERROR: Xray profile could not be applied; XMesh router and enrollment remain installed." >&2
- SYNC_LOG="$(journalctl -u xmesh-xray-sync.service -n 80 --no-pager 2>&1 || true)"
+ echo "WARNING: Node enrollment and router are installed, but assigned Xray profile is NOT ready." >&2
+ SYNC_LOG="$(journalctl -u xmesh-xray-sync.service -n 65 --no-pager 2>&1 || true)"
  printf '%s\\n' "$SYNC_LOG" >&2
- if printf '%s\\n' "$SYNC_LOG" | grep -Eq 'failed to parse certificate|failed to build TLS config';then
-  echo "PROFILE TLS PREREQUISITE: certificateFile/keyFile in the assigned XRAY STUDIO profile must exist on this node." >&2
-  echo "Install certificates for the intended domain or change the assigned profile; bootstrap will NOT issue certificates for an inferred hostname." >&2
- fi
- echo "After fixing the profile requirements run: systemctl start xmesh-xray-sync.service" >&2
- exit 1
+ echo "Repair the profile or its TLS/DNS prerequisites in XMesh Nexus; the sync timer will retry." >&2
+ echo "Check: journalctl -u xmesh-xray-sync.service -n 60 --no-pager" >&2
 fi
-echo "Xray desired-state sync installed and first run completed."
+echo "Xray desired-state sync installed; profile readiness is reported separately above."
 # The system metrics installer runs before the managed Xray policy guard exists.
 # Therefore its conditional user-meter activation is skipped on a virgin node.
 # Activate the dedicated sampler only after both the guard AND managed Xray
