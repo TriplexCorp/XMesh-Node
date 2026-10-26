@@ -29,9 +29,12 @@ def inspect():
     if managed:
         result["domain"] = domain
         # A timer being installed does not guarantee future renewals will succeed.
-        result["autoRenew"] = (Path("/etc/systemd/system/timers.target.wants/certbot.timer").exists()
-                               or Path("/lib/systemd/system/certbot.timer").exists()
-                               or Path("/usr/lib/systemd/system/certbot.timer").exists())
+        try:
+            timer = subprocess.run(["systemctl", "is-enabled", "certbot.timer"],
+                                   capture_output=True, text=True, timeout=4)
+            result["autoRenew"] = timer.returncode == 0 and timer.stdout.strip() in ("enabled", "enabled-runtime")
+        except (OSError, subprocess.SubprocessError):
+            result["autoRenew"] = False
     if not cert.is_file():
         result["state"] = "missing"
         result["lastError"] = "certificate_file_missing"
