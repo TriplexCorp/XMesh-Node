@@ -160,7 +160,12 @@ fi
 # Only the verified online response is eligible; cached/offline policies never
 # trigger new ACME issuance. This runs before Xray's config validation.
 TLS_WORKER=/usr/local/libexec/xmesh-tls-provision.py
-if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
+if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]] && python3 - "$RESP_FILE" <<'PYTLS'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
+sys.exit(0 if data.get("policy",{}).get("tlsProvision") is not None else 1)
+PYTLS
+then
  [[ -r "$TLS_WORKER" ]] || { echo "TLS provisioner missing: update node bootstrap." >&2;exit 1; }
  python3 "$TLS_WORKER" "$RESP_FILE" "$CONFIG_FILE" || {
   echo "Managed TLS prerequisites not satisfied; preserving current Xray." >&2;exit 1;
