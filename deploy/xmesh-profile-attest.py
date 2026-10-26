@@ -50,20 +50,24 @@ def is_restricted_copy(base, active):
             return False
         old_settings = dict(old_settings)
         new_settings = dict(new_settings)
-        old_clients = old_settings.pop("clients", None)
-        new_clients = new_settings.pop("clients", None)
+        # Proxy accounts may be stored in clients (VLESS) or users (Hysteria,
+        # VMess, Trojan, Shadowsocks). Both may only SHRINK after offline
+        # enforcement; account additions or edits fail attestation.
+        for account_field in ("clients", "users"):
+            original_accounts = old_settings.pop(account_field, None)
+            running_accounts = new_settings.pop(account_field, None)
+            if original_accounts is None and running_accounts is None:
+                continue
+            if not isinstance(original_accounts, list) or not isinstance(running_accounts, list):
+                return False
+            remaining = [canonical(account) for account in original_accounts]
+            for account in running_accounts:
+                encoded = canonical(account)
+                if encoded not in remaining:
+                    return False
+                remaining.remove(encoded)
         if canonical(old_settings) != canonical(new_settings):
             return False
-        if old_clients is None and new_clients is None:
-            continue
-        if not isinstance(old_clients, list) or not isinstance(new_clients, list):
-            return False
-        remaining = [canonical(client) for client in old_clients]
-        for client in new_clients:
-            encoded = canonical(client)
-            if encoded not in remaining:
-                return False
-            remaining.remove(encoded)
     return True
 
 
