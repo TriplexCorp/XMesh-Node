@@ -19,7 +19,7 @@ class RouterReconcileTests(unittest.TestCase):
     def check_router(self, old="127.0.0.1:10443", new=5000,
                      previous=10443, previous_network="tcp", network="tcp",
                      routes=None, marker=None, udp_listener="", udp_backend="",
-                     udp_marker=None):
+                     udp_marker=None, public_port=443):
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td)
             router = directory / "config.json"
@@ -29,7 +29,7 @@ class RouterReconcileTests(unittest.TestCase):
             flag_path = directory / "action"
             router.write_text(json.dumps({
                 "default_tcp": old, "routes": routes if routes is not None else [],
-                "listen_tcp": ":443", "listen_udp": udp_listener,
+                "listen_tcp": f":{public_port}", "listen_udp": udp_listener,
                 "udp_backend": udp_backend, "node_id": 27
             }), encoding="utf-8")
             if previous is not None:
@@ -147,6 +147,17 @@ class RouterReconcileTests(unittest.TestCase):
         self.assertEqual(action, "aligned")
         self.assertEqual(result["listen_udp"], ":443")
         self.assertEqual(result["udp_backend"], "127.0.0.1:9444")
+
+    def test_configured_public_udp_port_is_not_hardcoded(self):
+        action, result = self.check_router(
+            network="udp", previous=None, public_port=8443)
+        self.assertEqual(action, "changed")
+        self.assertEqual(result["listen_udp"], ":8443")
+        self.assertEqual(result["udp_backend"], "127.0.0.1:5000")
+
+    def test_h3_network_detection_contract(self):
+        self.assertIn('network in ("masque","xhttp")', SOURCE)
+        self.assertIn('alpn==["h3"]', SOURCE)
 
     def test_shell_integration_contract(self):
         self.assertIn("if ! reconcile_router_default;then", SOURCE)
