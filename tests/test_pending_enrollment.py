@@ -76,7 +76,7 @@ class PendingEnrollmentTest(unittest.TestCase):
         self.assertNotIn('config={"panel_url":', BOOTSTRAP)
         self.assertNotIn('d.update(panel_url=', BOOTSTRAP)
         self.assertIn('for legacy in ("panel_url", "node_id", "private_key_file"):', BOOTSTRAP)
-        self.assertIn("xmesh-node-control", BOOTSTRAP)
+        self.assertIn("install-node-metrics-agent.sh", BOOTSTRAP)
 
     def test_bootstrap_reports_pending_as_success(self):
         self.assertIn("OnUnitInactiveSec=60s", BOOTSTRAP)
