@@ -107,7 +107,7 @@ PY
    exit 1
   fi
  fi
- printf '%s\\n' awaiting_profile > "$STATE/awaiting-profile"
+ printf '%s\n' awaiting_profile > "$STATE/awaiting-profile"
  chmod 0600 "$STATE/awaiting-profile"
  echo "Node enrolled and router ready; awaiting XRAY STUDIO profile assignment. Automatic sync will retry." 
  exit 0
