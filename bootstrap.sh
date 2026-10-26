@@ -224,7 +224,9 @@ cat > /etc/systemd/system/xmesh-xray-sync.timer <<'TIMER'
 Description=Reconcile assigned Xray configuration from XMesh Nexus
 [Timer]
 OnBootSec=10s
-OnUnitInactiveSec=10s
+# Fresh, unconfigured nodes must not poll the control plane every 10 seconds.
+# A newly assigned XRAY STUDIO profile is picked up within about a minute.
+OnUnitInactiveSec=60s
 AccuracySec=1s
 Unit=xmesh-xray-sync.service
 [Install]
@@ -239,13 +241,18 @@ echo "Running first Xray configuration sync now..."
 # Certificates are a per-profile prerequisite; never infer a domain from an
 # error and request one automatically during installation.
 if systemctl start xmesh-xray-sync.service; then
- echo "Xray synchronization completed. Managed container:"
- docker ps --filter name=xmesh-managed-xray --format '{{.Names}}: {{.Status}}'
+ if [[ -f /var/lib/xmesh-xray-sync/awaiting-profile ]];then
+  echo "Enrollment complete. No XRAY STUDIO profile assigned yet (normal on a fresh panel)."
+  echo "Xray is not provisioned; the sync timer will apply a profile once assigned in Nexus."
+ else
+  echo "Xray synchronization completed. Managed container:"
+  docker ps --filter name=xmesh-managed-xray --format '{{.Names}}: {{.Status}}'
+ fi
 else
- echo "WARNING: Node enrollment and router are installed, but assigned Xray profile is NOT ready." >&2
+ echo "WARNING: Node enrollment and router are installed, but Xray profile synchronization failed." >&2
  SYNC_LOG="$(journalctl -u xmesh-xray-sync.service -n 65 --no-pager 2>&1 || true)"
  printf '%s\\n' "$SYNC_LOG" >&2
- echo "Repair the profile or its TLS/DNS prerequisites in XMesh Nexus; the sync timer will retry." >&2
+ echo "Inspect the XRAY STUDIO profile, TLS/DNS prerequisites and the error above; sync will retry." >&2
  echo "Check: journalctl -u xmesh-xray-sync.service -n 60 --no-pager" >&2
 fi
 echo "Xray desired-state sync installed; profile readiness is reported separately above."
