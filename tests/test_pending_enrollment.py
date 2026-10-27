@@ -78,6 +78,15 @@ class PendingEnrollmentTest(unittest.TestCase):
         self.assertIn('for legacy in ("panel_url", "node_id", "private_key_file"):', BOOTSTRAP)
         self.assertIn("install-node-metrics-agent.sh", BOOTSTRAP)
 
+    def test_bootstrap_enrollment_conflict_guidance_is_safe(self):
+        self.assertIn('case "$ENROLL_STATUS" in', BOOTSTRAP)
+        self.assertIn('Node $NODE is already enrolled with a DIFFERENT Ed25519 key', BOOTSTRAP)
+        self.assertIn("explicitly approve re-enrollment", BOOTSTRAP)
+        self.assertIn("the local private key is preserved", BOOTSTRAP)
+        self.assertIn('unset TOKEN JSON PROOF', BOOTSTRAP)
+        self.assertNotIn('echo "$TOKEN"', BOOTSTRAP)
+        self.assertNotIn('cat "$ENROLL_REPLY"', BOOTSTRAP)
+
     def test_bootstrap_reports_pending_as_success(self):
         self.assertIn("OnUnitInactiveSec=60s", BOOTSTRAP)
         self.assertIn("No XRAY STUDIO profile assigned yet (normal on a fresh panel)", BOOTSTRAP)
