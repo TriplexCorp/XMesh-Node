@@ -1,5 +1,7 @@
 # XMesh Node
 
+**Новое staging-звено для будущего обновления Agent:** Linux Go 1.27 `cutover/commit_receipt_journal_linux.go` принимает **только дважды проверенный Nexus commit receipt**, жёстко связывает его с точным ранее сохранённым подписанным ACK, permit, epoch и pin `panel_response`, затем сохраняет исходные байты в приватном `0600` журнале с `fsync` файла/каталога и защитой от конкурентных/конфликтующих retry. При повторной загрузке все подписи проверяются заново. **Никаких сетевых вызовов, переключения vault, удаления старых ключей или production Agent Go 1.23**; работа против отката всего диска и полноценный защищённый rollout ещё нужны.
+
 **Экспериментальный Node verifier receipt V1:** Go 1.27 `security/xspv2/poc-go/cutover/receipt.go` проверяет **обе** подписи Nexus по закреплённым `panel_response` ключам и сравнивает квитанцию с исходным локально сохранённым permit, точными подписанными байтами ACK, nonce и epoch. Поддельная или неполная квитанция отклоняется. Это пока **не запущенный production Go Agent** и не разрешение удалять старые ключи. [Контракт Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_SIGNED_COMMIT_RECEIPT.md).
 
 ## Единственный режим будущего Node↔Nexus: постквантовый, без fallback
