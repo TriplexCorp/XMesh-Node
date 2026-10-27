@@ -115,3 +115,76 @@ func TestNoProofFromIncompleteOrResumedSessions(t *testing.T){
   HandshakeComplete:true,Version:tls.VersionTLS13,CurveID:tls.X25519MLKEM768,
  });err==nil{t.Fatal("missing certificate verification accepted")}
 }
+
+func TestMandatoryPQDialNeverReturnsClassicalConnection(t *testing.T) {
+    cert, roots := testCertificate(t, "node-control.example.test")
+    ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+    defer cancel()
+
+    secure := launchServer(t, cert, tls.VersionTLS13, []tls.CurveID{tls.X25519MLKEM768})
+    conn, err := DialStrict(ctx, secure, "node-control.example.test", roots)
+    if err != nil {
+        t.Fatalf("mandatory PQ dial rejected valid hybrid connection: %v", err)
+    }
+    state := conn.ConnectionState()
+    if err := conn.Close(); err != nil {
+        t.Fatalf("close secure dial: %v", err)
+    }
+    if state.Version != tls.VersionTLS13 || state.CurveID != tls.X25519MLKEM768 ||
+        state.DidResume || !state.HandshakeComplete || len(state.VerifiedChains) == 0 {
+        t.Fatalf("invalid strict control connection: version=%x group=%s resumed=%v",
+            state.Version, state.CurveID, state.DidResume)
+    }
+
+    // Each of these servers might offer valid HTTPS, but MUST NOT produce
+    // a usable XSP/2 control connection. No flags or user-selected fallback.
+    insecureCases := []struct {
+        name string
+        address string
+        serverName string
+        roots *x509.CertPool
+    }{
+        {
+            name: "valid-cert-classical-only",
+            address: launchServer(t, cert, tls.VersionTLS13, []tls.CurveID{tls.X25519}),
+            serverName: "node-control.example.test",
+            roots: roots,
+        },
+        {
+            name: "valid-cert-tls12-only",
+            address: launchServer(t, cert, tls.VersionTLS12, []tls.CurveID{tls.X25519}),
+            serverName: "node-control.example.test",
+            roots: roots,
+        },
+        {
+            name: "wrong-server-identity",
+            address: secure,
+            serverName: "attacker.example.test",
+            roots: roots,
+        },
+        {
+            name: "untrusted-certificate",
+            address: secure,
+            serverName: "node-control.example.test",
+            roots: x509.NewCertPool(),
+        },
+        {
+            name: "missing-name",
+            address: secure,
+            serverName: "",
+            roots: roots,
+        },
+    }
+    for _, tc := range insecureCases {
+        t.Run(tc.name, func(t *testing.T) {
+            rejected, err := DialStrict(ctx, tc.address, tc.serverName, tc.roots)
+            if rejected != nil {
+                rejected.Close()
+                t.Fatal("fail-open: returned a usable connection without mandatory PQ trust")
+            }
+            if err == nil {
+                t.Fatal("fail-open: missing mandatory PQ rejection")
+            }
+        })
+    }
+}
