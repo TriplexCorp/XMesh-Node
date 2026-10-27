@@ -1,5 +1,9 @@
 # XMesh Node
 
+## Единственный режим будущего Node↔Nexus: постквантовый, без fallback
+
+Для **будущего рабочего XSP-v2 Agent** пользователь не выбирает режим безопасности: нужны **TLS 1.3 + фактически согласованный `X25519MLKEM768` с проверенным сервером** и **Ed25519 И ML-DSA-65** для управляющих сообщений. Не выполнено хотя бы одно требование — **Node не устанавливает управляющее соединение** и не пробует `XMESH1`/Ed25519-only/X25519-only. Нет обходных флагов или опции «продолжить небезопасно». Изолированная Go 1.27 реализация `tlsprobe.DialStrict` уже возвращает подключение только после строгой TLS-проверки; это **ещё не рабочий Go 1.23 Agent**. Существующая legacy-нода продолжает работу только до отдельного согласованного перехода, не как «второй вариант» продукта. [Нормативная PQ-only политика Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_PQ_ONLY_SECURITY_POLICY.md).
+
 ## Продолжение в новом диалоге — читай сначала (27.10.2026)
 
 **Перед новой разработкой XSP-v2 открыть [Nexus: актуальный handoff и следующий P0](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_NEW_CHAT_HANDOFF.md), [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md), затем проверить свежий `main`, открытые PR и CI двух репозиториев.** Там находится общий план, статусы всех merge, проверенные CI по SHA и задачи для безопасного окончания post-quantum control plane.

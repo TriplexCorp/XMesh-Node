@@ -7,6 +7,8 @@
 >
 > Schema identifier: `xsp2-wire-candidate-1`. Any incompatible decision must advance the schema/protocol version and regenerate all three independent vector checks. Do not use the candidate for a production signing key until reviewed.
 
+**Updated mandatory product invariant (27 October 2026):** XSP-v2 has exactly one PQ-only security policy. **No user-facing mode selection**: if authenticated TLS 1.3 `X25519MLKEM768` or Ed25519 **AND** ML-DSA-65 is missing, the Node **does not connect** and never retries with `XMESH1`, Ed25519-only, TLS 1.2 or ordinary X25519. Historical v1 facts below describe not-yet-migrated code, not a supported future alternative. [Binding policy](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_PQ_ONLY_SECURITY_POLICY.md).
+
 ## 1. Scope, trust boundaries and observed v1 facts
 
 | Message / component | Observed today | v2 security requirement |

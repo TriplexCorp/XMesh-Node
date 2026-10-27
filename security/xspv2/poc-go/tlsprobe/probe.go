@@ -35,28 +35,69 @@ func VerifyNegotiated(state tls.ConnectionState) error {
  return nil
 }
 
-// Probe establishes a fresh, authenticated TLS 1.3 handshake and never sends
-// HTTP data. roots=nil uses system trust. An additional CA bundle, if supplied,
-// must be explicitly trusted by the operator. InsecureSkipVerify is NEVER set.
-// No session cache or TLS resumption is used.
-func Probe(ctx context.Context, address, serverName string, roots *x509.CertPool) (Report,error) {
- if strings.TrimSpace(serverName)==""||strings.TrimSpace(address)=="" {return Report{},errors.New("address and serverName are required")}
- host,port,err:=net.SplitHostPort(address)
- if err!=nil||host==""||port=="" {return Report{},errors.New("address must be host:port")}
- config:=&tls.Config{
-  MinVersion:tls.VersionTLS13,
-  MaxVersion:tls.VersionTLS13,
-  CurvePreferences:[]tls.CurveID{tls.X25519MLKEM768},
-  ServerName:serverName,RootCAs:roots,
-  ClientSessionCache:nil,
- }
- dialer:=tls.Dialer{NetDialer:&net.Dialer{Timeout:8*time.Second},Config:config}
- raw,err:=dialer.DialContext(ctx,"tcp",address)
- if err!=nil {return Report{},fmt.Errorf("authenticated hybrid handshake failed: %w",err)}
- defer raw.Close()
- conn,ok:=raw.(*tls.Conn)
- if !ok{return Report{},errors.New("TLS connection state unavailable")}
- state:=conn.ConnectionState()
- if err:=VerifyNegotiated(state);err!=nil{return Report{},err}
- return Report{TLSVersion:"TLS1.3",NegotiatedGroup:state.CurveID.String(),CertificateVerified:true,FullHandshake:true},nil
+// DialStrict is the sole TLS connection constructor intended for a future
+// XSP-v2 secure control client. It has NO "legacy", "allow classical" or
+// "disable PQ" parameter. If TLS 1.3 + X25519MLKEM768, the verified server
+// identity, or a fresh handshake cannot be established, it returns NO
+// connection. Callers must NOT retry with a weaker TLS configuration or XMESH1.
+//
+// This function belongs to the separate Go 1.27 PoC module and is not yet
+// linked into the production Go 1.23 agent. roots=nil uses system trust.
+// The caller owns the returned connection and must close it.
+//
+// IMPORTANT: a strict TLS key agreement protects only the examined TLS hop.
+// It does not verify XSP/2 dual Ed25519 + ML-DSA-65 message signatures, and
+// the HTTPS terminator-to-origin hop needs independent security assessment.
+func DialStrict(ctx context.Context, address, serverName string, roots *x509.CertPool) (*tls.Conn, error) {
+    if strings.TrimSpace(serverName) == "" || strings.TrimSpace(address) == "" {
+        return nil, errors.New("address and serverName are required")
+    }
+    host, port, err := net.SplitHostPort(address)
+    if err != nil || host == "" || port == "" {
+        return nil, errors.New("address must be host:port")
+    }
+    config := &tls.Config{
+        MinVersion:         tls.VersionTLS13,
+        MaxVersion:         tls.VersionTLS13,
+        CurvePreferences:   []tls.CurveID{tls.X25519MLKEM768},
+        ServerName:         serverName,
+        RootCAs:           roots,
+        ClientSessionCache: nil,
+    }
+    dialer := tls.Dialer{
+        NetDialer: &net.Dialer{Timeout: 8 * time.Second},
+        Config:    config,
+    }
+    raw, err := dialer.DialContext(ctx, "tcp", address)
+    if err != nil {
+        return nil, fmt.Errorf("mandatory hybrid TLS connection rejected: %w", err)
+    }
+    conn, ok := raw.(*tls.Conn)
+    if !ok {
+        _ = raw.Close()
+        return nil, errors.New("verified TLS connection state unavailable")
+    }
+    if err := VerifyNegotiated(conn.ConnectionState()); err != nil {
+        _ = conn.Close()
+        return nil, fmt.Errorf("mandatory hybrid TLS connection rejected: %w", err)
+    }
+    return conn, nil
+}
+
+// Probe tests the identical strict dial path used by future XSP/2 clients.
+// It closes the connection without sending HTTP traffic or changing Node
+// state. A positive result confirms ONLY one authenticated TLS hop.
+func Probe(ctx context.Context, address, serverName string, roots *x509.CertPool) (Report, error) {
+    conn, err := DialStrict(ctx, address, serverName, roots)
+    if err != nil {
+        return Report{}, err
+    }
+    defer conn.Close()
+    state := conn.ConnectionState()
+    return Report{
+        TLSVersion:         "TLS1.3",
+        NegotiatedGroup:    state.CurveID.String(),
+        CertificateVerified: true,
+        FullHandshake:      true,
+    }, nil
 }
