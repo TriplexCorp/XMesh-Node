@@ -2,6 +2,10 @@
 
 > **Research / test-only checkpoint. Do not enable strict-pq or edit production TLS/Nginx based on this file.** These tests exercise full TLS handshakes against ephemeral test servers; they do NOT mean production Nexus ↔ Node is hybrid-protected. XSP-v2 signed-message authentication, minimum suite/epoch persistence, per-node key migration and certificate lifecycle are separate, unfinished gates.
 
+## Binding product decision: mandatory PQ-only, no user-selected mode
+
+The completed XSP-v2 product must establish **NO control connection** unless TLS 1.3 actually negotiates **`X25519MLKEM768`** with a verified peer identity **AND** control messages meet Ed25519 **AND** ML-DSA-65 authentication. There is no `strict-pq` toggle, fallback to `XMESH1`, alternative curve, `--insecure` option or user override. `tlsprobe.DialStrict` is the strict authenticated connection constructor in the **Go 1.27 research module**, with no weaker-protocol parameter; it rejects unsuitable connections before returning one. The running Go 1.23 Agent has **not** been migrated yet. Historical legacy service cannot be claimed PQ; it is retained only until an authorized safe cutover, not as a product mode. [Authoritative policy](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_PQ_ONLY_SECURITY_POLICY.md).
+
 ## 1. What is actually deployed today
 
 - Nexus `backend/src/main.rs` serves **HTTP** behind a separately deployed TLS reverse proxy. `deploy/install-panel-host.sh` generates a generic Nginx public HTTPS vhost, currently specifying `ssl_protocols TLSv1.2 TLSv1.3`. It does **not** force a post-quantum group. **The public dashboard and subscriptions must not be switched to strict mode in this experimental stage.**
@@ -36,7 +40,7 @@ A successful output confirms only that connection's **TLS 1.3 / X25519MLKEM768 /
 
 Check **exact** TLS terminator (Nginx/Caddy/HAProxy/CDN/LB) and linked crypto library, not only `openssl version` on the host. For Nginx, inspect `nginx -V` and an appropriately redacted `nginx -T`; verify that its TLS library actually supports `X25519MLKEM768` and that configuration/virtual host selects that group. OpenSSL 3.5+ and its `-groups X25519MLKEM768` option can be used for a separate independent diagnostic. OpenSSL upstream documentation: https://docs.openssl.org/3.5/man3/SSL_CONF_cmd/. Do not assume an unmodified Nginx vhost negotiates the hybrid group just because the linked library supports it.
 
-For a future dedicated node-only endpoint, the likely prerequisites are TLS 1.3-only, an explicitly constrained `X25519MLKEM768` group, trusted certificate/hostname/SNI, exact signed path mapping, measured current negotiation and an intentionally planned compatibility window. Any actual Nginx changes need a **separate reviewed change** with `nginx -t`, staged restart/reload, DNS/ACME/renewal checks, canary metrics, and a rollback procedure that does not lower a node's durable `minimumSuite`.
+For a future dedicated node-only endpoint, the likely prerequisites are TLS 1.3-only, an explicitly constrained `X25519MLKEM768` group, trusted certificate/hostname/SNI, exact signed path mapping, measured current negotiation and mandatory PQ-only refusal of any weaker connection. Any actual Nginx changes need a **separate reviewed change** with `nginx -t`, staged restart/reload, DNS/ACME/renewal checks, canary metrics, and a rollback procedure that does not lower a node's durable `minimumSuite`.
 
 ## 3. CI evidence and negative controls
 
@@ -49,7 +53,7 @@ For a future dedicated node-only endpoint, the likely prerequisites are TLS 1.3-
 
 - [ ] Measure and record live canary Node → real HTTPS terminator handshake group, certificate chain and SNI; repeat across all regional proxies. **No probe has been run against the user's VPS.**
 - [ ] Inventory and either secure or formally assess CDN/LB → origin and Nginx → API boundaries. The existing HTTP backend hop cannot be claimed to use hybrid TLS.
-- [ ] Add durable per-node `minimumSuite`/epoch, atomic replay state, verified **responses and commands**, authenticated two-phase enrollment, key rotation and recovery. Refuse v1 fallback only **after** explicit owner-approved strict activation.
+- [ ] Add durable per-node `minimumSuite`/epoch, atomic replay state, verified **responses and commands**, authenticated two-phase enrollment, key rotation and recovery. Refuse v1 fallback for **every XSP-v2 connection attempt**; keep the existing non-PQ deployment separate only until an authorized replacement. No product user selection.
 - [ ] Review TLS termination configuration and potential separate node-only endpoint; test ACME renewal, availability, session resumption, time drift, partial failure, downgrade telemetry and recovery.
 - [ ] Independent security review, FIPS 204 known-answer/fuzz coverage, rollout on disposable VPS, backups and signed rollback protections.
 - [ ] Before publishing production-ready claims, record latest **green CI in both repositories** and real, recorded canary evidence.
