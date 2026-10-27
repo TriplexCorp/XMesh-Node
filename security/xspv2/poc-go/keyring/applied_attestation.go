@@ -17,17 +17,13 @@ import (
 // A filesystem restore that replaces master, active vault, snapshots AND floor
 // could fool this software-only attestation. Production needs a protected
 // monotonic counter / remote consistency check before accepting cutover.
-func AttestAppliedRotation(vault, master string, nodeID int64,
+func attestAppliedRotationLocked(vault string,key []byte,nodeID int64,
  fromEpoch, toEpoch uint64, priorEdID, priorPQID, nextEdID, nextPQID string) (PublicBundle,error) {
  var empty PublicBundle
  if nodeID<=0 || fromEpoch==0 || fromEpoch==^uint64(0) ||
   toEpoch!=fromEpoch+1 || priorEdID=="" || priorPQID=="" || nextEdID=="" || nextPQID=="" {
   return empty,errors.New("invalid expected cutover identity")
  }
- lock,key,err:=masterLocked(master,false)
- if err!=nil {return empty,err}
- defer lock.Close()
- defer clear(key)
  if err=secureDir(vault);err!=nil{return empty,err}
  floor,err:=readFloor(vault)
  if err!=nil{return empty,err}
@@ -66,4 +62,36 @@ func AttestAppliedRotation(vault, master string, nodeID int64,
   return empty,errors.New("active decrypted public identity mismatches signed permit")
  }
  return active,nil
+}
+
+
+// WithAttestedAppliedRotation holds the shared wrapping-key flock for the
+// entire verified operation, blocking cooperative Prepare/Activate/Recover
+// writers that use the exclusive master lock. The callback must not acquire
+// this same master lock again or invoke a nested vault rotation.
+func WithAttestedAppliedRotation(vault,master string,nodeID int64,
+ fromEpoch,toEpoch uint64,priorEdID,priorPQID,nextEdID,nextPQID string,
+ action func(PublicBundle) error) error {
+ if action==nil{return errors.New("missing attested action")}
+ lock,key,e:=masterLocked(master,false)
+ if e!=nil{return e}
+ defer lock.Close()
+ defer clear(key)
+ active,e:=attestAppliedRotationLocked(vault,key,nodeID,fromEpoch,toEpoch,
+  priorEdID,priorPQID,nextEdID,nextPQID)
+ if e!=nil{return e}
+ return action(active)
+}
+
+// AttestAppliedRotation is a read-only convenience probe. For writing an
+// ACK journal, use WithAttestedAppliedRotation to avoid the check/write race.
+func AttestAppliedRotation(vault, master string, nodeID int64,
+ fromEpoch, toEpoch uint64, priorEdID, priorPQID, nextEdID, nextPQID string) (PublicBundle,error) {
+ var active PublicBundle
+ e:=WithAttestedAppliedRotation(vault,master,nodeID,fromEpoch,toEpoch,
+  priorEdID,priorPQID,nextEdID,nextPQID,func(pub PublicBundle) error{
+    active=pub
+    return nil
+  })
+ return active,e
 }
