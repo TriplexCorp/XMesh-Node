@@ -32,7 +32,7 @@ Repeated recovery after the swap is idempotent.
 ## Experimental operator sequence
 
 1. Prepare on a disposable host with Go 1.27.3: `keytool prepare-rotation -key MASTER -vault VAULT -expected-epoch EPOCH`. Existing active key material is unaffected.
-2. Review the two returned candidate public-key IDs through a **separately trusted owner channel**. The current staging Nexus enrollment `claim` immediately revokes old public keys, so **do not use that claim route as a live rotation handshake**.
+2. Review the two returned candidate public-key IDs through a **separately trusted owner channel**. The original one-shot Nexus enrollment `claim` revoked old public keys; [Nexus PR #24](https://github.com/TriplexCorp/XMesh-Nexus/pull/24) restricts it to **initial enrollment only**. In either case, **do not use the claim route as a rotation handshake**.
 3. Only after manual approval of the exact candidate, run `keytool activate-rotation -key MASTER -vault VAULT -expected-epoch EPOCH -expected-ed-key-id APPROVED_ED -expected-pq-key-id APPROVED_PQ`. This is a **local manual authorization**, not a signed Nexus ACK.
 4. After an interrupted activation, run `keytool recover-rotation -key MASTER -vault VAULT` on that staging host. Inspect active public metadata and verify that the node and epoch match expectations before any further tests.
 5. While still only prepared, `keytool abort-rotation -key MASTER -vault VAULT -expected-epoch EPOCH` safely discards the candidate. An activated rotation cannot be aborted.
