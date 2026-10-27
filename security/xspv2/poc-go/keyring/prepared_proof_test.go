@@ -17,13 +17,13 @@ func TestPreparedRotationProvesDualKeysWithoutChangingActive(t *testing.T) {
     challengeHex := strings.Repeat("09", 32)
     proof, err := ProvePreparedRotation(vault, master, 1, challengeHex)
     if err != nil { t.Fatal(err) }
-    if proof.NodeID != next.NodeID || proof.KeyEpoch != 2 ||
+    if proof.NodeID != next.NodeID || proof.FromEpoch != 1 || proof.KeyEpoch != 2 ||
         proof.Purpose != "node_request" || proof.ChallengeHex != challengeHex {
         t.Fatal("incorrect prepared key identity or challenge")
     }
     challenge := make([]byte, 32)
     for i := range challenge { challenge[i] = 9 }
-    signed, err := EnrollmentSigningInput(next, challenge)
+    signed, err := RotationSigningInput(next, 1, challenge)
     if err != nil { t.Fatal(err) }
     edSig, err := base64.StdEncoding.DecodeString(proof.Ed25519SignatureB64)
     if err != nil { t.Fatal(err) }
@@ -34,6 +34,12 @@ func TestPreparedRotationProvesDualKeysWithoutChangingActive(t *testing.T) {
     if !ed25519.Verify(next.EdPublic, signed, edSig) ||
         mldsa.Verify(pqKey, signed, pqSig, nil) != nil {
         t.Fatal("prepared private key proof did not verify with both next public keys")
+    }
+    enrollmentSigned, err := EnrollmentSigningInput(next, challenge)
+    if err != nil { t.Fatal(err) }
+    if ed25519.Verify(next.EdPublic, enrollmentSigned, edSig) ||
+        mldsa.Verify(pqKey, enrollmentSigned, pqSig, nil) == nil {
+        t.Fatal("rotation signatures were accepted for initial enrollment domain")
     }
     current, err := Description(vault, master)
     if err != nil || current.KeyEpoch != 1 || current.EdKeyID != active.EdKeyID {
