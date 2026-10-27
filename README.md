@@ -1,5 +1,15 @@
 # XMesh Node
 
+## Продолжение в новом диалоге — читай сначала (27.10.2026)
+
+**Перед новой разработкой XSP-v2 открыть [Nexus: актуальный handoff и следующий P0](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_NEW_CHAT_HANDOFF.md), [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md), затем проверить свежий `main`, открытые PR и CI двух репозиториев.** Там находится общий план, статусы всех merge, проверенные CI по SHA и задачи для безопасного окончания post-quantum control plane.
+
+**Node `main` уже содержит экспериментальную Go 1.27 криптографию и state gates:** [#13/#14](https://github.com/TriplexCorp/XMesh-Node/pull/14) — dual Ed25519 + ML-DSA-65 signed Nexus permit / Node applied ACK; [#15/#16](https://github.com/TriplexCorp/XMesh-Node/pull/16) — approved candidate digest и отпечатки старого/нового public keyset; [#17](https://github.com/TriplexCorp/XMesh-Node/pull/17) — fsynced permit journal; [#18](https://github.com/TriplexCorp/XMesh-Node/pull/18) — fsynced dual-signed ACK journal; [#19](https://github.com/TriplexCorp/XMesh-Node/pull/19) — подтверждение реально активного encrypted vault, epoch floor, previous/next ciphertext и lifecycle lock; [#20](https://github.com/TriplexCorp/XMesh-Node/pull/20) — CI inventory guard. Эти PR слиты в `main`.
+
+**Nexus уже имеет экспериментальный ACK → PostgreSQL CAS helper [#46](https://github.com/TriplexCorp/XMesh-Nexus/pull/46), но цельный протокол ещё НЕ готов:** нет защищённого signer и подписанной commit receipt, retry-after-commit, полного anti-rollback после реставрации VPS, PostgreSQL crash/fault tests и тестового e2e cutover. **НЕ интегрировать исследовательский Go 1.27 модуль напрямую в production Go 1.23 Agent без отдельного тестируемого проекта миграции.** Рабочий Xray обслуживает и шифрует VPN пользователей; `XMESH1` активен, `strict-pq` OFF. На «Польша-2» ничего автоматически менять не требуется.
+
+_Следующие исторические разделы о `prepare/prove` показывают тогдашний этап; «ACK отсутствует» там означает, что он ещё не существовал **на тот момент**, а не то, что в нынешнем `main` нет staging ACK verifier/journal._
+
 **Управляемая VPN-нода для XMesh Nexus:** Docker-маршрутизатор TCP/TLS ClientHello (SNI/ALPN), настраиваемый UDP-forwarder, подписанный heartbeat и агенты, которые синхронизируют и применяют конфигурацию Xray с панели. Нода устанавливается автоматически из Nexus или отдельно как самостоятельный Docker-router.
 
 ## Основной способ: автоматическое подключение из Nexus
@@ -18,11 +28,11 @@
 
 **На уже подключённой ноде не нужно заменять Ed25519-ключ или переустанавливать Docker.** Обновите панель Nexus, затем нажмите в карточке **«Обновить Agent»** и дождитесь подтверждения новой версии и следующего подписанного heartbeat. Штатный обновляющий скрипт Nexus загружает `xmesh-profile-attest.py`, проверяет Python-синтаксис, ставит файл атомарно и перезапускает нужные таймеры. Новый heartbeat может сообщить `verified` только после локальной криптографической проверки подписи политики, digest активного JSON и container mount. Для дополнительной диагностики на самой VPS: `sudo ls -l /usr/local/libexec/xmesh-profile-attest.py`, `sudo python3 /usr/local/libexec/xmesh-profile-attest.py --json`, `sudo journalctl -u xmesh-node-control.service -n 40 --no-pager`. Результат `policy_invalid`, `active_config_mismatch` и другие ошибки требуют отдельной диагностики — не обходите проверку подписи.
 
-### Staging XSP-v2: owner prepare → proof выполнен, cutover не реализован
+### Исторический staging-этап XSP-v2: owner prepare → proof (полный cutover всё ещё не развернут)
 
 После [Node PR #10](https://github.com/TriplexCorp/XMesh-Node/pull/10) `keytool prove-prepared` создаёт **отдельную** dual-signature подпись Ed25519 + ML-DSA-65 над доменом `XSP2-KEY-ROTATE-PREPARE-V1`, связанным с `nodeId`, `fromEpoch`/`keyEpoch`, challenge и обеими новыми public key IDs. [Nexus PR #30](https://github.com/TriplexCorp/XMesh-Nexus/pull/30) в *feature-gated staging* регистрирует владельцем одобренную **публичную** pending-пару в migration `0102` и проверяет обе подписи. См. [контракт staging-операций](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_STAGING_ROTATION_PREPARE.md).
 
-Ответ Nexus `preparedProofVerified: true` вместе с `cutoverAuthorized: false` **не является подписанным разрешением активировать** `keytool activate-rotation`, отзыв старой пары либо повышением suite floor. Производственный агент Go 1.23 и bootstrap **не используют** исследовательские ключи. Следующий P0: доверенное подписанное разрешение Nexus→Node, подписанный Node-applied/cutover ACK, durable anti-replay, транзакционное переключение и восстановление при сбое; отдельная проверка на VPS и security review обязательны.
+Ответ Nexus `preparedProofVerified: true` вместе с `cutoverAuthorized: false` **не является подписанным разрешением активировать** `keytool activate-rotation`, отзыв старой пары либо повышением suite floor. Производственный агент Go 1.23 и bootstrap **не используют** исследовательские ключи. После этого исторического этапа в `main` появились signing/verification primitives, журналы Node и атомарный staging ACK CAS helper Nexus [#46](https://github.com/TriplexCorp/XMesh-Nexus/pull/46). **Следующий реальный P0 теперь — транзакционные fault tests, idempotent retry + signed commit receipt, protected signer и e2e recovery**; staging VPS и security review обязательны.
 
 ## XSP-v2 — P0: post-quantum security в разработке (27 октября 2026)
 
