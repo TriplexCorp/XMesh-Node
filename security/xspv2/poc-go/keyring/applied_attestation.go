@@ -18,10 +18,10 @@ import (
 // could fool this software-only attestation. Production needs a protected
 // monotonic counter / remote consistency check before accepting cutover.
 func AttestAppliedRotation(vault, master string, nodeID int64,
- fromEpoch, toEpoch uint64, nextEdID, nextPQID string) (PublicBundle,error) {
+ fromEpoch, toEpoch uint64, priorEdID, priorPQID, nextEdID, nextPQID string) (PublicBundle,error) {
  var empty PublicBundle
  if nodeID<=0 || fromEpoch==0 || fromEpoch==^uint64(0) ||
-  toEpoch!=fromEpoch+1 || nextEdID=="" || nextPQID=="" {
+  toEpoch!=fromEpoch+1 || priorEdID=="" || priorPQID=="" || nextEdID=="" || nextPQID=="" {
   return empty,errors.New("invalid expected cutover identity")
  }
  lock,key,err:=masterLocked(master,false)
@@ -43,6 +43,23 @@ func AttestAppliedRotation(vault, master string, nodeID int64,
  }
  _,active,err:=openWithMaster(vault,key)
  if err!=nil{return empty,err}
+ // Previous and pending snapshots are authenticated using the encrypted
+ // wrapping key, not accepted merely because two 0600 files happen to exist.
+ // The auxiliary paths do not have a floor file; this does not lower the
+ // active vault's independently verified floor.
+ _,prior,err:=openWithMaster(previousPath(vault),key)
+ if err!=nil{return empty,err}
+ _,candidate,err:=openWithMaster(stagedPath(vault),key)
+ if err!=nil{return empty,err}
+ if prior.NodeID!=nodeID || prior.Purpose!="node_request" ||
+  prior.KeyEpoch!=fromEpoch || prior.EdKeyID!=priorEdID ||
+  prior.PQKeyID!=priorPQID || candidate.NodeID!=nodeID ||
+  candidate.Purpose!="node_request" || candidate.KeyEpoch!=toEpoch ||
+  candidate.EdKeyID!=nextEdID || candidate.PQKeyID!=nextPQID ||
+  !bytes.Equal(candidate.EdPublic,active.EdPublic) ||
+  !bytes.Equal(candidate.PQPublic,active.PQPublic) {
+  return empty,errors.New("authenticated old/new rotation snapshots mismatch")
+ }
  if active.NodeID!=nodeID || active.Purpose!="node_request" ||
   active.KeyEpoch!=toEpoch || active.EdKeyID!=nextEdID ||
   active.PQKeyID!=nextPQID {
