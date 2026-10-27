@@ -17,7 +17,7 @@ func TestSealedVaultRotatesFailClosedAndDoesNotLeakPrivateSeeds(t *testing.T){
  vault:=filepath.Join(root,"node.encrypted.json")
  if e:=CreateMasterKey(master);e!=nil{t.Fatal(e)}
  if e:=CreateMasterKey(master);e==nil{t.Fatal("master overwritten")}
- initial,e:=Initialize(vault,master,42,"node_request")
+ _,e:=Initialize(vault,master,42,"node_request")
  if e!=nil{t.Fatal(e)}
  if _,e:=Initialize(vault,master,42,"node_request");e==nil{t.Fatal("vault overwritten")}
  original,e:=os.ReadFile(vault);if e!=nil{t.Fatal(e)}
