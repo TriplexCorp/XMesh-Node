@@ -20,6 +20,7 @@ Go 1.27.3 includes security fixes published on October 19, 2026, including `cryp
 - **Node Go** independently derives ML-DSA-65 keys from 32-byte seed, signs deterministically (ONLY for tests), compares public/signature SHA-256 with independently generated OpenSSL fixtures, verifies both algorithms, and denies Ed-only, ML-DSA-only, substituted-key, modified-payload and damaged-signature cases.
 - **Nexus Rust** independently derives the same keys from seed using OpenSSL EVP, compares public digests, tests signing and both verifications with **AND semantics**, rejects missing/broken/altered signatures, and validates provider availability.
 - **Nexus Python/OpenSSL CLI** independently reproduces deterministic ML-DSA-65 signature digests from shared seeds and verifies them with OpenSSL; a tampered message must fail.
+- **Direct CI exchange:** the Go test CLI emits Ed25519+ML-DSA-65 signatures over the shared wire bytes and the Rust CLI verifies both; then Rust signs (hedged ML-DSA) and Go verifies both. Invalid one-signature, modified-byte and key-substitution cases must be rejected.
 - Each repository has an **isolated CI workflow**; Go uses Go 1.27.3, Rust uses OpenSSL 3.5+ in a dedicated toolchain image. No stage runs against production node credentials.
 
 A common signature SHA-256, common seed-derived public-key SHA-256, and identical wire input prove deterministic output compatibility for this pair of **test messages**; they are not a substitute for live cross-language exchange and adversarial parsing under production conditions.
@@ -27,7 +28,7 @@ A common signature SHA-256, common seed-derived public-key SHA-256, and identica
 ## Remaining PR02 acceptance gates
 
 - [ ] Record latest **green CI in both repos**, including isolated Go, Rust and OpenSSL digest checks, and existing production CI without regressions.
-- [ ] Implement *direct* **Rust signs → Go verifies** and **Go signs → Rust verifies** artifact exchange in one CI job, with canonical binary data and both required signatures; do not infer full verification from digest equality alone.
+- [x] Implement **direct, bidirectional Go signs → Rust verifies AND Rust signs → Go verifies** over the same canonical wire bytes in the isolated Nexus Crypto CI workflow. Public test seeds only; a failing/missing Ed25519 or ML-DSA-65 signature, substituted PQ key and tampered signed payload are rejected. Source: `scripts/check-xsp-cross-language.py`, `security/xspv2/poc-rust/src/bin/interop.rs` (Nexus), `security/xspv2/poc-go/cmd/interop/main.go` (Node). This is a test exchange, not a production verifier.
 - [ ] Run an external ML-DSA-65 FIPS 204 **known-answer-test suite**, fuzz parser/decoder/overlong lengths/duplicate JSON keys and malformed public keys; review OpenSSL provider patch level and dependency supply chain.
 - [ ] Choose actual key-purpose separation, authenticated enrollment/rotation and hardware-independent recovery, versioned error model and bounded parser. No silent Ed25519-only fallback after strict activation.
 - [ ] Test TLS 1.3 with a **measured negotiated X25519MLKEM768** key exchange on the intended HTTPS termination hop, certificate/hostname validation and downgrade rejection.
