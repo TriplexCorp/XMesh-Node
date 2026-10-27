@@ -41,7 +41,7 @@ func TestAppliedACKJournalIdempotentConcurrentAndTamper(t *testing.T){
  errs:=make(chan error,2)
  for i:=0;i<2;i++{
   wg.Add(1)
-  go func(){defer wg.Done();_,e:=PersistVerifiedAppliedACK(dir,raw,permit,next,now);errs<-e}()
+  go func(){defer wg.Done();_,e:=persistVerifiedAppliedACK(dir,raw,permit,next,now);errs<-e}()
  }
  wg.Wait();close(errs)
  for e:=range errs{if e!=nil{t.Fatalf("same signed ACK retry failed: %v",e)}}
@@ -49,19 +49,19 @@ func TestAppliedACKJournalIdempotentConcurrentAndTamper(t *testing.T){
  if !bytes.Equal(row.SignedACK,raw){t.Fatal("signed ACK bytes changed")}
  stat,e:=os.Stat(filepath.Join(dir,ackJournalName));if e!=nil{t.Fatal(e)}
  if stat.Mode().Perm()!=0600{t.Fatal("journal must be private")}
- if _,e=ReloadVerifiedAppliedACK(dir,permit,next,now);e!=nil{t.Fatal(e)}
- if _,e=PersistVerifiedAppliedACK(dir,append(append([]byte(nil),raw...),[]byte("evil")...),permit,next,now);e==nil{
+ if _,e=reloadVerifiedAppliedACK(dir,permit,next,now);e!=nil{t.Fatal(e)}
+ if _,e=persistVerifiedAppliedACK(dir,append(append([]byte(nil),raw...),[]byte("evil")...),permit,next,now);e==nil{
   t.Fatal("malformed alternate ACK accepted")
  }
- if _,e=ReloadVerifiedAppliedACK(dir,permit,next,now+120000);e==nil{t.Fatal("expired ACK accepted")}
+ if _,e=reloadVerifiedAppliedACK(dir,permit,next,now+120000);e==nil{t.Fatal("expired ACK accepted")}
  wrong:=next;wrong.Purpose="panel_response"
- if _,e=ReloadVerifiedAppliedACK(dir,permit,wrong,now);e==nil{t.Fatal("wrong role accepted")}
+ if _,e=reloadVerifiedAppliedACK(dir,permit,wrong,now);e==nil{t.Fatal("wrong role accepted")}
  wrong=next;wrong.PQPublic=[]byte{1}
- if _,e=ReloadVerifiedAppliedACK(dir,permit,wrong,now);e==nil{t.Fatal("substituted PQ key accepted")}
+ if _,e=reloadVerifiedAppliedACK(dir,permit,wrong,now);e==nil{t.Fatal("substituted PQ key accepted")}
  path:=filepath.Join(dir,ackJournalName)
  if e=os.WriteFile(path,[]byte("{corrupt"),0600);e!=nil{t.Fatal(e)}
- if _,e=ReloadVerifiedAppliedACK(dir,permit,next,now);e==nil{t.Fatal("corrupt journal accepted")}
- if _,e=PersistVerifiedAppliedACK(dir,raw,permit,next,now);e==nil{t.Fatal("corrupt journal overwritten")}
+ if _,e=reloadVerifiedAppliedACK(dir,permit,next,now);e==nil{t.Fatal("corrupt journal accepted")}
+ if _,e=persistVerifiedAppliedACK(dir,raw,permit,next,now);e==nil{t.Fatal("corrupt journal overwritten")}
 }
 
 func TestAppliedACKJournalUnsafePathRejected(t *testing.T){
@@ -69,7 +69,7 @@ func TestAppliedACKJournalUnsafePathRejected(t *testing.T){
  dir:=privateJournalTestDir(t)
  path:=filepath.Join(dir,ackJournalName)
  if e:=os.Symlink("/dev/null",path);e!=nil{t.Fatal(e)}
- if _,e:=PersistVerifiedAppliedACK(dir,raw,permit,next,now);e==nil{
+ if _,e:=persistVerifiedAppliedACK(dir,raw,permit,next,now);e==nil{
   t.Fatal("ACK journal symlink was accepted")
  }
 }
