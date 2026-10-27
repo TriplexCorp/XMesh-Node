@@ -34,8 +34,10 @@ func checkPrivateDir(dir string) error {
  return nil
 }
 func lockPermit(dir string)(*os.File,error){
- file,e:=os.OpenFile(filepath.Join(dir,lockName),os.O_CREATE|os.O_RDWR,0600)
+ path:=filepath.Join(dir,lockName)
+ fd,e:=syscall.Open(path,syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,0600)
  if e!=nil{return nil,e}
+ file:=os.NewFile(uintptr(fd),path)
  info,e:=file.Stat()
  if e!=nil||!info.Mode().IsRegular()||info.Mode().Perm()&0077!=0{
   file.Close();return nil,errors.New("unsafe journal lock file")
