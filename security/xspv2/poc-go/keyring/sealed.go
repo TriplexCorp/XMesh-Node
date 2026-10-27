@@ -154,10 +154,12 @@ func Initialize(vault,master string,nodeID int64,purpose string)(PublicBundle,er
  f,k,e:=masterLocked(master,true);if e!=nil{return empty,e}
  defer f.Close();defer clear(k)
  if e:=secureDir(vault);e!=nil{return empty,e}
- if _,e:=os.Lstat(vault);e==nil{return empty,errors.New("vault already exists")}
- if !errors.Is(e,os.ErrNotExist){return empty,e}
- if _,e:=os.Lstat(floorPath(vault));e==nil{return empty,errors.New("vault epoch floor already exists")}
- if !errors.Is(e,os.ErrNotExist){return empty,e}
+ _,statErr:=os.Lstat(vault)
+ if statErr==nil{return empty,errors.New("vault already exists")}
+ if !errors.Is(statErr,os.ErrNotExist){return empty,statErr}
+ _,statErr=os.Lstat(floorPath(vault))
+ if statErr==nil{return empty,errors.New("vault epoch floor already exists")}
+ if !errors.Is(statErr,os.ErrNotExist){return empty,statErr}
  keys,pub,e:=Generate(nodeID,purpose,1);if e!=nil{return empty,e}
  raw,e:=seal(keys,pub,k);if e!=nil{return empty,e}
  if e:=atomicFile(vault,raw);e!=nil{return empty,e}
