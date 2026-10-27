@@ -81,6 +81,12 @@ VLESS использует `settings.clients[].id`, Hysteria2 — `settings.user
 маршрутизатора могут сохраняться поля `panel_url` / `node_id`, но новый
 Nexus игнорирует такой устаревший heartbeat, не затирая статус агента.
 
+### Реальная приёмка «Польша-2» — VLESS/XHTTP/H3 (27 октября 2026)
+
+На Node 13 оператор подтвердил `control-v5.1.3`, `status=verified` в локальной attestation и совпадение `appliedRevision=desiredRevision` в Nexus (`17fe9dee…dcf8d6bfecf`). Фактический профиль — **VLESS + XHTTP + TLS + ALPN `h3`**, не Hysteria2. Xray слушает UDP `127.0.0.1:12431`, XMesh-Node — внешний UDP/443 и направляет его через `udp_backend=127.0.0.1:12431`. Значение `default_tcp=127.0.0.1:12431` существует в edge-конфигурации, но Xray TCP listener для H3-only не подтверждён: это не доказательство работы TCP-транспорта.
+
+Оператор подтвердил реальное подключение клиента через мобильный интернет и работу после штатного `docker restart` Xray и XMesh-Node. Оба контейнера восстановились с `restart=unless-stopped`, локальная attestation осталась `verified`, UDP-listeners сохранились. TLS Lets Encrypt был `valid` до 2027-01-25 и `autoRenew=true`; фактическое продление ещё не проверялось. Операционная приёмка **не** заменяет испытания cold boot, аварийного восстановления/backup-restore, HTTP 409 re-enrollment на отдельной тестовой Node или production XSP-v2. См. [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
+
 ## VLESS + Hysteria2 на одном публичном 443
 
 Управляемый профиль XRAY STUDIO может содержать **один TCP-прокси inbound и один Hysteria2 inbound** (порядок не важен). Nexus выдаёт им два локальных порта: `xrayLocalPort` и следующий за ним. XMesh-Node сохраняет раздельные `default_tcp` и `udp_backend`; публичный TCP и UDP могут использовать одинаковый номер порта. Пример при `xrayLocalPort=5000` и порядке VLESS → Hysteria2: TCP/443 → `127.0.0.1:5000`, UDP/443 → `127.0.0.1:5001`.
