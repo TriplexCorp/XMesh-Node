@@ -23,7 +23,7 @@ func attestACKVault(vault,master string,permit VerifiedPermit,next PinnedPublic)
   return errors.New("applied-vault attestation has no trusted pending identity")
  }
  active,e:=keyring.AttestAppliedRotation(vault,master,int64(p.NodeID),
-  p.FromEpoch,p.ToEpoch,p.ToEdKeyID,p.ToPQKeyID)
+  p.FromEpoch,p.ToEpoch,p.FromEdKeyID,p.FromPQKeyID,p.ToEdKeyID,p.ToPQKeyID)
  if e!=nil{return e}
  if !bytes.Equal(active.EdPublic,next.EdPublic) ||
   !bytes.Equal(active.PQPublic,next.PQPublic) {
