@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
 	"net"
 	"testing"
@@ -139,11 +140,28 @@ func launchMutualServer(
 			go func() {
 				defer conn.Close()
 				_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
-				_ = conn.(*tls.Conn).Handshake()
+				tlsConn := conn.(*tls.Conn)
+				if err := tlsConn.Handshake(); err == nil {
+					_, _ = tlsConn.Write([]byte{0xa5})
+				}
 			}()
 		}
 	}()
 	return listener.Addr().String()
+}
+
+func expectMutualServerMarker(t *testing.T, conn *tls.Conn, want bool) {
+	t.Helper()
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	marker := []byte{0}
+	_, err := io.ReadFull(conn, marker)
+	accepted := err == nil && marker[0] == 0xa5
+	if accepted != want {
+		t.Fatalf("server acceptance marker=%v err=%v, want accepted=%v", marker, err, want)
+	}
 }
 
 func TestStrictHybridTLSAndDowngradeFailures(t *testing.T) {
@@ -300,8 +318,18 @@ func TestStrictMutualHybridTLSRequiresMLDSA65ClientIdentity(t *testing.T) {
 		t.Fatalf("invalid mutual hybrid report: %+v", report)
 	}
 
-	if _, err := Probe(ctx, address, "node-ingress.example.test", serverRoots); err == nil {
-		t.Fatal("server requiring a client certificate accepted an anonymous strict probe")
+	acceptedConn, err := DialStrictMutual(ctx, address, "node-ingress.example.test", serverRoots, clientCert)
+	if err != nil {
+		t.Fatalf("valid ML-DSA-65 mutual dial rejected: %v", err)
+	}
+	expectMutualServerMarker(t, acceptedConn, true)
+
+	// TLS 1.3 clients can return from their local handshake before reading a
+	// server alert that rejects client authentication. The application marker
+	// is therefore the authoritative proof that the server accepted the cert.
+	anonymousConn, err := DialStrict(ctx, address, "node-ingress.example.test", serverRoots)
+	if err == nil {
+		expectMutualServerMarker(t, anonymousConn, false)
 	}
 
 	mldsa44, _ := testMLDSAClientCertificate(t, mldsa.MLDSA44())
@@ -315,8 +343,9 @@ func TestStrictMutualHybridTLSRequiresMLDSA65ClientIdentity(t *testing.T) {
 	}
 
 	untrustedMLDSA65, _ := testMLDSAClientCertificate(t, mldsa.MLDSA65())
-	if _, err := ProbeMutual(ctx, address, "node-ingress.example.test", serverRoots, untrustedMLDSA65); err == nil {
-		t.Fatal("untrusted ML-DSA-65 client certificate accepted")
+	untrustedConn, err := DialStrictMutual(ctx, address, "node-ingress.example.test", serverRoots, untrustedMLDSA65)
+	if err == nil {
+		expectMutualServerMarker(t, untrustedConn, false)
 	}
 
 	classicalAddress := launchMutualServer(t, serverCert, clientRoots, []tls.CurveID{tls.X25519})
