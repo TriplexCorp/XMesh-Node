@@ -13,7 +13,6 @@ import (
  "errors"
  "fmt"
  "io"
- "math"
  "strings"
 )
 
@@ -155,7 +154,6 @@ func DecodeUntrustedEnvelope(raw []byte) (Untrusted,error) {
  payload,e:=strictBase64(env.PayloadB64,MaxPayloadBytes,true);if e!=nil{return zero,e}
  ed,e:=strictBase64(env.Signatures.Ed25519,64,false);if e!=nil{return zero,e}
  pq,e:=strictBase64(env.Signatures.MLDSA65,3309,false);if e!=nil{return zero,e}
- if env.NodeID>math.MaxInt64||env.KeyEpoch>math.MaxInt64{return zero,errors.New("integer overflow")}
  out:=bytes.NewBuffer(make([]byte,0,256+len(payload)/16))
  out.WriteString("XSP2-SIGNED-MESSAGE");out.WriteByte(0)
  out.Write([]byte{2,1,env.Direction})
