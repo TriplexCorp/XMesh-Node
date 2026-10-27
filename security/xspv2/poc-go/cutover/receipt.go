@@ -116,7 +116,7 @@ func VerifyCommitReceipt(
         m.RequestID!=p.RequestID||m.ToEpoch<minEpoch||
         m.CandidateSHA256Hex!=p.CandidateSHA256Hex||
         m.PermitSHA256Hex!=permit.inputHash||
-        m.CommittedAtMS>nowMS+120000 {
+        (m.CommittedAtMS>nowMS && m.CommittedAtMS-nowMS>120000) {
         return empty,errors.New("receipt not bound to independently trusted permit/state")
     }
     // Historical ACK signature validation is allowed after its original TTL
