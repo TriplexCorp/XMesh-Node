@@ -53,6 +53,7 @@ func readPermitFile(path string)(permitRecord,error) {
   return result,errors.New("unsafe journal file")
  }
  raw,e:=os.ReadFile(path);if e!=nil{return result,e}
+ if e=uniqueFields(raw);e!=nil{return result,e}
  d:=json.NewDecoder(bytes.NewReader(raw));d.DisallowUnknownFields()
  if e=d.Decode(&result);e!=nil{return permitRecord{},e}
  if e=d.Decode(new(any));e!=io.EOF{return permitRecord{},errors.New("trailing journal bytes")}
