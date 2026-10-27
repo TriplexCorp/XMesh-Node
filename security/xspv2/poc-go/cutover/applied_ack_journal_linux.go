@@ -52,8 +52,7 @@ func persistACKFile(dir,path string,record appliedACKRecord)error{
  if _,e=tmp.Write(raw);e!=nil{return e}
  if e=tmp.Sync();e!=nil{return e}
  if e=tmp.Close();e!=nil{return e}
- if _,e=os.Lstat(path);e==nil{return errors.New("ACK journal already exists")}
- else if !errors.Is(e,os.ErrNotExist){return e}
+ if _,e=os.Lstat(path);e==nil{return errors.New("ACK journal already exists")} else if !errors.Is(e,os.ErrNotExist){return e}
  if e=os.Rename(tmp.Name(),path);e!=nil{return e}
  directory,e:=os.Open(dir);if e!=nil{return e}
  defer directory.Close()
