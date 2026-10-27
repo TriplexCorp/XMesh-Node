@@ -142,7 +142,7 @@ func RecoverRotation(vault, master string) (PublicBundle, error) {
     floor, err := readFloor(vault)
     if err != nil { return empty, err }
     if prior.KeyEpoch == 0 || prior.KeyEpoch == ^uint64(0) ||
-        candidate.KeyEpoch != prior.KeyEpoch+1 || candidate.KeyEpoch != floor ||
+        candidate.KeyEpoch != prior.KeyEpoch+1 ||
         prior.NodeID != candidate.NodeID || prior.Purpose != candidate.Purpose {
         return empty, errors.New("untrusted rotation recovery state")
     }
@@ -152,6 +152,19 @@ func RecoverRotation(vault, master string) (PublicBundle, error) {
     if err != nil { return empty, err }
     nextRaw, err := secureFile(stagedPath(vault))
     if err != nil { return empty, err }
+    if floor == prior.KeyEpoch {
+        // Crash after preserving .previous but BEFORE advancing the floor.
+        // Return to an unactivated prepared state, never auto-cutover.
+        if !bytes.Equal(currentRaw, priorRaw) {
+            return empty, errors.New("untrusted active key before cutover")
+        }
+        if err = os.Remove(previousPath(vault)); err != nil { return empty, err }
+        if err = syncParent(vault); err != nil { return empty, err }
+        return prior, nil
+    }
+    if floor != candidate.KeyEpoch {
+        return empty, errors.New("untrusted rotation epoch floor")
+    }
     if bytes.Equal(currentRaw, priorRaw) {
         if err = atomicFile(vault, nextRaw); err != nil { return empty, err }
     } else if !bytes.Equal(currentRaw, nextRaw) {
