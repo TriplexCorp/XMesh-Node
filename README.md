@@ -10,24 +10,22 @@
 
 **Отдельный `bash install.sh` в этом репозитории — самостоятельная установка Docker-router:** в отличие от управляемого bootstrap, он **не устанавливает Docker**, а требует уже имеющийся Engine/Compose и настроенный `config.json`. Не путайте эти два сценария. Nginx/HTTPS **панели Nexus** автоматически настраивает [установщик панели](https://github.com/TriplexCorp/XMesh-Nexus#установка-панели), а Node не заменяет его конфигурацию.
 
-## XSP-v2 — этап спецификации гибридной PQ-защиты (27 октября 2026)
+## XSP-v2 — P0: post-quantum security в разработке (27 октября 2026)
 
-В Node и Nexus `main` добавлены одинаковые [спецификация](docs/XSP_V2_WIRE_SPEC.md) и [публичные wire-векторы](docs/XSP_V2_VECTORS.json). Тест `security/xspv2/wire_test.go` независимо от Rust и JavaScript воспроизводит байты двух направлений, проверяет границы и отрицательные случаи. Это **test-only foundation (PR01)**: без новых приватных ключей, без смены версии `go.mod`, без модификации heartbeat/agent, без подключения v2 и без заявлений о постквантовой защите в эксплуатации.
+**Текущий управляемый Node (Go 1.23) по-прежнему работает по `XMESH1`/Ed25519; `strict-pq` не включён.** Вся описанная ниже реализация XSP-v2 находится в **отдельном Go 1.27.3 staging/PoC-модуле** `security/xspv2/poc-go` и экспериментальном Rust API Nexus; штатный `bootstrap.sh` не включает эти механизмы.
 
-**PR02 test-only:** в отдельном Go-модуле `security/xspv2/poc-go` выбран Go 1.27.3 с `crypto/mldsa`, реализованы проверки двойных подписей Ed25519 **AND** ML-DSA-65 на общих тестовых векторах. Негативные проверки отвергают подмену ключа, payload и отсутствие любой подписи. Контрольные результаты сопоставляются с независимой реализацией OpenSSL 3.5 на Rust-стороне; см. [Crypto PoC](docs/XSP_V2_CRYPTO_POC.md). Основной Go 1.23-модуль и Docker router не менялись.
+| Этап | Реализовано в test-only/staging | Открытые production-задачи |
+| --- | --- | --- |
+| **Wire и crypto** | Общие [wire-векторы](docs/XSP_V2_WIRE_SPEC.md), строгий декодер `envelope` (результат **Untrusted**), Ed25519 **AND** ML-DSA-65 подписи и независимая Rust ↔ Go проверка | Freeze протокола, FIPS 204 KAT, fuzz и security review |
+| **Защита приватных ключей** | AES-256-GCM vault `keyring`, отдельный wrapping key, права `0600/0700`, новая пара при ротации и epoch-floor; `keytool public` выдаёт только public bundle | Production KMS/backup, защищённое восстановление и двухфазная смена ключей |
+| **Регистрация по одобрению владельца** | `keytool prove` подписывает 32-байтный challenge **обоими приватными ключами**; Nexus staging API принимает только заранее одобренные владельцем публичные ключи/следующую эпоху, проверяет обе подписи, срок **10 минут** и одноразовость | UI и защищённый канал, независимое противодействие rollback, canary-нодa |
+| **Сетевой протокол и TLS** | В Nexus staging heartbeat проверяет обе подписи и уникальный nonce, возвращая только **неподписанный 204**; Go/OpenSSL и изолированный Nginx CI подтверждают TLS 1.3/`X25519MLKEM768`, проверку имени сервера/CA и отказ от downgrade | Подписанные ответы и команды, полноценный node-only ingress с реальным сертификатом и проверка TLS на отдельной VPS |
 
-Прямой обмен **Rust ↔ Go** подписанными тестовыми сообщениями успешно прошёл в изолированном CI Nexus с проверкой обеих подписей и отказом при повреждении.
+**Проверки:** [Go Crypto CI — успешно](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40440580172), [Node CI — успешно на `84b384db`](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40440956290), [Rust/Go interoperability CI — успешно](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40440784297). Это проверки **конкретных коммитов и изолированных компонентов**, а не работающий XSP-v2 на VPS. [Последняя проверенная ошибка полного Nexus Backend CI](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40440948889) — Rustfmt в тестовом модуле; исправление уже внесено, полный повторный прогон требуется подтвердить.
 
-**PR07 (только лабораторный TLS):** добавлен [TLS-probe с проверкой фактически согласованной X25519MLKEM768](docs/XSP_V2_TLS_PROBE.md) и тестами отказа при TLS 1.2, TLS 1.3 X25519-only, неверном имени, недоверенном сертификате и resumed/incomplete handshake. Реальные TCP/TLS соединения проверены независимыми клиентами OpenSSL 3.5 ↔ Go 1.27.3; [Nexus TLS CI #40432661499](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40432661499) и [Node CI #40432873804](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40432873804) прошли на соответствующих коммитах. Команда для оператора собственного тестового endpoint: `cd security/xspv2/poc-go && go run ./cmd/tlsprobe -address host.example:443 -servername host.example`. Она не отправляет HTTP и не меняет TLS/агент/действующие сертификаты. Рабочий Go 1.23 Node не обновлялся.
+**Правильный путь для управляемой Node остаётся прежним:** установить ноду из панели (**Узлы → Подключить ноду и метрики**); Docker/Compose и агенты готовит автоматический bootstrap. Не запускайте `keytool` и не заменяйте production-ключи ноды ради PoC. Для экспериментальной схемы понадобятся отдельная тестовая VPS и подтверждение владельца.
 
-**P0 foundation (27 октября):** Go-модуль Node получил строгий **неаутентифицирующий** XSP-v2-декодер `security/xspv2/poc-go/envelope` и генерацию независимых **временных** Ed25519/ML-DSA-65 ключей в `keyring` (только память и тестовые публичные bundle). Nexus подготовил таблицы только публичных ключей, минимального suite/epoch и nonce, а также неактивный loopback-only Nginx TLS шаблон, возвращающий 404. **Нет** рабочего защищённого хранилища приватных ключей, включённого v2 API или Node-only TLS на реальной VPS. Все границы и следующие критерии — [P0 foundation](docs/XSP_V2_P0_FOUNDATION.md).
-
-**P0 key vault / отдельный API (27 октября):** в тестовом Go 1.27.3-модуле доступно **AES-256-GCM зашифрованное хранилище** пар Ed25519 + ML-DSA-65. 32-байтный ключ шифрования хранится отдельно; файлы строго 0600, каталог 0700; ротация создаёт новые ключи, повышает минимальную epoch и проверяется отрицательными тестами. CLI `security/xspv2/poc-go/cmd/keytool` экспортирует **только публичные ключи**. Это не KMS/HSM и не рабочее хранение ключей агента.
-
-В Nexus добавлен **опциональный** `POST /api/v2/node/heartbeat`: Rust проверяет обе подписи по зарегистрированным публичным ключам и атомарно блокирует повторный nonce. Работает только в специально собранном staging с feature `xsp-v2-experimental` и флагом `XSP_V2_EXPERIMENTAL_HEARTBEAT=staging-only`; стандартный Docker API не содержит маршрута. Возвращает неподписанный 204 без применения Xray. Независимый CI запускает тестовый Nginx TLS1.3/X25519MLKEM768 с 404-only HTTP и проверяет отказ downgrade. **Это не переключение ноды на XSP-v2.** [Детали и критичные ограничения](docs/XSP_V2_EXPERIMENTAL_GATEWAY.md).
-**P0 owner-approved key enrollment (только staging):** `keytool prove` подписывает challenge одновременно Ed25519 и ML-DSA-65 из зашифрованного vault. В Nexus владелец заранее одобряет конкретные публичные ключи и следующую эпоху (10 минут), затем Rust проверяет **обе подписи** и транзакционно регистрирует ключи/отзывает предыдущие. Автоматической миграции Node нет, новый API не входит в стандартный Docker Nexus и `strict-pq` выключен. [Протокол, проверка Go ↔ Rust и критерии для production](docs/XSP_V2_OWNER_KEY_ENROLLMENT.md).
-
-**Статус:** PR01 wire-векторы, PR02 подписи и PR07 TLS-handshake **проверены только в PoC**. Рабочая схема `XMESH1`/Ed25519, API и Xray не имеют включённого XSP-v2, долговременных ML-DSA ключей и enforced `minimumSuite`. Следующий gate: review подписываемого формата и key lifecycle, FIPS 204 KAT/fuzz, испытание отдельного node-only ingress и **всех** CDN/LB → origin сегментов, затем owner-approved enrollment, защита от downgrade и recovery на тестовых нодах. Strict-активация **отключена**. Полный [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
+Документация: [регистрация и ротация двойных ключей](docs/XSP_V2_OWNER_KEY_ENROLLMENT.md) · [стендовый API и vault](docs/XSP_V2_EXPERIMENTAL_GATEWAY.md) · [TLS-probe](docs/XSP_V2_TLS_PROBE.md) · [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
 
 ## Подписанная офлайн-политика и Hysteria 2
 
@@ -218,14 +216,15 @@ See [config.example.json](config.example.json). First-match routing uses ordered
 
 ## Roadmap
 
-**XSP-v2 (P0, в работе; только test-only PoC):** [spec](docs/XSP_V2_WIRE_SPEC.md) и общие векторы, [PR02 Rust↔Go Ed25519+ML-DSA-65](docs/XSP_V2_CRYPTO_POC.md), [PR07 лабораторный TLS1.3/X25519MLKEM768](docs/XSP_V2_TLS_PROBE.md) уже реализованы в независимых тестах. **Не является production-защитой**.
+**XSP-v2 P0 — экспериментальные основы готовы, production-внедрение не начато.** Полный статус и CI см. [выше](#xsp-v2--p0-post-quantum-security-в-разработке-27-октября-2026) и в [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
 
-- [x] PR01: проект wire-формата и одинаковые тестовые векторы Rust/Go/JS (security-review формата ещё открыт)
-- [x] PR02 лабораторно: две подписи обязательны, двунаправленная Rust↔Go проверка и отказ при повреждении любой подписи
-- [x] PR07 лабораторно: Go TLS probe, OpenSSL реальный TLS-handshake и negative downgrade/CA/SNI tests
-- [x] Строгий **test-only** decoder (Go 1.27.3, без аутентификации), временные двойные ключи в памяти и неактивный шаблон node-only TLS; публичные keyset/nonce/suite tables Nexus — [P0 foundation](docs/XSP_V2_P0_FOUNDATION.md)
-- [ ] **Production:** проверка двух подписей в API, защищённое хранение и ротация приватных ключей, транзакционная anti-replay-проверка, persisted suite-floor на ноде, работающий node-only TLS ingress и проверка всех proxy hops
-- [ ] Канареечная нода, подтверждённое HTTPS-рукопожатие с реальным терминатором, owner-approved миграция и отказ от legacy лишь после activation; rollback/recovery без downgrade
+- [x] PR01/PR02: общий бинарный формат и cross-language Rust ↔ Go Ed25519 + ML-DSA-65 с отрицательными тестами
+- [x] PR07 lab: X25519MLKEM768/TLS 1.3, Nginx/OpenSSL/Go handshake, отсутствие downgrade в изолированном CI
+- [x] P0 staging: строгий Go-декодер, AES-256-GCM key vault, `keytool prove` и проверка **двойного** challenge-proof в Rust Nexus
+- [x] P0 staging: владелец утверждает конкретные ключи/epoch; транзакционная смена публичных ключей и запрет повтора challenge в отдельном API Nexus
+- [ ] **Release gate:** зелёный полный Nexus Backend CI после Rustfmt и PostgreSQL integration, security review и утверждение протокола
+- [ ] **Production:** двухфазная ротация, долговременное защищённое хранение, подписанные ответы/ACK, продакшен-агент и монотонный suite-floor на Node
+- [ ] **Real VPS:** выделенный node-only TLS endpoint, подтверждённые CA/SNI/handshake/прокси-сегменты, canary, recovery и ручное включение без downgrade
 
 - Secure node registration with control plane and authenticated configuration synchronization
 - Explicit protocol-aware QUIC routing on UDP/443
