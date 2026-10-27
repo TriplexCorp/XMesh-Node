@@ -1,0 +1,46 @@
+{
+  "schema": "xsp2-wire-candidate-1",
+  "note": "Deterministic signing input only; not Ed25519 or ML-DSA signatures and not a deployed protocol",
+  "vectors": [
+    {
+      "id": "heartbeat-node-to-nexus",
+      "direction_id": 1,
+      "message_type": "node.heartbeat",
+      "issuer_id": "node-42",
+      "node_id": 42,
+      "method": "POST",
+      "path": "/api/v2/node/heartbeat",
+      "ed_key_id": "node42-ed-2",
+      "pq_key_id": "node42-pq-2",
+      "key_epoch": 2,
+      "issued_at_ms": 1792947600000,
+      "expires_at_ms": 1792947900000,
+      "nonce_hex": "000102030405060708090a0b0c0d0e0f",
+      "request_id": "req-node-0001",
+      "revision": "rev-17",
+      "payload_utf8": "{\"nodeId\":42,\"status\":\"ready\"}",
+      "payload_sha256": "94e3fbbfe192db3797036f65b4d7bc13dac27cead6ab17f8031568f9b31edbf0",
+      "signing_input_hex": "585350322d5349474e45442d4d455353414745000201010000000e6e6f64652e686561727462656174000000076e6f64652d3432000000000000002a00000004504f5354000000162f6170692f76322f6e6f64652f6865617274626561740000000b6e6f646534322d65642d320000000b6e6f646534322d70712d320000000000000002000001a174013a80000001a17405ce60000102030405060708090a0b0c0d0e0f0000000d7265712d6e6f64652d30303031000000067265762d313794e3fbbfe192db3797036f65b4d7bc13dac27cead6ab17f8031568f9b31edbf0"
+    },
+    {
+      "id": "desired-config-response",
+      "direction_id": 2,
+      "message_type": "node.desired-config.response",
+      "issuer_id": "nexus-primary",
+      "node_id": 42,
+      "method": "POST",
+      "path": "/api/v2/node/desired-config",
+      "ed_key_id": "panel-ed-2",
+      "pq_key_id": "panel-pq-2",
+      "key_epoch": 2,
+      "issued_at_ms": 1792947601000,
+      "expires_at_ms": 1792947901000,
+      "nonce_hex": "102030405060708090a0b0c0d0e0f000",
+      "request_id": "req-node-0001",
+      "revision": "rev-17",
+      "payload_utf8": "{\"nodeId\":42,\"policy\":{\"users\":[]},\"revision\":17}",
+      "payload_sha256": "d3fd72863186dfafaccb82bf6b5ce27b15c6aabe4c720be5d00650fec3f97492",
+      "signing_input_hex": "585350322d5349474e45442d4d455353414745000201020000001c6e6f64652e646573697265642d636f6e6669672e726573706f6e73650000000d6e657875732d7072696d617279000000000000002a00000004504f53540000001b2f6170692f76322f6e6f64652f646573697265642d636f6e6669670000000a70616e656c2d65642d320000000a70616e656c2d70712d320000000000000002000001a174013e68000001a17405d248102030405060708090a0b0c0d0e0f0000000000d7265712d6e6f64652d30303031000000067265762d3137d3fd72863186dfafaccb82bf6b5ce27b15c6aabe4c720be5d00650fec3f97492"
+    }
+  ]
+}
