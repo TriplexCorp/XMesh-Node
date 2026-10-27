@@ -37,6 +37,12 @@ func CandidateCanonical(c CandidateSource) ([]byte,error) {
   if i%2==0 {size=32}
   if len(key)!=size || zero(key) { return nil,errors.New("missing or invalid public key bytes") }
  }
+ if c.FromEdKeyID!=id("ed-",c.FromEdPublic) ||
+  c.FromPQKeyID!=id("pq-",c.FromPQPublic) ||
+  c.ToEdKeyID!=id("ed-",c.ToEdPublic) ||
+  c.ToPQKeyID!=id("pq-",c.ToPQPublic) {
+  return nil,errors.New("public key ID does not match SHA-256 fingerprint")
+ }
  var out bytes.Buffer
  out.WriteString("XSP2-CUTOVER-CANDIDATE-V1")
  out.WriteByte(0)
