@@ -1,0 +1,32 @@
+name: XSP-v2 Crypto PoC (Go 1.27)
+on:
+  push:
+    branches: [main]
+    paths:
+      - "security/xspv2/poc-go/**"
+      - "docs/XSP_V2_CRYPTO_POC.json"
+      - "docs/XSP_V2_VECTORS.json"
+      - ".github/workflows/xsp-crypto-poc.yml"
+  pull_request:
+    paths:
+      - "security/xspv2/poc-go/**"
+      - "docs/XSP_V2_CRYPTO_POC.json"
+      - "docs/XSP_V2_VECTORS.json"
+      - ".github/workflows/xsp-crypto-poc.yml"
+permissions:
+  contents: read
+jobs:
+  crypto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Go ML-DSA-65 isolated interop vectors
+        working-directory: security/xspv2/poc-go
+        run: |
+          go version
+          go test -race -count=1 ./...
+          go vet ./...
