@@ -195,7 +195,8 @@ func verifyBoth(s SignedMessage,p PinnedPublic)([]byte,error){
  return input,nil
 }
 func checkClock(v Message,now int64) error {
- if now<=0||now>v.ExpiresAtMS||v.IssuedAtMS>now+120000||now>v.IssuedAtMS+120000{
+ if now<=0||v.IssuedAtMS<=0||now>v.ExpiresAtMS||
+    now-v.IssuedAtMS>120000||v.IssuedAtMS-now>120000 {
   return errors.New("stale or future signed message")
  }
  return nil
