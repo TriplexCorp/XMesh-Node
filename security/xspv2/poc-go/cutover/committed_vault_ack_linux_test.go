@@ -47,7 +47,7 @@ func TestACKJournalRequiresCommittedEncryptedKeyEpoch(t *testing.T) {
  nextPin:=PinnedPublic{Purpose:"node_request",IssuerID:f.Ack.IssuerID,
   NodeID:f.Ack.NodeID,EdKeyID:next.EdKeyID,PQKeyID:next.PQKeyID,
   EdPublic:next.EdPublic,PQPublic:next.PQPublic}
- if _,e=keyring.AttestAppliedRotation(vault,master,prior.NodeID,1,2,next.EdKeyID,next.PQKeyID);e==nil{
+ if _,e=keyring.AttestAppliedRotation(vault,master,prior.NodeID,1,2,prior.EdKeyID,prior.PQKeyID,next.EdKeyID,next.PQKeyID);e==nil{
   t.Fatal("permit proof must not be mistaken for applied cutover")
  }
  if _,e=keyring.ActivatePreparedRotation(vault,master,prior.KeyEpoch,next.EdKeyID,next.PQKeyID);e!=nil{t.Fatal(e)}
