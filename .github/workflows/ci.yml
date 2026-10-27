@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify committed XSP-v2 staging artifact inventory
+        run: bash scripts/check-xsp-v2-main-checkpoint.sh
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
