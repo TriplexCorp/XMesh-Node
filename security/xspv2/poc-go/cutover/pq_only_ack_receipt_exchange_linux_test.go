@@ -12,6 +12,7 @@ import (
     "crypto/x509"
     "crypto/x509/pkix"
     "math/big"
+    "io"
     "net"
     "net/http"
     "os"
@@ -79,11 +80,10 @@ func TestPQOnlyHTTPACKToDurableDualSignedReceipt(t *testing.T) {
                 http.Error(w, "unexpected signed request", http.StatusBadRequest)
                 return
             }
-            body := make([]byte, len(ack)+1)
-            count, _ := r.Body.Read(body)
+            body, bodyErr := io.ReadAll(io.LimitReader(r.Body, 16*1024+1))
             // The server sees the exact signed envelope, not a new ACK or
             // an unsigned status probe.
-            if count != len(ack) || !bytes.Equal(body[:count], ack) {
+            if bodyErr != nil || !bytes.Equal(body, ack) {
                 t.Errorf("signed ACK changed during delivery")
                 http.Error(w, "wrong signed ACK", http.StatusBadRequest)
                 return
