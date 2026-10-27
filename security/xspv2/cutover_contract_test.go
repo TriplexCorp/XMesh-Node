@@ -174,7 +174,7 @@ func TestSignedCutoverContractVectorsAndNegativeCases(t *testing.T) {
         {"next epoch",func(v *cutoverCandidate){v.ToEpoch++}},
         {"old key",func(v *cutoverCandidate){v.FromEdKeyID="other"}},
         {"new key",func(v *cutoverCandidate){v.ToPQKeyID="other"}},
-        {"candidate",func(v *cutoverCandidate){v.CandidateSHA256Hex=doc.PermitSHA256Hex}},
+        {"candidate",func(v *cutoverCandidate){v.CandidateSHA256Hex=doc.PermitInputSHA256Hex}},
         {"permit nonce",func(v *cutoverCandidate){v.PermitNonceHex="102132435465768798a9bacbdcedfe0f"}},
         {"permit digest",func(v *cutoverCandidate){v.PermitSHA256Hex=doc.StateDigestSHA256Hex}},
         {"claimed state",func(v *cutoverCandidate){v.AppliedStateSHA256Hex=doc.PermitInputSHA256Hex}},
