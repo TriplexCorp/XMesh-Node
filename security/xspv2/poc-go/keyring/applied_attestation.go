@@ -24,7 +24,7 @@ func attestAppliedRotationLocked(vault string,key []byte,nodeID int64,
   toEpoch!=fromEpoch+1 || priorEdID=="" || priorPQID=="" || nextEdID=="" || nextPQID=="" {
   return empty,errors.New("invalid expected cutover identity")
  }
- if err=secureDir(vault);err!=nil{return empty,err}
+ if err:=secureDir(vault);err!=nil{return empty,err}
  floor,err:=readFloor(vault)
  if err!=nil{return empty,err}
  if floor!=toEpoch{return empty,errors.New("applied epoch floor missing or mismatched")}
