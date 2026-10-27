@@ -17,7 +17,7 @@
 | Этап | Реализовано в test-only/staging | Открытые production-задачи |
 | --- | --- | --- |
 | **Wire и crypto** | Общие [wire-векторы](docs/XSP_V2_WIRE_SPEC.md), строгий декодер `envelope` (результат **Untrusted**), Ed25519 **AND** ML-DSA-65 подписи и независимая Rust ↔ Go проверка | Freeze протокола, FIPS 204 KAT, fuzz и security review |
-| **Защита приватных ключей** | AES-256-GCM vault `keyring`, отдельный wrapping key, права `0600/0700`, новая пара при ротации и epoch-floor; `keytool public` выдаёт только public bundle | Production KMS/backup, защищённое восстановление и двухфазная смена ключей |
+| **Защита приватных ключей** | AES-256-GCM vault `keyring`, отдельный wrapping key, права `0600/0700`, локальная staging-двухфазная ротация `prepare/activate/recover` с сохранением прежнего sealed keyset; [инструкция](docs/XSP_V2_TWO_PHASE_VAULT_STAGING.md) | Production KMS/backup, защищённое восстановление и двухфазная смена ключей |
 | **Регистрация по одобрению владельца** | `keytool prove` подписывает 32-байтный challenge **обоими приватными ключами**; Nexus staging API принимает только заранее одобренные владельцем публичные ключи/следующую эпоху, проверяет обе подписи, срок **10 минут** и одноразовость | UI и защищённый канал, независимое противодействие rollback, canary-нодa |
 | **Сетевой протокол и TLS** | В Nexus staging heartbeat проверяет обе подписи и уникальный nonce, возвращая только **неподписанный 204**; Go/OpenSSL и изолированный Nginx CI подтверждают TLS 1.3/`X25519MLKEM768`, проверку имени сервера/CA и отказ от downgrade | Подписанные ответы и команды, полноценный node-only ingress с реальным сертификатом и проверка TLS на отдельной VPS |
 
@@ -25,7 +25,7 @@
 
 **Правильный путь для управляемой Node остаётся прежним:** установить ноду из панели (**Узлы → Подключить ноду и метрики**); Docker/Compose и агенты готовит автоматический bootstrap. Не запускайте `keytool` и не заменяйте production-ключи ноды ради PoC. Для экспериментальной схемы понадобятся отдельная тестовая VPS и подтверждение владельца.
 
-Документация: [регистрация и ротация двойных ключей](docs/XSP_V2_OWNER_KEY_ENROLLMENT.md) · [стендовый API и vault](docs/XSP_V2_EXPERIMENTAL_GATEWAY.md) · [TLS-probe](docs/XSP_V2_TLS_PROBE.md) · [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
+Документация: [регистрация и ротация двойных ключей](docs/XSP_V2_OWNER_KEY_ENROLLMENT.md) · [стендовый API и vault](docs/XSP_V2_EXPERIMENTAL_GATEWAY.md) · [двухфазный staging vault](docs/XSP_V2_TWO_PHASE_VAULT_STAGING.md) · [TLS-probe](docs/XSP_V2_TLS_PROBE.md) · [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
 
 ## Подписанная офлайн-политика и Hysteria 2
 
