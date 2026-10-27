@@ -1,18 +1,18 @@
 {
   "schema": "xsp2-cutover-candidate-public-binding-1",
-  "warning": "SYNTHETIC TEST-ONLY bytes (repeated byte patterns); not valid keys or owner approval; do not enroll",
+  "warning": "TEST ONLY: repeated byte patterns are NOT valid cryptographic public keys. Never enroll or sign with these.",
   "nodeId": 42,
   "fromEpoch": 1,
   "toEpoch": 2,
   "purpose": "node_request",
-  "fromEdKeyId": "ed-active-42",
-  "fromPQKeyId": "pq-active-42",
-  "toEdKeyId": "ed-next-42",
-  "toPQKeyId": "pq-next-42",
+  "fromEdKeyId": "ed-02d449a31fbb267c8f352e99",
+  "fromPQKeyId": "pq-ba118867d8dae627389f3211",
+  "toEdKeyId": "ed-deb0e38ced1e41de6f92e70e",
+  "toPQKeyId": "pq-c1a32a0986123749a352323e",
   "oldEdByteHex": "11",
   "oldPQByteHex": "22",
   "newEdByteHex": "33",
   "newPQByteHex": "44",
-  "candidateSha256Hex": "5d75102192dc3ca30d2518aa912b05a443efb65adc3b89fe0cc753a04a13cf53",
-  "canonicalLength": 4095
+  "candidateSha256Hex": "1c783de265f2fb86d12afcdb0ddbce31171b7f1181bda01fcafa248407c9789d",
+  "canonicalLength": 4159
 }
