@@ -2,6 +2,12 @@
 
 Standalone edge node for **XMesh Nexus**. Initial implementation: a TLS ClientHello TCP passthrough multiplexer on port 443, with a separately configured UDP/443 forwarder.
 
+## XSP-v2 — этап спецификации гибридной PQ-защиты (27 октября 2026)
+
+В Node и Nexus `main` добавлены одинаковые [спецификация](docs/XSP_V2_WIRE_SPEC.md) и [публичные wire-векторы](docs/XSP_V2_VECTORS.json). Тест `security/xspv2/wire_test.go` независимо от Rust и JavaScript воспроизводит байты двух направлений, проверяет границы и отрицательные случаи. Это **test-only foundation (PR01)**: без новых приватных ключей, без смены версии `go.mod`, без модификации heartbeat/agent, без подключения v2 и без заявлений о постквантовой защите в эксплуатации.
+
+Следующий gate: зелёный CI обоих репозиториев и review схемы, затем реализация Ed25519 **AND** ML-DSA-65 и проверенного гибридного TLS в отдельных этапах. Любая strict-активация требует персональной миграции ноды, без отката в Ed25519-only.
+
 ## Подписанная офлайн-политика и Hysteria 2
 
 `xmesh-policy-guard.py` проверяет подписанный профиль Xray и сопоставляет
