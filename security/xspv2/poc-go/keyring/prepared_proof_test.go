@@ -42,7 +42,7 @@ func TestPreparedRotationProvesDualKeysWithoutChangingActive(t *testing.T) {
     if _, err = ProvePreparedRotation(vault, master, 2, challengeHex); err == nil {
         t.Fatal("accepted proof with incorrect current epoch")
     }
-    if _, err = ProvePreparedRotation(vault, master, 1, strings.ToUpper(challengeHex)); err == nil {
+    if _, err = ProvePreparedRotation(vault, master, 1, strings.Repeat("AA", 32)); err == nil {
         t.Fatal("accepted noncanonical proof challenge")
     }
     if _, err = ActivatePreparedRotation(vault, master, 1, next.EdKeyID, next.PQKeyID); err != nil {
