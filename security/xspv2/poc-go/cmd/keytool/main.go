@@ -11,7 +11,7 @@ import (
  "github.com/TriplexCorp/XMesh-Node/security/xspv2/poc-go/keyring"
 )
 func main(){
- if len(os.Args)<2{fmt.Fprintln(os.Stderr,"usage: keytool init-master|create|rotate|public -key /root/key -vault /root/vault");os.Exit(2)}
+ if len(os.Args)<2{fmt.Fprintln(os.Stderr,"usage: keytool init-master|create|rotate|public|prove -key /root/key -vault /root/vault");os.Exit(2)}
  action:=os.Args[1]
  opts:=flag.NewFlagSet(action,flag.ExitOnError)
  master:=opts.String("key","","external AES wrapping-key file (0600)")
@@ -19,6 +19,7 @@ func main(){
  node:=opts.Int64("node",0,"node identity for create")
  purpose:=opts.String("purpose","node_request","node_request or panel_response")
  expected:=opts.Uint64("expected-epoch",0,"current epoch required for rotate")
+ challenge:=opts.String("challenge","","owner-issued 32-byte challenge hex for prove")
  if e:=opts.Parse(os.Args[2:]);e!=nil{fmt.Fprintln(os.Stderr,e);os.Exit(2)}
  if *master==""||(*vault==""&&action!="init-master")||opts.NArg()!=0{
   fmt.Fprintln(os.Stderr,"master and vault paths are required (vault not needed for init-master)");os.Exit(2)
@@ -32,6 +33,7 @@ func main(){
  case "create":result,err=keyring.Initialize(*vault,*master,*node,*purpose)
  case "rotate":result,err=keyring.Rotate(*vault,*master,*expected)
  case "public":result,err=keyring.Description(*vault,*master)
+ case "prove":result,err=keyring.ProveFromEncryptedVault(*vault,*master,*challenge)
  default:fmt.Fprintln(os.Stderr,"unsupported keytool subcommand");os.Exit(2)
  }
  if err!=nil{fmt.Fprintln(os.Stderr,"XSP staging keytool failed:",err);os.Exit(1)}
