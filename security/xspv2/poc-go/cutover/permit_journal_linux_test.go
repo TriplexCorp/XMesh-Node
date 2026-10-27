@@ -89,6 +89,9 @@ func TestJournalConflictsAndCorruptionFailClosed(t *testing.T){
  if e=os.WriteFile(path,[]byte("{broken"),0600);e!=nil{t.Fatal(e)}
  if _,e=ReloadVerifiedPermit(dir,pin,want,now);e==nil{t.Fatal("corrupt journal was silently replaced")}
  if _,e=PersistVerifiedPermit(dir,raw,pin,want,now);e==nil{t.Fatal("corrupt journal rewritten")}
+ // Reject ambiguous JSON even when one field contains the valid signed blob.
+ if e=os.WriteFile(path,[]byte(`{"schema":"xsp2-verified-permit-journal-1","schema":"evil"}`),0600);e!=nil{t.Fatal(e)}
+ if _,e=ReloadVerifiedPermit(dir,pin,want,now);e==nil{t.Fatal("duplicate journal fields accepted")}
 }
 
 func TestJournalRejectsUnsafeDirectoriesAndSymlinks(t *testing.T){
