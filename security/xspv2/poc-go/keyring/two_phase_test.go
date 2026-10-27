@@ -118,11 +118,17 @@ func TestRotationRecoveryRejectsTamperAndPreCutover(t *testing.T) {
     raw, err := os.ReadFile(vault)
     if err != nil { t.Fatal(err) }
     if err = atomicFile(previousPath(vault), raw); err != nil { t.Fatal(err) }
-    // A crash BEFORE floor advance must preserve old active keys; a recover
-    // operation cannot silently complete that unauthorized cutover.
-    if _, err = RecoverRotation(vault, master); err == nil {
-        t.Fatal("recovery advanced keys before persisted authorization floor")
+    // A crash BEFORE floor advance must restore the PREPARED state, with the
+    // original key still active and NO automatic cutover to the candidate.
+    recovered, err := RecoverRotation(vault, master)
+    if err != nil || recovered.KeyEpoch != 1 {
+        t.Fatal("recovery should retain old active identity", err)
     }
+    if _, err := os.Lstat(previousPath(vault)); !os.IsNotExist(err) {
+        t.Fatal("pre-activation recovery left a blocking prior snapshot")
+    }
+    // Simulate the subsequent authorized floor change + damaged candidate.
+    if err = atomicFile(previousPath(vault), raw); err != nil { t.Fatal(err) }
     if err = updateFloor(vault, candidate.KeyEpoch); err != nil { t.Fatal(err) }
     if err = os.WriteFile(stagedPath(vault), []byte("tampered ciphertext"), 0600); err != nil {
         t.Fatal(err)
