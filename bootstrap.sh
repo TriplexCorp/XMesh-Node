@@ -213,6 +213,27 @@ curl --proto '=https' --tlsv1.2 -fsSLo "$GUARD_TMP" \
 python3 -m py_compile "$GUARD_TMP"
 install -o root -g root -m 0700 "$GUARD_TMP" /usr/local/libexec/xmesh-policy-guard.py
 rm -f "$GUARD_TMP"
+# The signed control heartbeat relies on the *separate* local profile
+# attestation helper. Without it a live Xray falsely reports helper_missing
+# ("Проверка профиля не установлена") even though enrollment succeeded.
+# Install the exact pinned Node release BEFORE Xray first starts; never
+# claim profile verification just because the router or Xray is running.
+PROFILE_TMP="$(mktemp /tmp/xmesh-profile-attest.XXXXXXXX)"
+curl --proto '=https' --tlsv1.2 -fsSLo "$PROFILE_TMP" \
+ "https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/$NODE_RELEASE_SHA/deploy/xmesh-profile-attest.py"
+python3 -m py_compile "$PROFILE_TMP"
+grep -q 'verify_envelope' "$PROFILE_TMP" && grep -q 'xmesh-managed-xray' "$PROFILE_TMP" || {
+ echo "Downloaded profile attestation helper is invalid; refusing incomplete installation." >&2
+ rm -f "$PROFILE_TMP"
+ exit 1
+}
+install -o root -g root -m 0700 "$PROFILE_TMP" /usr/local/libexec/.xmesh-profile-attest.new
+mv -f /usr/local/libexec/.xmesh-profile-attest.new /usr/local/libexec/xmesh-profile-attest.py
+rm -f "$PROFILE_TMP"
+[[ -r /usr/local/libexec/xmesh-profile-attest.py ]] || {
+ echo "Profile attestation helper installation failed." >&2
+ exit 1
+}
 # Install independent bounded GeoData fetcher before the first signed sync.
 GEO_TMP="$(mktemp /tmp/xmesh-geodata.XXXXXXXX)"
 curl --proto '=https' --tlsv1.2 -fsSLo "$GEO_TMP" \
