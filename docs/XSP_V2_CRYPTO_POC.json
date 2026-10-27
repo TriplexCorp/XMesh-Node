@@ -1,0 +1,25 @@
+{
+  "schema": "xsp2-crypto-poc-1",
+  "warning": "TEST-ONLY known public seeds. NEVER use for production keys, node enrollment or operational signatures. Deterministic ML-DSA signing is restricted to interop tests.",
+  "context": "",
+  "records": [
+    {
+      "id": "heartbeat-node-to-nexus",
+      "ed_seed_hex": "600d34c09ece743550d1894cc5e5a14c846c8935cd2b88e13f4184d95ab023c7",
+      "mldsa_seed_hex": "344dbec19ea8370ebe4fefb0801851d6547ba9b9521782ec94bc6177fe7ff300",
+      "ed_public_sha256": "de2f6e4f8515058145d81eb297360f7dadb321e80751784bb005f90704cb18f6",
+      "ed_signature_sha256": "867fca2b3e776287e5ab3232be714413d2036cca374c67775fc747ce9beb75a9",
+      "mldsa_public_sha256": "48515ba2f09a32502db0d7b110ca709804884b82de41c524468119fbc6ee195e",
+      "mldsa_signature_sha256": "1f043ce6582ccd7dd430464f16624e074f2c2059344bbbe740c71bf62e94aae0"
+    },
+    {
+      "id": "desired-config-response",
+      "ed_seed_hex": "5c9afaec343383e38c165d10787c3d3b2390c1c8d9ffdf58ab1dd68dc736e009",
+      "mldsa_seed_hex": "8fe0194690f20afd10bcf8259a8065c65222962fa9bfa86f2223980a5793137b",
+      "ed_public_sha256": "d9bb95b54f8b32ad67867b6335eedc108e7a02dd40b84519998c622cefdee0b7",
+      "ed_signature_sha256": "f5514bdd01edadd8a6fec08a170ff3a9dd6dfde4642bbdc854a647a86160edba",
+      "mldsa_public_sha256": "13aa08a56d7b2f9ed69fc3cba283fb8fdd5147f3a6159e9afc8b8163ab023f2e",
+      "mldsa_signature_sha256": "8a83e18e8398bbbdd79855d90837fee344e5192f742c9122868764a22ccbfbce"
+    }
+  ]
+}
