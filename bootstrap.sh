@@ -108,9 +108,33 @@ else
  PROOF="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$PROOF_FILE" | od -An -tx1 -v | tr -d '[:space:]')"
  [[ "${#PROOF}" -eq 128 ]] || { echo "Could not create Ed25519 enrollment proof" >&2; exit 1; }
  JSON="$(printf '%s' "$TOKEN" | python3 -c 'import json,sys; print(json.dumps({"token":sys.stdin.read(),"publicKey":sys.argv[1],"proof":sys.argv[2]}))' "$PUB" "$PROOF")"
- printf '%s' "$JSON" | curl --proto '=https' --tlsv1.2 -fsS --max-time 20 \
+ # Do not hide the reason for a rejected enrollment. Never log the
+ # one-time token, signed proof, body or private key on failure.
+ ENROLL_REPLY="$(mktemp /tmp/xmesh-enroll-reply.XXXXXXXX)"
+ trap 'rm -f "$PROOF_FILE" "$ENROLL_REPLY"; unset TOKEN JSON PROOF' EXIT
+ if ! ENROLL_STATUS="$(printf '%s' "$JSON" | curl --proto '=https' --tlsv1.2 -sS --max-time 20 \
+  -o "$ENROLL_REPLY" -w '%{http_code}' \
   -H 'Content-Type: application/json' \
-  --data-binary @- "$PANEL/api/v1/node/enroll" >/dev/null
+  --data-binary @- "$PANEL/api/v1/node/enroll")";then
+  echo "Cannot contact the HTTPS enrollment endpoint. Check panel DNS, TLS and network." >&2
+  exit 1
+ fi
+ case "$ENROLL_STATUS" in
+  200) ;;
+  409)
+   echo "Node $NODE is already enrolled with a DIFFERENT Ed25519 key." >&2
+   echo "On Nexus, open this node -> 'Подключить агент ноды' and explicitly approve re-enrollment." >&2
+   echo "Or create a NEW node ID if the existing Node must remain connected." >&2
+   echo "Then repeat this bootstrap with a fresh 10-minute token; the local private key is preserved." >&2
+   exit 1;;
+  401|403)
+   echo "Enrollment was rejected (HTTP $ENROLL_STATUS): token expired, invalid or unauthorized." >&2
+   echo "Create a fresh one-time enrollment token in Nexus; do not reuse or publish the old token." >&2
+   exit 1;;
+  *)
+   echo "Node enrollment failed (HTTP $ENROLL_STATUS). Check Nexus API logs; no router or agent was activated." >&2
+   exit 1;;
+ esac
  unset TOKEN JSON PROOF
  printf '%s %s %s\n' "$PANEL" "$NODE" "$PUB" > "$ENROLLMENT_MARKER"
  chmod 0600 "$ENROLLMENT_MARKER"
