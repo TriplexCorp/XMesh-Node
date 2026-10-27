@@ -4,7 +4,6 @@ import (
     "bytes"
     "crypto/ed25519"
     "crypto/mldsa"
-    "crypto/sha256"
     "encoding/base64"
     "encoding/hex"
     "encoding/json"
@@ -169,5 +168,4 @@ func TestSignedCommitReceiptVerifiesAgainstExactPersistedACK(t *testing.T) {
     if _,err=VerifyCommitReceipt([]byte("{}"),panelPin,permit,originalACK,nodePin,f.Ack.ToEpoch,retryTime);err==nil{
         t.Fatal("unsigned response accepted")
     }
-    _=sha256.Sum256 // avoid fixture-only crypto import misread
 }
