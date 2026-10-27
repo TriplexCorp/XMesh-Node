@@ -6,12 +6,14 @@ on:
       - "security/xspv2/poc-go/**"
       - "docs/XSP_V2_CRYPTO_POC.json"
       - "docs/XSP_V2_VECTORS.json"
+      - "docs/XSP_V2_COMMIT_RECEIPT_VECTORS.json"
       - ".github/workflows/xsp-crypto-poc.yml"
   pull_request:
     paths:
       - "security/xspv2/poc-go/**"
       - "docs/XSP_V2_CRYPTO_POC.json"
       - "docs/XSP_V2_VECTORS.json"
+      - "docs/XSP_V2_COMMIT_RECEIPT_VECTORS.json"
       - ".github/workflows/xsp-crypto-poc.yml"
 permissions:
   contents: read
