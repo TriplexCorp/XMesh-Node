@@ -10,6 +10,15 @@ import (
  "testing"
 )
 
+// Go's testing.TempDir can be 0755 depending on the test runtime/umask.
+// The journal deliberately requires a 0700 trust directory.
+func privateJournalTestDir(t *testing.T) string {
+ t.Helper()
+ dir:=t.TempDir()
+ if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+ return dir
+}
+
 func makeJournalPermit(t *testing.T) ([]byte,PinnedPublic,ExpectedPermit,int64) {
  t.Helper()
  f:=load(t)
@@ -33,7 +42,7 @@ func makeJournalPermit(t *testing.T) ([]byte,PinnedPublic,ExpectedPermit,int64) 
 
 func TestJournalWritesExactVerifiedPermitAndReloads(t *testing.T){
  raw,pin,want,now:=makeJournalPermit(t)
- dir:=t.TempDir()
+ dir:=privateJournalTestDir(t)
  verified,e:=PersistVerifiedPermit(dir,raw,pin,want,now)
  if e!=nil{t.Fatal(e)}
  if verified.PermitDigest()==""{t.Fatal("missing trusted permit digest")}
@@ -60,7 +69,7 @@ func TestJournalWritesExactVerifiedPermitAndReloads(t *testing.T){
 
 func TestJournalConflictsAndCorruptionFailClosed(t *testing.T){
  raw,pin,want,now:=makeJournalPermit(t)
- dir:=t.TempDir()
+ dir:=privateJournalTestDir(t)
  if _,e:=PersistVerifiedPermit(dir,raw,pin,want,now);e!=nil{t.Fatal(e)}
  // Even when signer is valid, changing the request must not replace an
  // already journaled permit. New approval must go through separate workflow.
@@ -96,7 +105,7 @@ func TestJournalRejectsUnsafeDirectoriesAndSymlinks(t *testing.T){
 
 func TestJournalSerializesRacingRequests(t *testing.T){
  raw,pin,want,now:=makeJournalPermit(t)
- dir:=t.TempDir()
+ dir:=privateJournalTestDir(t)
  var wg sync.WaitGroup
  successes:=make(chan error,2)
  for i:=0;i<2;i++{
