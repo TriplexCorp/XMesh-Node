@@ -24,8 +24,8 @@ type Report struct {
 	FullHandshake       bool   `json:"fullHandshake"`
 }
 
-// MutualReport additionally confirms that the strict server requested and
-// accepted the configured ML-DSA-65 client certificate during this handshake.
+// MutualReport additionally confirms that the strict server requested and the
+// client presented the configured ML-DSA-65 certificate during this handshake.
 type MutualReport struct {
 	Report
 	ClientCertificateAlgorithm string `json:"clientCertificateAlgorithm"`
@@ -89,12 +89,14 @@ func requireMLDSA65ClientCertificate(cert tls.Certificate) error {
 
 // VerifyMutualNegotiated additionally proves that the ML-DSA-65 client
 // certificate was actually presented, not merely configured on the client.
+// TLS 1.3 server-side acceptance must be observed by a subsequent application
+// read/write because a rejecting server alert can arrive after client Finished.
 func VerifyMutualNegotiated(state tls.ConnectionState) error {
 	if err := VerifyNegotiated(state); err != nil {
 		return err
 	}
 	if len(state.LocalCertificate) == 0 {
-		return errors.New("server did not request or accept the client certificate")
+		return errors.New("client certificate was not presented during the handshake")
 	}
 	leaf, err := x509.ParseCertificate(state.LocalCertificate[0])
 	if err != nil {
@@ -177,7 +179,9 @@ func DialStrict(ctx context.Context, address, serverName string, roots *x509.Cer
 // DialStrictMutual adds a mandatory ML-DSA-65 client certificate to the exact
 // same fail-closed hybrid transport policy. It rejects other client key types
 // before dialing and verifies after the handshake that the certificate was
-// actually presented. It does not authorize an application request by itself.
+// actually presented. A caller that needs proof of server-side acceptance must
+// perform an authenticated application roundtrip on the returned connection.
+// It does not authorize an application request by itself.
 func DialStrictMutual(
 	ctx context.Context,
 	address, serverName string,
