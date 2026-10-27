@@ -31,7 +31,7 @@ type fixture struct{ Vectors []struct{
  SigningHex string `json:"signing_input_hex"`
 } `json:"vectors"` }
 func TestStrictEnvelopeGoldenAndNegative(t *testing.T){
- raw,err:=os.ReadFile(filepath.Join("..","..","..","docs","XSP_V2_VECTORS.json"))
+ raw,err:=os.ReadFile(filepath.Join("..","..","..","..","docs","XSP_V2_VECTORS.json"))
  if err!=nil{t.Fatal(err)}
  var f fixture
  if err:=json.Unmarshal(raw,&f);err!=nil{t.Fatal(err)}
