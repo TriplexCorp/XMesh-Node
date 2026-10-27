@@ -102,6 +102,8 @@ func TestJournalRejectsUnsafeDirectoriesAndSymlinks(t *testing.T){
  if e:=os.Symlink(loose,filepath.Join(private,journalName));e!=nil{t.Fatal(e)}
  if _,e:=PersistVerifiedPermit(private,raw,pin,want,now);e==nil{t.Fatal("preexisting symlink accepted")}
  if e:=os.Remove(filepath.Join(private,journalName));e!=nil{t.Fatal(e)}
+ // The previous denied attempt may have created its (safe) lockfile.
+ if e:=os.Remove(filepath.Join(private,lockName));e!=nil{t.Fatal(e)}
  if e:=os.Symlink(loose,filepath.Join(private,lockName));e!=nil{t.Fatal(e)}
  if _,e:=PersistVerifiedPermit(private,raw,pin,want,now);e==nil{t.Fatal("lockfile symlink accepted")}
 }
