@@ -1,6 +1,14 @@
 # XMesh Node
 
-Standalone edge node for **XMesh Nexus**. Initial implementation: a TLS ClientHello TCP passthrough multiplexer on port 443, with a separately configured UDP/443 forwarder.
+**Управляемая VPN-нода для XMesh Nexus:** Docker-маршрутизатор TCP/TLS ClientHello (SNI/ALPN), настраиваемый UDP-forwarder, подписанный heartbeat и агенты, которые синхронизируют и применяют конфигурацию Xray с панели. Нода устанавливается автоматически из Nexus или отдельно как самостоятельный Docker-router.
+
+## Основной способ: автоматическое подключение из Nexus
+
+Для управляемой ноды **не нужно вручную устанавливать Docker, Compose, Go, Xray-контрольный агент или метрики**. В панели **XMesh Nexus → Узлы → Подключить ноду и метрики** создайте узел и скопируйте bootstrap-команду **без токена**. Запустите её на целевой VPS с Ubuntu, root/sudo и systemd. Одноразовый токен скопируйте отдельно и вставьте по защищённому запросу установщика (срок действия — 10 минут).
+
+`bootstrap.sh` автоматически подготавливает Docker Engine/Compose и зависимости, развёртывает репозиторий, проверяет `config.json` и ID ноды, создаёт/сохраняет Ed25519-ключ, регистрирует **только публичный ключ**, запускает Docker-router, метрики и таймеры управления и синхронизации Xray. **Профиль XRAY STUDIO можно назначить позже** — до назначения нода находится в состоянии `awaiting_profile`, без фиктивного Xray-конфига. [Шаги подключения и проверки](#быстрое-подключение-из-xmesh-nexus-docker--метрики).
+
+**Отдельный `bash install.sh` в этом репозитории — самостоятельная установка Docker-router:** в отличие от управляемого bootstrap, он **не устанавливает Docker**, а требует уже имеющийся Engine/Compose и настроенный `config.json`. Не путайте эти два сценария. Nginx/HTTPS **панели Nexus** автоматически настраивает [установщик панели](https://github.com/TriplexCorp/XMesh-Nexus#установка-панели), а Node не заменяет его конфигурацию.
 
 ## XSP-v2 — этап спецификации гибридной PQ-защиты (27 октября 2026)
 
@@ -102,7 +110,7 @@ systemctl status xmesh-node-metrics.timer
 journalctl -u xmesh-node-metrics.service -n 30 --no-pager
 ```
 
-Наличие heartbeat означает только связь с маршрутизатором. Удалённое управление Xray-core и полноценный QUIC/UDP-мультиплексор пока не реализованы.
+Наличие heartbeat означает только связь с маршрутизатором, **не** успешное применение профиля Xray. Подписанная синхронизация, запуск и управление Xray по назначенному профилю уже реализованы отдельными агентами; проверяйте `xmesh-xray-sync.timer`, статус Xray и актуальную ревизию. Произвольный QUIC/UDP-мультиплексор нескольких разных протоколов на одном UDP/443 не заявляется.
 
 ## What it does
 
@@ -117,8 +125,7 @@ journalctl -u xmesh-node-metrics.service -n 30 --no-pager
 
 ## Connect XMesh Node to XMesh Nexus (signed heartbeat)
 
-The panel and the node now support a **signed heartbeat**. This reports whether the
-router process is alive; it is **not yet remote Xray supervision or configuration rollout**.
+The panel and node support a **signed heartbeat** reporting whether the router process is alive. **Managed Xray configuration delivery, local signature checks and process reconciliation are implemented separately** by the node control/sync agents installed by Nexus bootstrap; router heartbeat alone does not attest that Xray was started or a policy was applied. For an ordinary managed installation, use the automated onboarding section above instead of these manual heartbeat-only steps.
 
 1. Create a node in XMesh Nexus and open **Nodes → Configure metrics**. Register
    the **Ed25519 public key** from the metrics agent installed on the same VPS.
@@ -152,9 +159,9 @@ Do not modify or replace an existing metrics agent key without updating
 its registration. The current node and metrics reporter use one registered
 identity for a given panel node.
 
-## Recommended installation: Docker Compose
+## Самостоятельная установка Docker-router (альтернативный способ)
 
-XMesh Node is **Docker-first**. Neither Go nor a host systemd unit is required.
+Этот сценарий предназначен для опытного администратора, который **не использует автоматическую установку из Nexus**. Для прямого `bash install.sh` на VPS **Docker Engine и Compose должны быть уже установлены**: он создаёт образ и запускает роутер, но **не** ставит Docker/Nginx/Certbot, не регистрирует управляемую ноду и не поднимает систему метрик и control-таймеров. Go и отдельный systemd-юнит для самого маршрутизатора не нужны — сборка Go выполняется в Docker.
 
 ```bash
 git clone https://github.com/TriplexCorp/XMesh-Node.git
@@ -211,7 +218,8 @@ See [config.example.json](config.example.json). First-match routing uses ordered
 - [x] PR01: проект wire-формата и одинаковые тестовые векторы Rust/Go/JS (security-review формата ещё открыт)
 - [x] PR02 лабораторно: две подписи обязательны, двунаправленная Rust↔Go проверка и отказ при повреждении любой подписи
 - [x] PR07 лабораторно: Go TLS probe, OpenSSL реальный TLS-handshake и negative downgrade/CA/SNI tests
-- [ ] Строгий decoder и replay/epoch/key lifecycle, ротация/backup, отдельный node-only TLS ingress и инвентаризация цепочки прокси
+- [x] Строгий **test-only** decoder (Go 1.27.3, без аутентификации), временные двойные ключи в памяти и неактивный шаблон node-only TLS; публичные keyset/nonce/suite tables Nexus — [P0 foundation](docs/XSP_V2_P0_FOUNDATION.md)
+- [ ] **Production:** проверка двух подписей в API, защищённое хранение и ротация приватных ключей, транзакционная anti-replay-проверка, persisted suite-floor на ноде, работающий node-only TLS ingress и проверка всех proxy hops
 - [ ] Канареечная нода, подтверждённое HTTPS-рукопожатие с реальным терминатором, owner-approved миграция и отказ от legacy лишь после activation; rollback/recovery без downgrade
 
 - Secure node registration with control plane and authenticated configuration synchronization
