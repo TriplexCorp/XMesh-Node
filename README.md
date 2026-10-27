@@ -18,6 +18,12 @@
 
 **На уже подключённой ноде не нужно заменять Ed25519-ключ или переустанавливать Docker.** Обновите панель Nexus, затем нажмите в карточке **«Обновить Agent»** и дождитесь подтверждения новой версии и следующего подписанного heartbeat. Штатный обновляющий скрипт Nexus загружает `xmesh-profile-attest.py`, проверяет Python-синтаксис, ставит файл атомарно и перезапускает нужные таймеры. Новый heartbeat может сообщить `verified` только после локальной криптографической проверки подписи политики, digest активного JSON и container mount. Для дополнительной диагностики на самой VPS: `sudo ls -l /usr/local/libexec/xmesh-profile-attest.py`, `sudo python3 /usr/local/libexec/xmesh-profile-attest.py --json`, `sudo journalctl -u xmesh-node-control.service -n 40 --no-pager`. Результат `policy_invalid`, `active_config_mismatch` и другие ошибки требуют отдельной диагностики — не обходите проверку подписи.
 
+### Staging XSP-v2: owner prepare → proof выполнен, cutover не реализован
+
+После [Node PR #10](https://github.com/TriplexCorp/XMesh-Node/pull/10) `keytool prove-prepared` создаёт **отдельную** dual-signature подпись Ed25519 + ML-DSA-65 над доменом `XSP2-KEY-ROTATE-PREPARE-V1`, связанным с `nodeId`, `fromEpoch`/`keyEpoch`, challenge и обеими новыми public key IDs. [Nexus PR #30](https://github.com/TriplexCorp/XMesh-Nexus/pull/30) в *feature-gated staging* регистрирует владельцем одобренную **публичную** pending-пару в migration `0102` и проверяет обе подписи. См. [контракт staging-операций](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_STAGING_ROTATION_PREPARE.md).
+
+Ответ Nexus `preparedProofVerified: true` вместе с `cutoverAuthorized: false` **не является подписанным разрешением активировать** `keytool activate-rotation`, отзыв старой пары либо повышением suite floor. Производственный агент Go 1.23 и bootstrap **не используют** исследовательские ключи. Следующий P0: доверенное подписанное разрешение Nexus→Node, подписанный Node-applied/cutover ACK, durable anti-replay, транзакционное переключение и восстановление при сбое; отдельная проверка на VPS и security review обязательны.
+
 ## XSP-v2 — P0: post-quantum security в разработке (27 октября 2026)
 
 **Текущий управляемый Node (Go 1.23) по-прежнему работает по `XMESH1`/Ed25519; `strict-pq` не включён.** Вся описанная ниже реализация XSP-v2 находится в **отдельном Go 1.27.3 staging/PoC-модуле** `security/xspv2/poc-go` и экспериментальном Rust API Nexus; штатный `bootstrap.sh` не включает эти механизмы.
@@ -29,7 +35,7 @@
 | **Регистрация по одобрению владельца** | `keytool prove` подписывает 32-байтный challenge **обоими приватными ключами**; Nexus staging API принимает только заранее одобренные владельцем публичные ключи/следующую эпоху, проверяет обе подписи, срок **10 минут** и одноразовость | UI и защищённый канал, независимое противодействие rollback, canary-нодa |
 | **Сетевой протокол и TLS** | В Nexus staging heartbeat проверяет обе подписи и уникальный nonce, возвращая только **неподписанный 204**; Go/OpenSSL и изолированный Nginx CI подтверждают TLS 1.3/`X25519MLKEM768`, проверку имени сервера/CA и отказ от downgrade | Подписанные ответы и команды, полноценный node-only ingress с реальным сертификатом и проверка TLS на отдельной VPS |
 
-**CI evidence (27 октября 2026, по конкретным SHA):** [Nexus Backend CI `f5f3e06` — success](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40444076259) с PostgreSQL/API integration; [Nexus Crypto PoC — success](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40444076298). [Node CI `ba6013d` — success](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40443828379) и [Node Crypto CI — success](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40443828424). Локальная staged-ротация и prepared-key proof реализованы в слитых [PR #5](https://github.com/TriplexCorp/XMesh-Node/pull/5) и [#6](https://github.com/TriplexCorp/XMesh-Node/pull/6), с успешными изолированными Go Crypto CI на соответствующих коммитах; это не production cutover. CI не доказывает recovery на VPS, наличие подписанных ACK или включённый production `strict-pq`.
+**Текущие подтверждённые CI (27 октября 2026, по конкретным SHA):** [Node `main` `4714307`: Node CI #40455937718 — success](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40455937718), [Go Crypto #40455937695 — success](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40455937695); [Nexus PR #30 `fb334b5`: полный Backend CI #40456461465 — success](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40456461465) с PostgreSQL migration `0102`, [Rust/OpenSSL Crypto #40456461449 — success](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40456461449), включая реальные подготовленные Go→Rust подписи. Подтверждены staging-код и лабораторная совместимость, **не** live VPS и не подписанный cutover/ACK. [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
 
 **Правильный путь для управляемой Node остаётся прежним:** установить ноду из панели (**Узлы → Подключить ноду и метрики**); Docker/Compose и агенты готовит автоматический bootstrap. Не запускайте `keytool` и не заменяйте production-ключи ноды ради PoC. Для экспериментальной схемы понадобятся отдельная тестовая VPS и подтверждение владельца.
 
@@ -52,10 +58,10 @@ VLESS использует `settings.clients[].id`, Hysteria2 — `settings.user
 Пока подпись, состав пользователей и конфигурация не согласованы, предыдущая
 рабочая конфигурация Xray намеренно сохраняется.
 
-## Обновление управляемой ноды до control-v5.1.2
+## Обновление управляемой ноды до control-v5.1.3
 
 После выпуска **обоих репозиториев** (XMesh-Node и XMesh Nexus) установите обновление
-управляющего агента **control-v5.1.2** из панели Nexus: **Узлы → Обновить Agent**.
+управляющего агента **control-v5.1.3** из обновлённой панели Nexus: **Узлы → Обновить Agent**. Релиз исправляет установку `xmesh-profile-attest.py`, необходимого для честного `profileCheck`, не заменяя существующие ключи Ed25519 или профиль Xray.
 В версии исправлена отправка независимого состояния маршрутизатора и Xray,
 сохранена проверка подписанных профилей, включая оба транспорта, и закрыты
 циклические TCP/UDP-маршруты. Автоматическое обновление агента также
