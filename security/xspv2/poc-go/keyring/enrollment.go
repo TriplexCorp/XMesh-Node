@@ -31,9 +31,10 @@ func PutProofASCII(buf []byte,part string,max int)([]byte,error){
  return append(buf,part...),nil
 }
 
-// EnrollmentSigningInput is byte-for-byte identical to the experimental Rust
-// PoP verifier. Challenge, node, epoch, purpose and both public keys are bound.
-func EnrollmentSigningInput(bundle PublicBundle,challenge []byte)([]byte,error){
+// marshalProofInput encodes the bounded, length-framed Node identity and
+// public keys. Rotation uses a SEPARATE signature domain and binds the old
+// and new epoch: an initial enrollment proof cannot be used for rotation.
+func marshalProofInput(bundle PublicBundle,challenge []byte,domain string,from uint64)([]byte,error){
  if bundle.NodeID<=0||bundle.KeyEpoch==0||bundle.Purpose!="node_request"||
    len(challenge)!=32||len(bundle.EdPublic)!=ed25519.PublicKeySize||
    len(bundle.PQPublic)!=mldsa.MLDSA65PublicKeySize||
@@ -41,10 +42,11 @@ func EnrollmentSigningInput(bundle PublicBundle,challenge []byte)([]byte,error){
    bundle.PQKeyID!=fingerprint("pq-",bundle.PQPublic){
   return nil,errors.New("invalid proof subject or public key IDs")
  }
- buf:=append([]byte(nil),[]byte("XSP2-KEY-ENROLL-V1")...)
+ buf:=append([]byte(nil),[]byte(domain)...)
  buf=append(buf,0)
  var be [8]byte
  binary.BigEndian.PutUint64(be[:],uint64(bundle.NodeID));buf=append(buf,be[:]...)
+ if from>0{binary.BigEndian.PutUint64(be[:],from);buf=append(buf,be[:]...)}
  binary.BigEndian.PutUint64(be[:],bundle.KeyEpoch);buf=append(buf,be[:]...)
  var err error
  buf,err=PutProofASCII(buf,bundle.Purpose,32);if err!=nil{return nil,err}
@@ -54,6 +56,20 @@ func EnrollmentSigningInput(bundle PublicBundle,challenge []byte)([]byte,error){
  buf,err=PutProofASCII(buf,bundle.EdKeyID,64);if err!=nil{return nil,err}
  buf,err=PutProofASCII(buf,bundle.PQKeyID,64);if err!=nil{return nil,err}
  return buf,nil
+}
+
+// EnrollmentSigningInput matches Rust initial enrollment verification bytes.
+func EnrollmentSigningInput(bundle PublicBundle,challenge []byte)([]byte,error){
+ return marshalProofInput(bundle,challenge,"XSP2-KEY-ENROLL-V1",0)
+}
+
+// RotationSigningInput binds a prepared keyset and its currently active
+// epoch in a different signature domain. This is NOT a signed Nexus ACK.
+func RotationSigningInput(bundle PublicBundle,fromEpoch uint64,challenge []byte)([]byte,error){
+ if fromEpoch==0||fromEpoch==^uint64(0)||bundle.KeyEpoch!=fromEpoch+1{
+  return nil,errors.New("invalid prepared rotation epochs")
+ }
+ return marshalProofInput(bundle,challenge,"XSP2-KEY-ROTATE-PREPARE-V1",fromEpoch)
 }
 
 // BuildEnrollmentProof refuses wrong epochs and uses BOTH private keys.
