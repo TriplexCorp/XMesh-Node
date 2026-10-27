@@ -11,7 +11,7 @@ import (
  "github.com/TriplexCorp/XMesh-Node/security/xspv2/poc-go/keyring"
 )
 func main(){
- if len(os.Args)<2{fmt.Fprintln(os.Stderr,"usage: keytool init-master|create|prepare-rotation|activate-rotation|recover-rotation|abort-rotation|public|prove -key /root/key -vault /root/vault");os.Exit(2)}
+ if len(os.Args)<2{fmt.Fprintln(os.Stderr,"usage: keytool init-master|create|prepare-rotation|activate-rotation|recover-rotation|abort-rotation|public|prove|prove-prepared -key /root/key -vault /root/vault");os.Exit(2)}
  action:=os.Args[1]
  opts:=flag.NewFlagSet(action,flag.ExitOnError)
  master:=opts.String("key","","external AES wrapping-key file (0600)")
@@ -40,6 +40,7 @@ func main(){
  case "recover-rotation":result,err=keyring.RecoverRotation(*vault,*master)
  case "public":result,err=keyring.Description(*vault,*master)
  case "prove":result,err=keyring.ProveFromEncryptedVault(*vault,*master,*challenge)
+ case "prove-prepared":result,err=keyring.ProvePreparedRotation(*vault,*master,*expected,*challenge)
  default:fmt.Fprintln(os.Stderr,"unsupported keytool subcommand");os.Exit(2)
  }
  if err!=nil{fmt.Fprintln(os.Stderr,"XSP staging keytool failed:",err);os.Exit(1)}
