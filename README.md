@@ -10,9 +10,9 @@ Standalone edge node for **XMesh Nexus**. Initial implementation: a TLS ClientHe
 
 Прямой обмен **Rust ↔ Go** подписанными тестовыми сообщениями успешно прошёл в изолированном CI Nexus с проверкой обеих подписей и отказом при повреждении.
 
-**PR07 (test-only):** добавлен [TLS-probe с точной проверкой X25519MLKEM768](docs/XSP_V2_TLS_PROBE.md) и негативными тестами TLS 1.2, TLS 1.3 X25519-only, поддельного сертификата, неверного имени и resumption. Запуск из отдельного Go 1.27.3-модуля: `cd security/xspv2/poc-go && go run ./cmd/tlsprobe -address host.example:443 -servername host.example`. Этот инструмент не передаёт HTTP, не устанавливает агента и не меняет настройки TLS. Основной Go 1.23 Node остаётся прежним.
+**PR07 (только лабораторный TLS):** добавлен [TLS-probe с проверкой фактически согласованной X25519MLKEM768](docs/XSP_V2_TLS_PROBE.md) и тестами отказа при TLS 1.2, TLS 1.3 X25519-only, неверном имени, недоверенном сертификате и resumed/incomplete handshake. Реальные TCP/TLS соединения проверены независимыми клиентами OpenSSL 3.5 ↔ Go 1.27.3; [Nexus TLS CI #40432661499](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40432661499) и [Node CI #40432873804](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40432873804) прошли на соответствующих коммитах. Команда для оператора собственного тестового endpoint: `cd security/xspv2/poc-go && go run ./cmd/tlsprobe -address host.example:443 -servername host.example`. Она не отправляет HTTP и не меняет TLS/агент/действующие сертификаты. Рабочий Go 1.23 Node не обновлялся.
 
-Следующий gate: проверить **реальный** ingress и все CDN/Nginx→origin сегменты на отдельной ноде, выполнить security-review, FIPS 204 KAT и подготовить безопасное внедрение с необратимым suite-floor после явного подтверждения владельца. Strict-активация пока отключена.
+**Статус:** PR01 wire-векторы, PR02 подписи и PR07 TLS-handshake **проверены только в PoC**. Рабочая схема `XMESH1`/Ed25519, API и Xray не имеют включённого XSP-v2, долговременных ML-DSA ключей и enforced `minimumSuite`. Следующий gate: review подписываемого формата и key lifecycle, FIPS 204 KAT/fuzz, испытание отдельного node-only ingress и **всех** CDN/LB → origin сегментов, затем owner-approved enrollment, защита от downgrade и recovery на тестовых нодах. Strict-активация **отключена**. Полный [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
 
 ## Подписанная офлайн-политика и Hysteria 2
 
@@ -203,6 +203,14 @@ UDP forwarding is suitable for a selected service (e.g. one QUIC/H3 endpoint), n
 See [config.example.json](config.example.json). First-match routing uses ordered rules, then `default_tcp`. Use `alpn` only if the client actually advertises the protocol. Wildcard SNI `*.example.com` matches subdomains only.
 
 ## Roadmap
+
+**XSP-v2 (P0, в работе; только test-only PoC):** [spec](docs/XSP_V2_WIRE_SPEC.md) и общие векторы, [PR02 Rust↔Go Ed25519+ML-DSA-65](docs/XSP_V2_CRYPTO_POC.md), [PR07 лабораторный TLS1.3/X25519MLKEM768](docs/XSP_V2_TLS_PROBE.md) уже реализованы в независимых тестах. **Не является production-защитой**.
+
+- [x] PR01: проект wire-формата и одинаковые тестовые векторы Rust/Go/JS (security-review формата ещё открыт)
+- [x] PR02 лабораторно: две подписи обязательны, двунаправленная Rust↔Go проверка и отказ при повреждении любой подписи
+- [x] PR07 лабораторно: Go TLS probe, OpenSSL реальный TLS-handshake и negative downgrade/CA/SNI tests
+- [ ] Строгий decoder и replay/epoch/key lifecycle, ротация/backup, отдельный node-only TLS ingress и инвентаризация цепочки прокси
+- [ ] Канареечная нода, подтверждённое HTTPS-рукопожатие с реальным терминатором, owner-approved миграция и отказ от legacy лишь после activation; rollback/recovery без downgrade
 
 - Secure node registration with control plane and authenticated configuration synchronization
 - Explicit protocol-aware QUIC routing on UDP/443
