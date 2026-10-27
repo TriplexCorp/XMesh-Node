@@ -59,10 +59,10 @@ func persistACKFile(dir,path string,record appliedACKRecord)error{
  return directory.Sync()
 }
 
-// PersistVerifiedAppliedACK is a retry journal, NOT an epoch activation API.
+// persistVerifiedAppliedACK is a retry journal, NOT an epoch activation API.
 // No valid ACK should be created before an independently fsynced new-vault
 // commit and protected monotonic floor; caller must enforce those preconditions.
-func PersistVerifiedAppliedACK(dir string,raw []byte,permit VerifiedPermit,
+func persistVerifiedAppliedACK(dir string,raw []byte,permit VerifiedPermit,
  next PinnedPublic,nowMS int64)(Message,error){
  var empty Message
  msg,e:=VerifyAppliedACK(raw,permit,next,nowMS);if e!=nil{return empty,e}
@@ -88,10 +88,10 @@ func PersistVerifiedAppliedACK(dir string,raw []byte,permit VerifiedPermit,
  return msg,nil
 }
 
-// ReloadVerifiedAppliedACK authenticates original journal bytes afresh against
+// reloadVerifiedAppliedACK authenticates original journal bytes afresh against
 // pinned next keys and the independent verified permit. It never trusts disk
 // data as the authority for key epochs, approval or floor.
-func ReloadVerifiedAppliedACK(dir string,permit VerifiedPermit,
+func reloadVerifiedAppliedACK(dir string,permit VerifiedPermit,
  next PinnedPublic,nowMS int64)(Message,error){
  var empty Message
  if e:=checkPrivateDir(dir);e!=nil{return empty,e}
