@@ -4,6 +4,7 @@ import (
  "bytes"
  "crypto/ed25519"
  "crypto/mldsa"
+ "crypto/sha256"
  "encoding/base64"
  "encoding/hex"
  "testing"
@@ -53,4 +54,20 @@ func TestOwnerApprovedDualKeyChallengeAndRotation(t *testing.T){
  nextInput,err:=EnrollmentSigningInput(next,nonce)
  if err!=nil{t.Fatal(err)}
  if ed25519.Verify(next.EdPublic,msg,edSig)||bytes.Equal(nextInput,msg){t.Fatal("old proof reused after rotation")}
+}
+
+func TestOwnerApprovalWireRustGoSharedGolden(t *testing.T){
+ ed:=bytes.Repeat([]byte{1},32)
+ pq:=bytes.Repeat([]byte{2},mldsa.MLDSA65PublicKeySize)
+ bundle:=PublicBundle{
+  NodeID:42,Purpose:"node_request",KeyEpoch:1,
+  EdKeyID:fingerprint("ed-",ed),PQKeyID:fingerprint("pq-",pq),
+  EdPublic:ed,PQPublic:pq,
+ }
+ input,err:=EnrollmentSigningInput(bundle,bytes.Repeat([]byte{9},32))
+ if err!=nil{t.Fatal(err)}
+ sum:=sha256.Sum256(input)
+ if hex.EncodeToString(sum[:])!="902160cf06cde566b7150667d0cbbdd2971e7507d5f640925602b6fc703035a0"{
+  t.Fatal("Rust/Go approval signing-input divergence")
+ }
 }
