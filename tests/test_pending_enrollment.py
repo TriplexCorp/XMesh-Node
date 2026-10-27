@@ -87,6 +87,21 @@ class PendingEnrollmentTest(unittest.TestCase):
         self.assertNotIn('echo "$TOKEN"', BOOTSTRAP)
         self.assertNotIn('cat "$ENROLL_REPLY"', BOOTSTRAP)
 
+    def test_bootstrap_installs_signed_profile_attestation_before_first_sync(self):
+        # The control heartbeat maps a missing attestation helper to
+        # helper_missing even when both Xray and the router are running.
+        self.assertIn("$NODE_RELEASE_SHA/deploy/xmesh-profile-attest.py", BOOTSTRAP)
+        self.assertIn('python3 -m py_compile "$PROFILE_TMP"', BOOTSTRAP)
+        self.assertIn("grep -q 'verify_envelope' \"$PROFILE_TMP\"", BOOTSTRAP)
+        self.assertIn("grep -q 'xmesh-managed-xray' \"$PROFILE_TMP\"", BOOTSTRAP)
+        self.assertIn('/usr/local/libexec/.xmesh-profile-attest.new', BOOTSTRAP)
+        self.assertIn('mv -f /usr/local/libexec/.xmesh-profile-attest.new /usr/local/libexec/xmesh-profile-attest.py', BOOTSTRAP)
+        self.assertLess(BOOTSTRAP.index('mv -f /usr/local/libexec/.xmesh-profile-attest.new'),
+                        BOOTSTRAP.index('systemctl start xmesh-xray-sync.service'))
+        self.assertLess(BOOTSTRAP.index('mv -f /usr/local/libexec/.xmesh-profile-attest.new'),
+                        BOOTSTRAP.index('systemctl start xmesh-node-user-meter.service'))
+        self.assertNotIn('profileCheck": "verified"', BOOTSTRAP)
+
     def test_bootstrap_reports_pending_as_success(self):
         self.assertIn("OnUnitInactiveSec=60s", BOOTSTRAP)
         self.assertIn("No XRAY STUDIO profile assigned yet (normal on a fresh panel)", BOOTSTRAP)
