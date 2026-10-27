@@ -6,6 +6,7 @@ import (
  "crypto/rand"
  "encoding/base64"
  "encoding/json"
+ "math"
  "os"
  "path/filepath"
  "strings"
@@ -42,6 +43,20 @@ func load(t *testing.T)fixture{
  if e=json.Unmarshal(raw,&f);e!=nil{t.Fatal(e)}
  return f
 }
+// Reject wraparound in signed Unix-millisecond clock comparisons, including
+// timestamps near the int64 limit (never legitimate in production).
+func TestCutoverClockCannotOverflow(t *testing.T){
+ f:=load(t)
+ v:=f.Permit
+ v.IssuedAtMS=math.MaxInt64-45000
+ v.ExpiresAtMS=math.MaxInt64-1000
+ if e:=checkClock(v,math.MaxInt64-15000);e!=nil{
+  t.Fatalf("valid large timestamp rejected due to overflow: %v",e)
+ }
+ if e:=checkClock(v,1);e==nil{t.Fatal("wildly future message accepted")}
+ if e:=checkClock(v,math.MaxInt64);e==nil{t.Fatal("expired message accepted")}
+}
+
 func TestIndependentContractHashes(t *testing.T){
  f:=load(t)
  p,e:=Canonical(f.Permit);if e!=nil{t.Fatal(e)}
