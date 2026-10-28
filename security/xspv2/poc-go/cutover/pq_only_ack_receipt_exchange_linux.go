@@ -126,6 +126,11 @@ func exchangeSignedACKForReceiptPath(ctx context.Context, address, serverName st
 	if err != nil {
 		return empty, err
 	}
+	// The TCP connect address may be an internal alias or IP, but the HTTP
+	// authority must be the same authenticated DNS name used for TLS SNI and
+	// certificate verification. Never let a connect-only alias select a weaker
+	// virtual host after a successful strict PQ handshake.
+	request.Host = serverName
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Accept-Encoding", "identity")
