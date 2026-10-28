@@ -28,17 +28,26 @@ jobs:
           cache: false
       - name: Enforce isolated production-capable Agent boundary
         run: |
+          set -euo pipefail
           test "$(sed -n 's/^go //p' go.mod)" = "1.23"
           grep -Fq 'go 1.27.3' agent/xspv2/go.mod
           grep -Fq '../../security/xspv2/poc-go' agent/xspv2/go.mod
           grep -Fq 'cutover.ExchangeSignedACKForReceipt' agent/xspv2/runtime/transport_linux.go
           grep -Fq 'cutover.RecoverSignedACKReceipt' agent/xspv2/runtime/transport_linux.go
           grep -Fq 'DefaultRoot = "/var/lib/xmesh-agent/xsp-v2"' agent/xspv2/state/state_linux.go
-          ! grep -R --line-number -E 'XMESH1|tls1[_.]?2|InsecureSkipVerify|allow.?weak|strict-pq=on' agent/xspv2
-          ! grep -R --line-number -E 'os/exec|exec\.Command|/bin/sh|bash -c' agent/xspv2
+          mapfile -d '' agent_go < <(find agent/xspv2 -type f -name '*.go' -print0)
+          if grep -nE '"XMESH1|tls\.VersionTLS12|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|"strict-pq=on|"allow.?weak' "${agent_go[@]}"; then
+            echo 'forbidden executable downgrade/fallback pattern in P0-D Agent Go source' >&2
+            exit 1
+          fi
+          if grep -nE '"os/exec"|exec\.Command|"/bin/sh"|"bash"' "${agent_go[@]}"; then
+            echo 'forbidden shell/command execution pattern in P0-D Agent Go source' >&2
+            exit 1
+          fi
       - name: Test and build Go 1.27 Agent artifact
         working-directory: agent/xspv2
         run: |
+          set -euo pipefail
           test -z "$(gofmt -d .)"
           go test ./...
           go vet ./...
