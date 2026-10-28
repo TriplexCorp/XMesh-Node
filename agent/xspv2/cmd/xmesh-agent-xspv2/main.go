@@ -35,9 +35,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{
-		"version": version,
+		"version":   version,
 		"stateRoot": layout.Root,
-		"journal": layout.Journal,
+		"journal":   layout.Journal,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
