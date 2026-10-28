@@ -133,3 +133,42 @@ func ReloadVerifiedPermit(dir string,pin PinnedPublic,want ExpectedPermit,nowMs 
  if v.PermitDigest()!=record.PermitDigest{return empty,errors.New("journal canonical digest changed")}
  return v,nil
 }
+
+// reloadVerifiedPermitForReceiptRetry restores an expired permit marker only
+// for historical receipt retry/recovery after an exact signed ACK is already
+// durably journaled. It deliberately skips *current* permit freshness, but
+// re-verifies the panel signatures, independent ExpectedPermit approval, the
+// exact permit digest, the saved ACK binding, BOTH ACK signatures and the
+// pending Node key pair. Without a pre-existing matching ACK journal it fails.
+//
+// This package-private staging helper MUST NOT be used to create a new ACK,
+// advance an epoch, accept a new command, or retire old keys. Production Agent
+// recovery API design remains a later gate.
+func reloadVerifiedPermitForReceiptRetry(dir string,pin PinnedPublic,want ExpectedPermit,next PinnedPublic)(VerifiedPermit,error){
+ var empty VerifiedPermit
+ if e:=checkPrivateDir(dir);e!=nil{return empty,e}
+ lock,e:=lockPermit(dir);if e!=nil{return empty,e}
+ defer func(){_ = syscall.Flock(int(lock.Fd()),syscall.LOCK_UN);_ = lock.Close()}()
+
+ record,e:=readPermitFile(filepath.Join(dir,journalName));if e!=nil{return empty,e}
+ signed,e:=Decode(record.SignedPermit);if e!=nil{return empty,e}
+ if signed.Message.Kind!="permit"||!permitMatches(signed.Message,want){
+  return empty,errors.New("historical permit not bound to approved request")
+ }
+ if e=checkPublic(pin,signed.Message,"panel_response");e!=nil{return empty,e}
+ canonical,e:=verifyBoth(signed,pin);if e!=nil{return empty,e}
+ verified:=VerifiedPermit{message:signed.Message,inputHash:sha(canonical)}
+ if verified.PermitDigest()!=record.PermitDigest{
+  return empty,errors.New("historical permit journal digest changed")
+ }
+
+ ack,e:=checkSavedACKForReceipt(dir,verified);if e!=nil{return empty,e}
+ parsed,e:=Decode(ack.SignedACK);if e!=nil{return empty,e}
+ if parsed.Message.Kind!="ack"{
+  return empty,errors.New("historical recovery requires a saved ACK")
+ }
+ if _,e=VerifyAppliedACK(ack.SignedACK,verified,next,parsed.Message.IssuedAtMS);e!=nil{
+  return empty,fmt.Errorf("saved ACK cannot authorize historical receipt retry: %w",e)
+ }
+ return verified,nil
+}
