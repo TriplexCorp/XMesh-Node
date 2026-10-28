@@ -3,10 +3,11 @@
 package cutover
 
 // Experimental XSP-v2 request/receipt transport boundary (Go 1.27 only).
-// No real Nexus route or protected production key provider is connected here.
+// This remains staging-only and is not linked into the production Go 1.23 Agent.
 import (
     "bytes"
     "context"
+    "crypto/tls"
     "crypto/x509"
     "errors"
     "fmt"
@@ -25,26 +26,27 @@ import (
 
 const signedACKEndpoint = "/api/v2/node/keys/rotation/ack"
 
-// ExchangeSignedACKForReceipt binds the real HTTP exchange to the same
-// mandatory hybrid TLS dialer as the isolated Node TLS probe. It retransmits
+// ExchangeSignedACKForReceipt binds the real HTTP exchange to the mandatory
+// mutual hybrid TLS dialer used by the isolated Node TLS probe. It retransmits
 // EXACT durable, dual-signed ACK bytes, accepts ONLY a verified and durably
 // saved dual-signed Nexus receipt, and never treats an HTTP status as commit.
 //
-// This is a staging building block. Nexus does not yet expose the endpoint.
-// The caller must independently verify a trusted permit, provision pinned
-// panel_response and next Node keys, ensure applied vault/monotonic floor, and
-// supply a correct private journal. This function does not bootstrap trust,
-// switch a key epoch, retire old keys, or implement a legacy fallback.
+// This is a staging building block. The caller must independently verify a
+// trusted permit, provision pinned panel_response and next Node keys, ensure
+// applied vault/monotonic floor, and supply a correct private journal. This
+// function does not bootstrap trust, switch a key epoch, retire old keys, or
+// implement a legacy fallback.
 //
 // Network / security constraints:
 //   - always TLS 1.3, X25519MLKEM768, verified server certificate/SNI;
+//   - always a validated ML-DSA-65 client certificate via DialStrictMutual;
 //   - no proxy, redirects, HTTP downgrade, session resumption or alternative
 //     cryptographic curves; no user choice to allow insecure operation;
 //   - exact journaled ACK is the request body and signed receipt the response;
 //   - no unsigned 200/204 success, JSON errors, oversized replies or
 //     different receipt; persistence must finish before reporting success.
 func ExchangeSignedACKForReceipt(ctx context.Context, address, serverName string,
-    roots *x509.CertPool, journalDir string,
+    roots *x509.CertPool, clientCertificate tls.Certificate, journalDir string,
     panelPin PinnedPublic, permit VerifiedPermit, nextNodeKeys PinnedPublic,
     minimumEpoch uint64, nowMS int64,
 ) (VerifiedCommitReceipt, error) {
@@ -60,8 +62,6 @@ func ExchangeSignedACKForReceipt(ctx context.Context, address, serverName string
         return empty, errors.New("applied epoch must match the exact pending cutover")
     }
     if err = checkPrivateDir(journalDir); err != nil { return empty, err }
-    // Lock only while obtaining exact signed ACK bytes: do not hold the
-    // filesystem mutex across a potentially slow network operation.
     lock, err := lockPermit(journalDir)
     if err != nil { return empty, err }
     ack, readErr := checkSavedACKForReceipt(journalDir, permit)
@@ -73,16 +73,11 @@ func ExchangeSignedACKForReceipt(ctx context.Context, address, serverName string
     if parsed.Message.Path != signedACKEndpoint || parsed.Message.Method != http.MethodPost {
         return empty, errors.New("ACK not bound to the expected signed endpoint")
     }
-    // Signed ACK is historical immutable evidence. Its time of issuance is
-    // used for historical cryptographic checking, never as freshness for a
-    // new permit or command.
     if _, err = VerifyAppliedACK(ack.SignedACK, permit, nextNodeKeys, parsed.Message.IssuedAtMS); err != nil {
         return empty, fmt.Errorf("saved signed ACK did not reverify: %w", err)
     }
     if ack.ToEpoch != minimumEpoch { return empty, errors.New("ACK epoch not applied") }
 
-    // The request URL has a fixed path. No caller-supplied path, scheme,
-    // query string, redirects, proxies or weak TLS client configuration.
     endpoint := "https://" + address + signedACKEndpoint
     request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(ack.SignedACK))
     if err != nil { return empty, err }
@@ -98,7 +93,7 @@ func ExchangeSignedACKForReceipt(ctx context.Context, address, serverName string
             if network != "tcp" || target != address {
                 return nil, errors.New("unexpected PQ endpoint / redirect")
             }
-            return tlsprobe.DialStrict(dialCtx, address, serverName, roots)
+            return tlsprobe.DialStrictMutual(dialCtx, address, serverName, roots, clientCertificate)
         },
     }
     defer transport.CloseIdleConnections()
@@ -124,9 +119,6 @@ func ExchangeSignedACKForReceipt(ctx context.Context, address, serverName string
     if len(signedReceipt) == 0 || len(signedReceipt) > 16*1024 {
         return empty, errors.New("receipt body missing or oversized")
     }
-    // Persist under the same journal lock as ACK writes. The persistence
-    // helper *re-reads* the original ACK and verifies both panel signatures
-    // before any caller may treat this as a confirmed cutover.
     return PersistVerifiedCommitReceiptForJournal(journalDir, signedReceipt,
         panelPin, permit, nextNodeKeys, minimumEpoch, nowMS)
 }
