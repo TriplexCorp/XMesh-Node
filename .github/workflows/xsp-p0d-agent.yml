@@ -1,0 +1,57 @@
+name: XSP-v2 P0-D Agent Artifact
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/**"
+      - "security/xspv2/poc-go/**"
+      - ".github/workflows/xsp-p0d-agent.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/**"
+      - "security/xspv2/poc-go/**"
+      - ".github/workflows/xsp-p0d-agent.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Enforce isolated production-capable Agent boundary
+        run: |
+          test "$(sed -n 's/^go //p' go.mod)" = "1.23"
+          grep -Fq 'go 1.27.3' agent/xspv2/go.mod
+          grep -Fq '../../security/xspv2/poc-go' agent/xspv2/go.mod
+          grep -Fq 'cutover.ExchangeSignedACKForReceipt' agent/xspv2/runtime/transport_linux.go
+          grep -Fq 'cutover.RecoverSignedACKReceipt' agent/xspv2/runtime/transport_linux.go
+          grep -Fq 'DefaultRoot = "/var/lib/xmesh-agent/xsp-v2"' agent/xspv2/state/state_linux.go
+          ! grep -R --line-number -E 'XMESH1|tls1[_.]?2|InsecureSkipVerify|allow.?weak|strict-pq=on' agent/xspv2
+          ! grep -R --line-number -E 'os/exec|exec\.Command|/bin/sh|bash -c' agent/xspv2
+      - name: Test and build Go 1.27 Agent artifact
+        working-directory: agent/xspv2
+        run: |
+          test -z "$(gofmt -d .)"
+          go test ./...
+          go vet ./...
+          go build -trimpath -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
+          /tmp/xmesh-agent-xspv2 --version | grep -Fxq p0d1-staging
+          state="$(mktemp -d)/state"
+          /tmp/xmesh-agent-xspv2 --check-state "$state" > /tmp/xsp-state.json
+          test "$(stat -c '%a' "$state")" = 700
+          test "$(stat -c '%a' "$state/cutover")" = 700
+          python3 - <<'PY'
+          import json
+          with open('/tmp/xsp-state.json', encoding='utf-8') as f:
+              d=json.load(f)
+          assert d['version']=='p0d1-staging'
+          assert d['journal'].endswith('/cutover')
+          PY
