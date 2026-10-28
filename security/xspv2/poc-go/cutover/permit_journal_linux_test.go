@@ -6,6 +6,7 @@ import (
  "bytes"
  "os"
  "path/filepath"
+ "strconv"
  "sync"
  "testing"
 )
@@ -64,6 +65,61 @@ func TestJournalWritesExactVerifiedPermitAndReloads(t *testing.T){
  }
  if _,e=PersistVerifiedPermit(dir,raw,pin,wrong,now);e==nil{
   t.Fatal("permit accepted with unrelated approval")
+ }
+}
+
+func TestExpiredPermitRestoresOnlyForExactSavedACKReceiptRetry(t *testing.T){
+ f:=load(t)
+ panelEd,panelPQ,panel:=pair(t)
+ nextEd,nextPQ,next:=pair(t)
+ panel.Purpose="panel_response";panel.IssuerID=f.Permit.IssuerID;panel.NodeID=f.Permit.NodeID
+ next.Purpose="node_request";next.IssuerID="node-"+strconv.FormatUint(f.Permit.NodeID,10);next.NodeID=f.Permit.NodeID
+ f.Permit.SignerEdKeyID=panel.EdKeyID;f.Permit.SignerPQKeyID=panel.PQKeyID
+ f.Permit.ToEdKeyID=next.EdKeyID;f.Permit.ToPQKeyID=next.PQKeyID
+ want:=ExpectedPermit{
+  NodeID:f.Permit.NodeID,FromEpoch:f.Permit.FromEpoch,ToEpoch:f.Permit.ToEpoch,
+  RequestID:f.Permit.RequestID,FromEdKeyID:f.Permit.FromEdKeyID,
+  FromPQKeyID:f.Permit.FromPQKeyID,ToEdKeyID:f.Permit.ToEdKeyID,
+  ToPQKeyID:f.Permit.ToPQKeyID,CandidateSHA256Hex:f.Permit.CandidateSHA256Hex,
+ }
+ permitRaw:=mustSign(t,f.Permit,panelEd,panelPQ)
+ dir:=privateJournalTestDir(t)
+ fresh:=f.Permit.IssuedAtMS+1000
+ permit,e:=PersistVerifiedPermit(dir,permitRaw,panel,want,fresh);if e!=nil{t.Fatal(e)}
+ expired:=f.Permit.ExpiresAtMS+1
+ if _,e=ReloadVerifiedPermit(dir,panel,want,expired);e==nil{
+  t.Fatal("ordinary reload accepted expired permit")
+ }
+ if _,e=reloadVerifiedPermitForReceiptRetry(dir,panel,want,next);e==nil{
+  t.Fatal("expired permit restored without an already-saved ACK")
+ }
+
+ f.Ack.Kind="ack"
+ f.Ack.NodeID=f.Permit.NodeID
+ f.Ack.IssuerID=next.IssuerID
+ f.Ack.FromEpoch=f.Permit.FromEpoch;f.Ack.ToEpoch=f.Permit.ToEpoch
+ f.Ack.RequestID=f.Permit.RequestID
+ f.Ack.FromEdKeyID=f.Permit.FromEdKeyID;f.Ack.FromPQKeyID=f.Permit.FromPQKeyID
+ f.Ack.ToEdKeyID=next.EdKeyID;f.Ack.ToPQKeyID=next.PQKeyID
+ f.Ack.SignerEdKeyID=next.EdKeyID;f.Ack.SignerPQKeyID=next.PQKeyID
+ f.Ack.Method="POST";f.Ack.Path=signedACKEndpoint
+ f.Ack.PermitNonceHex=f.Permit.PermitNonceHex
+ f.Ack.CandidateSHA256Hex=f.Permit.CandidateSHA256Hex
+ f.Ack.PermitSHA256Hex=permit.PermitDigest()
+ state,e:=StateDigest(f.Ack);if e!=nil{t.Fatal(e)}
+ f.Ack.AppliedStateSHA256Hex=state
+ ackRaw:=mustSign(t,f.Ack,nextEd,nextPQ)
+ if _,e=persistVerifiedAppliedACK(dir,ackRaw,permit,next,f.Ack.IssuedAtMS+1);e!=nil{t.Fatal(e)}
+ recovered,e:=reloadVerifiedPermitForReceiptRetry(dir,panel,want,next);if e!=nil{t.Fatal(e)}
+ if recovered.PermitDigest()!=permit.PermitDigest(){t.Fatal("historical retry changed permit digest")}
+
+ wrongWant:=want;wrongWant.RequestID+="-other"
+ if _,e=reloadVerifiedPermitForReceiptRetry(dir,panel,wrongWant,next);e==nil{
+  t.Fatal("historical retry accepted changed independent approval")
+ }
+ wrongNext:=next;wrongNext.PQPublic=[]byte{1}
+ if _,e=reloadVerifiedPermitForReceiptRetry(dir,panel,want,wrongNext);e==nil{
+  t.Fatal("historical retry accepted substituted pending keyset")
  }
 }
 
