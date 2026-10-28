@@ -152,8 +152,9 @@ func TestPQOnlyHTTPACKToDurableDualSignedReceipt(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests.Add(1)
 			if r.Method != http.MethodPost || r.URL.Path != signedACKEndpoint ||
-				r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/json" {
-				t.Errorf("wrong method/path of ACK: %v", r.URL)
+				r.URL.RawQuery != "" || r.Host != "nexus.test" ||
+				r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("wrong method/path/authority of ACK: method=%s url=%v host=%q", r.Method, r.URL, r.Host)
 				http.Error(w, "unexpected signed request", http.StatusBadRequest)
 				return
 			}
