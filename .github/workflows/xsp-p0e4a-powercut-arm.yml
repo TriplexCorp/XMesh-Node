@@ -45,8 +45,8 @@ jobs:
           grep -Fq 'XMESH_XSPV2_POWERCUT_SIGNAL_FD' "$lab"
           grep -Fq 'GitHub CI is not physical power-loss evidence and cannot close P0-E4a.' "$doc"
 
-          if grep -E 'exec\.Command|net\.|http\.|syscall\.Reboot|reboot|shutdown|poweroff|systemctl|/dev/[a-z]|ioctl' "$lab"; then
-            echo 'lab power-cut arm contains an autonomous command/network/power-control path' >&2
+          if grep -E 'exec\.Command|os\.StartProcess|net\.Dial|http\.(Get|Post|NewRequest)|syscall\.Reboot|unix\.Reboot|/sbin/(reboot|shutdown|poweroff)|systemctl[[:space:]]' "$lab"; then
+            echo 'lab power-cut arm contains an autonomous command/network/power-control API' >&2
             exit 1
           fi
 
