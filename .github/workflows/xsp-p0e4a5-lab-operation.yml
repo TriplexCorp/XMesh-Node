@@ -45,7 +45,7 @@ jobs:
             grep -Fq "$point" "$test_file"
           done
           grep -Fq 'XSP2-POWERCUT-ARMED-V1' "$test_file"
-          grep -Fq 'CI process kill is NOT physical power-loss evidence.' "$test_file"
+          grep -Fq 'This process kill is explicitly NOT physical power-loss evidence.' "$test_file"
           grep -Fq 'P0-E4a remains **OPEN**' "$doc"
 
           if grep -E 'syscall\.Reboot|unix\.Reboot|/sbin/(reboot|shutdown|poweroff)|systemctl[[:space:]]|net\.Dial|http\.(Get|Post|NewRequest)' "$test_file" "$lab_hook"; then
