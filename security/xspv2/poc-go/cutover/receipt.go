@@ -39,6 +39,8 @@ type VerifiedCommitReceipt struct {
     FromEpoch uint64
     ToEpoch uint64
     RequestID string
+    ToEdKeyID string
+    ToPQKeyID string
     CommittedAtMS int64
     SignedACKSHA256Hex string
 }
@@ -154,7 +156,7 @@ func VerifyCommitReceipt(
     }
     return VerifiedCommitReceipt{
         NodeID:m.NodeID,FromEpoch:m.FromEpoch,ToEpoch:m.ToEpoch,
-        RequestID:m.RequestID,CommittedAtMS:m.CommittedAtMS,
-        SignedACKSHA256Hex:m.SignedACKSHA256Hex,
+        RequestID:m.RequestID,ToEdKeyID:a.ToEdKeyID,ToPQKeyID:a.ToPQKeyID,
+        CommittedAtMS:m.CommittedAtMS,SignedACKSHA256Hex:m.SignedACKSHA256Hex,
     },nil
 }
