@@ -1,0 +1,45 @@
+name: XSP-v2 P0-E3a Owner Off-host Recovery Checkpoint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/recovery/**"
+      - "agent/xspv2/state/**"
+      - "docs/XSP_V2_P0E_OWNER_RECOVERY_CHECKPOINT.md"
+      - ".github/workflows/xsp-p0e-owner-checkpoint.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/recovery/**"
+      - "agent/xspv2/state/**"
+      - "docs/XSP_V2_P0E_OWNER_RECOVERY_CHECKPOINT.md"
+      - ".github/workflows/xsp-p0e-owner-checkpoint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  owner-checkpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Check P0-E3a source contract
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -d agent/xspv2/recovery/*.go)"
+          ! grep -R --line-number --fixed-strings 'strict-pq=on' agent/xspv2/recovery docs/XSP_V2_P0E_OWNER_RECOVERY_CHECKPOINT.md
+          ! grep -R --line-number -E 'XMESH1|reset.*epoch|epoch.*reset|regenerat.*key|auto.*recover' agent/xspv2/recovery
+          grep -Fq 'XSP2-OWNER-RECOVERY-CHECKPOINT-V1' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'XSP2-NEXUS-RECOVERY-STATE-V1' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'owner recovery ML-DSA-65 signature invalid' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'independent off-host generation floor is required' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'local Agent/Nexus state is older than or different from owner recovery checkpoint' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'TestOwnerRecoveryCheckpointDetectsCoordinatedRollback' agent/xspv2/recovery/checkpoint_test.go
+      - name: Test Go 1.27 Agent recovery checkpoint primitive
+        working-directory: agent/xspv2
+        run: go test ./...
