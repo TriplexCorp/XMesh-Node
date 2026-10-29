@@ -118,8 +118,11 @@ func ActivatePreparedRotation(
     nextRaw, err := secureFile(stagedPath(vault))
     if err != nil { return empty, err }
     if err = atomicFile(previousPath(vault), oldRaw); err != nil { return empty, err }
+    rotationDurabilityCheckpoint("after-previous")
     if err = updateFloor(vault, candidate.KeyEpoch); err != nil { return empty, err }
+    rotationDurabilityCheckpoint("after-floor")
     if err = atomicFile(vault, nextRaw); err != nil { return empty, err }
+    rotationDurabilityCheckpoint("after-active")
     // Keep BOTH .next and .previous for crash reconciliation and evidence.
     // Never automatically retire prior signing material here.
     return candidate, nil
@@ -160,6 +163,7 @@ func RecoverRotation(vault, master string) (PublicBundle, error) {
         }
         if err = os.Remove(previousPath(vault)); err != nil { return empty, err }
         if err = syncParent(vault); err != nil { return empty, err }
+        rotationDurabilityCheckpoint("after-recovery-abort")
         return prior, nil
     }
     if floor != candidate.KeyEpoch {
@@ -167,6 +171,7 @@ func RecoverRotation(vault, master string) (PublicBundle, error) {
     }
     if bytes.Equal(currentRaw, priorRaw) {
         if err = atomicFile(vault, nextRaw); err != nil { return empty, err }
+        rotationDurabilityCheckpoint("after-recovery-active")
     } else if !bytes.Equal(currentRaw, nextRaw) {
         return empty, errors.New("active encrypted identity was substituted")
     }
