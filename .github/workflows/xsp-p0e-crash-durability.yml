@@ -1,0 +1,62 @@
+name: XSP-v2 P0-E Crash Durability
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/**"
+      - "security/xspv2/poc-go/keyring/**"
+      - ".github/workflows/xsp-p0e-crash-durability.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/**"
+      - "security/xspv2/poc-go/keyring/**"
+      - ".github/workflows/xsp-p0e-crash-durability.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crash-durability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Prove production build excludes crash injector
+        run: |
+          set -euo pipefail
+          grep -Fxq '//go:build !xspv2_crash_test' security/xspv2/poc-go/keyring/durability_checkpoint.go
+          grep -Fxq '//go:build xspv2_crash_test' security/xspv2/poc-go/keyring/durability_checkpoint_crash.go
+          grep -Fq 'rotationDurabilityCheckpoint("after-previous")' security/xspv2/poc-go/keyring/two_phase.go
+          grep -Fq 'rotationDurabilityCheckpoint("after-floor")' security/xspv2/poc-go/keyring/two_phase.go
+          grep -Fq 'rotationDurabilityCheckpoint("after-active")' security/xspv2/poc-go/keyring/two_phase.go
+          grep -Fq 'rotationDurabilityCheckpoint("after-recovery-abort")' security/xspv2/poc-go/keyring/two_phase.go
+          grep -Fq 'rotationDurabilityCheckpoint("after-recovery-active")' security/xspv2/poc-go/keyring/two_phase.go
+
+          cd agent/xspv2
+          go build -trimpath -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
+          if strings /tmp/xmesh-agent-xspv2 | grep -Fq 'XMESH_XSPV2_CRASH_POINT'; then
+            echo 'normal Agent artifact contains the tagged crash injector' >&2
+            exit 1
+          fi
+
+      - name: Baseline keyring and Agent tests
+        run: |
+          set -euo pipefail
+          cd security/xspv2/poc-go
+          go test ./keyring -count=1
+          cd ../../../agent/xspv2
+          go test ./... -count=1
+
+      - name: Hard-exit crash matrix at durable rotation boundaries
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go test -tags xspv2_crash_test ./keyring \
+            -run 'TestActivatePreparedRotationCrashMatrix|TestRecoverRotationCrashMatrix' \
+            -count=1 -v
