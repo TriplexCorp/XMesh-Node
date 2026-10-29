@@ -6,6 +6,7 @@ on:
     paths:
       - "agent/xspv2/recovery/**"
       - "agent/xspv2/state/**"
+      - "security/xspv2/poc-go/cutover/receipt.go"
       - "security/xspv2/poc-go/cutover/commit_receipt_journal_linux.go"
       - "security/xspv2/poc-go/cutover/commit_receipt_envelope_linux_test.go"
       - "docs/XSP_V2_P0E_OWNER_RECOVERY_CHECKPOINT.md"
@@ -14,6 +15,7 @@ on:
     paths:
       - "agent/xspv2/recovery/**"
       - "agent/xspv2/state/**"
+      - "security/xspv2/poc-go/cutover/receipt.go"
       - "security/xspv2/poc-go/cutover/commit_receipt_journal_linux.go"
       - "security/xspv2/poc-go/cutover/commit_receipt_envelope_linux_test.go"
       - "docs/XSP_V2_P0E_OWNER_RECOVERY_CHECKPOINT.md"
@@ -45,6 +47,10 @@ jobs:
           grep -Fq 'independent off-host generation floor is required' agent/xspv2/recovery/checkpoint.go
           grep -Fq 'local Agent/Nexus state is older than or different from owner recovery checkpoint' agent/xspv2/recovery/checkpoint.go
           grep -Fq 'EvidenceFromDurableAgent' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'snapshot.EdKeyID != verified.ToEdKeyID' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'snapshot.PQKeyID != verified.ToPQKeyID' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'ToEdKeyID:a.ToEdKeyID' security/xspv2/poc-go/cutover/receipt.go
+          grep -Fq 'ToPQKeyID:a.ToPQKeyID' security/xspv2/poc-go/cutover/receipt.go
           grep -Fq 'ReloadVerifiedCommitReceiptEnvelopeForJournal' security/xspv2/poc-go/cutover/commit_receipt_journal_linux.go
           grep -Fq 'TestOwnerRecoveryCheckpointDetectsCoordinatedRollback' agent/xspv2/recovery/checkpoint_test.go
       - name: Test Go 1.27 Agent recovery checkpoint primitive
