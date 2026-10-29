@@ -1,0 +1,54 @@
+name: XSP-v2 P0-E Snapshot Anti-Rollback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/**"
+      - "security/xspv2/poc-go/**"
+      - ".github/workflows/xsp-p0e-snapshot-antirollback.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/**"
+      - "security/xspv2/poc-go/**"
+      - ".github/workflows/xsp-p0e-snapshot-antirollback.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  one-sided-agent-snapshot-rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Verify attestation precedes both network operations
+        run: |
+          set -euo pipefail
+          runtime=agent/xspv2/runtime/transport_linux.go
+          grep -Fq 'if err := attestDurableAppliedState(layout, permit, next, minimumEpoch); err != nil {' "$runtime"
+          count="$(grep -Fc 'if err := attestDurableAppliedState(layout, permit, next, minimumEpoch); err != nil {' "$runtime")"
+          test "$count" -eq 2
+          exchange_attest="$(grep -n 'if err := attestDurableAppliedState(layout, permit, next, minimumEpoch); err != nil {' "$runtime" | sed -n '1s/:.*//p')"
+          exchange_network="$(grep -n 'return cutover.ExchangeSignedACKForReceipt' "$runtime" | cut -d: -f1)"
+          recover_attest="$(grep -n 'if err := attestDurableAppliedState(layout, permit, next, minimumEpoch); err != nil {' "$runtime" | sed -n '2s/:.*//p')"
+          recover_network="$(grep -n 'return cutover.RecoverSignedACKReceipt' "$runtime" | cut -d: -f1)"
+          test "$exchange_attest" -lt "$exchange_network"
+          test "$recover_attest" -lt "$recover_network"
+
+      - name: Run baseline real-Agent tests
+        working-directory: agent/xspv2
+        run: go test ./... -count=1
+
+      - name: Prove full local snapshot rollback fails closed against current Nexus witness
+        working-directory: agent/xspv2
+        run: |
+          set -euo pipefail
+          go test ./runtime \
+            -run 'TestOneSidedAgentSnapshotRollbackRequiresCurrentRemoteWitness|TestOneSidedAgentSnapshotRollbackBlocksHistoricalRecoveryBeforeNetwork' \
+            -count=1 -v
