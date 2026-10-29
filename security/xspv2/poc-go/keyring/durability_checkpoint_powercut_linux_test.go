@@ -56,7 +56,7 @@ func TestPowercutQualificationArmsExternalControllerThenStops(t *testing.T) {
 		powercutSignalFDEnv+"=3",
 	)
 	if err = cmd.Start(); err != nil {
-		writer.Close()
+		_ = writer.Close()
 		t.Fatal(err)
 	}
 	_ = writer.Close()
@@ -94,31 +94,17 @@ func TestPowercutQualificationArmsExternalControllerThenStops(t *testing.T) {
 		t.Fatal("lab hook did not arm external controller")
 	}
 
-	// A correctly armed helper must still be alive and blocked. If it exited,
-	// the evidence would describe a local process crash instead of a point where
-	// an independent controller can remove physical power.
-	if err = cmd.Process.Signal(os.Signal(syscallSignalZero{})); err == nil {
-		return
+	// Give the child a short opportunity to fail incorrectly. A correct lab
+	// hook remains blocked until the independent controller removes power.
+	time.Sleep(100 * time.Millisecond)
+	if err = cmd.Process.Kill(); err != nil {
+		t.Fatalf("armed qualification helper exited before external cut: %v", err)
 	}
-	// os.Process.Signal cannot portably express signal 0 without syscall. Keep
-	// the assertion simple: a non-blocking Wait must not complete immediately.
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
-	select {
-	case waitErr := <-waitCh:
-		t.Fatalf("armed qualification helper exited before external cut: %v", waitErr)
-	case <-time.After(100 * time.Millisecond):
+	if err = cmd.Wait(); err == nil {
+		t.Fatal("expected parent to terminate blocked qualification helper")
 	}
 	cmd.Process = nil
 }
-
-// syscallSignalZero deliberately implements os.Signal without importing
-// platform-specific syscall constants. Signal(0) is not portable through the
-// os package, so the test falls back to the Wait timeout when unsupported.
-type syscallSignalZero struct{}
-
-func (syscallSignalZero) String() string { return "signal 0" }
-func (syscallSignalZero) Signal()        {}
 
 func TestPowercutQualificationHelper(t *testing.T) {
 	if os.Getenv(powercutHelperEnv) != "1" {
