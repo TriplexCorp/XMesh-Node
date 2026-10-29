@@ -36,14 +36,14 @@ func ownerPair(t *testing.T) (ed25519.PrivateKey, *mldsa.PrivateKey, OwnerPublic
 func localEvidence(epoch uint64, requestID string, receipt []byte, edID, pqID string) LocalEvidence {
 	receiptDigest := shaHex(receipt)
 	return LocalEvidence{
-		NodeID:          42,
-		ServerAuthority: "nexus-recovery.example.invalid",
-		KeyEpoch:        epoch,
-		NodeEdKeyID:     edID,
-		NodePQKeyID:     pqID,
-		CommitRequestID: requestID,
-		CommitReceipt:   append([]byte(nil), receipt...),
-		Nexus: NexusState{
+		nodeID:          42,
+		serverAuthority: "nexus-recovery.example.invalid",
+		keyEpoch:        epoch,
+		nodeEdKeyID:     edID,
+		nodePQKeyID:     pqID,
+		commitRequestID: requestID,
+		commitReceipt:   append([]byte(nil), receipt...),
+		nexus: NexusState{
 			NodeID:           42,
 			KeyEpoch:         epoch,
 			RequestID:        requestID,
@@ -57,20 +57,20 @@ func localEvidence(epoch uint64, requestID string, receipt []byte, edID, pqID st
 
 func checkpointFor(t *testing.T, generation uint64, previous string, local LocalEvidence, pin OwnerPublic) Checkpoint {
 	t.Helper()
-	nexusDigest, err := NexusStateDigest(local.Nexus)
+	nexusDigest, err := NexusStateDigest(local.nexus)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return Checkpoint{
 		Generation:                  generation,
 		PreviousCheckpointSHA256Hex: previous,
-		NodeID:                      local.NodeID,
-		ServerAuthority:             local.ServerAuthority,
-		KeyEpoch:                    local.KeyEpoch,
-		NodeEdKeyID:                 local.NodeEdKeyID,
-		NodePQKeyID:                 local.NodePQKeyID,
-		CommitRequestID:             local.CommitRequestID,
-		CommitReceiptSHA256Hex:      shaHex(local.CommitReceipt),
+		NodeID:                      local.nodeID,
+		ServerAuthority:             local.serverAuthority,
+		KeyEpoch:                    local.keyEpoch,
+		NodeEdKeyID:                 local.nodeEdKeyID,
+		NodePQKeyID:                 local.nodePQKeyID,
+		CommitRequestID:             local.commitRequestID,
+		CommitReceiptSHA256Hex:      shaHex(local.commitReceipt),
 		NexusStateSHA256Hex:         nexusDigest,
 		IssuedAtMS:                  1793268000000 + int64(generation),
 		OwnerID:                     pin.OwnerID,
@@ -112,9 +112,9 @@ func TestOwnerRecoveryCheckpointDetectsCoordinatedRollback(t *testing.T) {
 		t.Fatal("rolled-back checkpoint accepted below independent generation floor")
 	}
 
-	before := string(oldLocal.CommitReceipt)
+	before := string(oldLocal.commitReceipt)
 	_ = VerifyLocal(signedCurrent, pin, oldLocal, 2)
-	if string(oldLocal.CommitReceipt) != before {
+	if string(oldLocal.commitReceipt) != before {
 		t.Fatal("failed recovery verification mutated local security evidence")
 	}
 }
@@ -145,17 +145,17 @@ func TestOwnerRecoveryCheckpointRejectsTamperingAndCrossDomainMismatch(t *testin
 	}
 
 	mismatch := local
-	mismatch.Nexus.KeyEpoch++
+	mismatch.nexus.KeyEpoch++
 	if err = VerifyLocal(signed, pin, mismatch, 1); err == nil {
 		t.Fatal("Agent/Nexus epoch disagreement accepted")
 	}
 	mismatch = local
-	mismatch.Nexus.ReceiptSHA256Hex = shaHex([]byte("different-server-receipt"))
+	mismatch.nexus.ReceiptSHA256Hex = shaHex([]byte("different-server-receipt"))
 	if err = VerifyLocal(signed, pin, mismatch, 1); err == nil {
 		t.Fatal("Agent/Nexus receipt disagreement accepted")
 	}
 	mismatch = local
-	mismatch.CommitReceipt = []byte("rolled-back-agent-receipt")
+	mismatch.commitReceipt = []byte("rolled-back-agent-receipt")
 	if err = VerifyLocal(signed, pin, mismatch, 1); err == nil {
 		t.Fatal("rolled-back Agent receipt accepted")
 	}
@@ -191,7 +191,7 @@ func TestRecoveryCheckpointDecodeRejectsAmbiguity(t *testing.T) {
 	}
 }
 
-func TestEvidenceFromAgentRequiresDurableAppliedState(t *testing.T) {
+func TestInternalEvidenceBuilderRequiresDurableAppliedState(t *testing.T) {
 	local := localEvidence(4, "req-4", []byte("receipt-4"), "ed-node-4", "pq-node-4")
 	snapshot := state.SecuritySnapshot{
 		NodeID:            42,
@@ -201,15 +201,15 @@ func TestEvidenceFromAgentRequiresDurableAppliedState(t *testing.T) {
 		PreviousRetained:  true,
 		CandidateRetained: true,
 	}
-	evidence, err := EvidenceFromAgent(snapshot, local.ServerAuthority, local.CommitRequestID, local.CommitReceipt, local.Nexus)
+	evidence, err := evidenceFromAgent(snapshot, local.serverAuthority, local.commitRequestID, local.commitReceipt, local.nexus)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.NodeID != local.NodeID || evidence.KeyEpoch != local.KeyEpoch || evidence.NodeEdKeyID != local.NodeEdKeyID {
+	if evidence.nodeID != local.nodeID || evidence.keyEpoch != local.keyEpoch || evidence.nodeEdKeyID != local.nodeEdKeyID {
 		t.Fatal("durable Agent evidence mapping changed security identity")
 	}
 	snapshot.CandidateRetained = false
-	if _, err = EvidenceFromAgent(snapshot, local.ServerAuthority, local.CommitRequestID, local.CommitReceipt, local.Nexus); err == nil {
+	if _, err = evidenceFromAgent(snapshot, local.serverAuthority, local.commitRequestID, local.commitReceipt, local.nexus); err == nil {
 		t.Fatal("recovery evidence accepted without retained authenticated candidate")
 	}
 }
