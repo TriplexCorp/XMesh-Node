@@ -35,7 +35,8 @@ jobs:
       - name: Check P0-E3a source contract
         run: |
           set -euo pipefail
-          test -z "$(gofmt -d agent/xspv2/recovery/*.go security/xspv2/poc-go/cutover/commit_receipt_journal_linux.go security/xspv2/poc-go/cutover/commit_receipt_envelope_linux_test.go)"
+          gofmt -d agent/xspv2/recovery/*.go security/xspv2/poc-go/cutover/commit_receipt_journal_linux.go security/xspv2/poc-go/cutover/commit_receipt_envelope_linux_test.go | tee /tmp/p0e3a-gofmt.diff
+          test ! -s /tmp/p0e3a-gofmt.diff
           ! grep -R --line-number --fixed-strings 'strict-pq=on' agent/xspv2/recovery docs/XSP_V2_P0E_OWNER_RECOVERY_CHECKPOINT.md
           ! grep -R --line-number -E 'XMESH1|reset.*epoch|epoch.*reset|regenerat.*key|auto.*recover' agent/xspv2/recovery
           grep -Fq 'XSP2-OWNER-RECOVERY-CHECKPOINT-V1' agent/xspv2/recovery/checkpoint.go
