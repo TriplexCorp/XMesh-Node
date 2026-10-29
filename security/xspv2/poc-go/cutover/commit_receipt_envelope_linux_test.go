@@ -26,8 +26,10 @@ func TestVerifiedCommitReceiptEnvelopeRequiresFullJournalReverification(t *testi
 	verified := envelope.Receipt()
 	if verified.NodeID != permit.Message().NodeID ||
 		verified.ToEpoch != permit.Message().ToEpoch ||
-		verified.RequestID != permit.Message().RequestID {
-		t.Fatal("verified recovery envelope lost receipt identity")
+		verified.RequestID != permit.Message().RequestID ||
+		verified.ToEdKeyID != permit.Message().ToEdKeyID ||
+		verified.ToPQKeyID != permit.Message().ToPQKeyID {
+		t.Fatal("verified recovery envelope lost receipt or active-key identity")
 	}
 	copyBytes := envelope.Bytes()
 	copyBytes[0] ^= 0xff
