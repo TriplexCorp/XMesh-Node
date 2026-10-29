@@ -19,14 +19,14 @@ import (
 const commitReceiptJournalName = "xsp2-verified-commit-receipt.json"
 
 type commitReceiptRecord struct {
-	Schema                      string `json:"schema"`
-	SignedReceipt               []byte `json:"signedReceipt"`
-	ReceiptEnvelopeSHA256       string `json:"receiptEnvelopeSha256"`
-	SignedACKEnvelopeSHA256     string `json:"signedACKEnvelopeSha256"`
-	PermitDigest                string `json:"permitDigest"`
-	NodeID                      uint64 `json:"nodeId"`
-	ToEpoch                     uint64 `json:"toEpoch"`
-	RequestID                   string `json:"requestId"`
+	Schema                  string `json:"schema"`
+	SignedReceipt           []byte `json:"signedReceipt"`
+	ReceiptEnvelopeSHA256   string `json:"receiptEnvelopeSha256"`
+	SignedACKEnvelopeSHA256 string `json:"signedACKEnvelopeSha256"`
+	PermitDigest            string `json:"permitDigest"`
+	NodeID                  uint64 `json:"nodeId"`
+	ToEpoch                 uint64 `json:"toEpoch"`
+	RequestID               string `json:"requestId"`
 }
 
 // VerifiedCommitReceiptEnvelope is an opaque, already reverified journal
@@ -163,14 +163,14 @@ func PersistVerifiedCommitReceiptForJournal(dir string, raw []byte,
 		return empty, fmt.Errorf("invalid prior commit receipt journal: %w", err)
 	}
 	row := commitReceiptRecord{
-		Schema:                      "xsp2-verified-commit-receipt-journal-1",
-		SignedReceipt:               append([]byte(nil), raw...),
-		ReceiptEnvelopeSHA256:       sha(raw),
-		SignedACKEnvelopeSHA256:     ack.EnvelopeSHA256,
-		PermitDigest:                permit.PermitDigest(),
-		NodeID:                      verified.NodeID,
-		ToEpoch:                     verified.ToEpoch,
-		RequestID:                   verified.RequestID,
+		Schema:                  "xsp2-verified-commit-receipt-journal-1",
+		SignedReceipt:           append([]byte(nil), raw...),
+		ReceiptEnvelopeSHA256:   sha(raw),
+		SignedACKEnvelopeSHA256: ack.EnvelopeSHA256,
+		PermitDigest:            permit.PermitDigest(),
+		NodeID:                  verified.NodeID,
+		ToEpoch:                 verified.ToEpoch,
+		RequestID:               verified.RequestID,
 	}
 	// Shared ACK journal persistence primitive uses 0600, fsync(file),
 	// atomic rename to a previously absent name, and fsync(parent directory).
