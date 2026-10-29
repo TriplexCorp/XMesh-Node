@@ -1,0 +1,103 @@
+name: XSP-v2 P0-E4a5 Lab Operation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "security/xspv2/poc-go/keyring/**"
+      - "docs/XSP_V2_P0E4A5_LAB_OPERATION.md"
+      - ".github/workflows/xsp-p0e4a5-lab-operation.yml"
+      - ".github/workflows/xsp-p0e4a-powercut-arm.yml"
+      - ".github/workflows/xsp-p0e-crash-durability.yml"
+  pull_request:
+    paths:
+      - "security/xspv2/poc-go/keyring/**"
+      - "docs/XSP_V2_P0E4A5_LAB_OPERATION.md"
+      - ".github/workflows/xsp-p0e4a5-lab-operation.yml"
+      - ".github/workflows/xsp-p0e4a-powercut-arm.yml"
+      - ".github/workflows/xsp-p0e-crash-durability.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-operation-arm-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Verify E4a5 remains test-only and reaches the real keyring operations
+        run: |
+          set -euo pipefail
+          test_file=security/xspv2/poc-go/keyring/powercut_lab_operation_linux_test.go
+          lab_hook=security/xspv2/poc-go/keyring/durability_checkpoint_powercut_linux.go
+          doc=docs/XSP_V2_P0E4A5_LAB_OPERATION.md
+
+          grep -Fxq '//go:build linux && xspv2_powercut_qualification && !xspv2_crash_test' "$test_file"
+          grep -Fq 'ActivatePreparedRotation(' "$test_file"
+          grep -Fq 'RecoverRotation(' "$test_file"
+          for point in after-previous after-floor after-active after-recovery-abort after-recovery-active; do
+            grep -Fq "$point" "$test_file"
+          done
+          grep -Fq 'XSP2-POWERCUT-ARMED-V1' "$test_file"
+          grep -Fq 'This process kill is explicitly NOT physical power-loss evidence.' "$test_file"
+          grep -Fq 'P0-E4a remains **OPEN**' "$doc"
+
+          if grep -E 'syscall\.Reboot|unix\.Reboot|/sbin/(reboot|shutdown|poweroff)|systemctl[[:space:]]|net\.Dial|http\.(Get|Post|NewRequest)' "$test_file" "$lab_hook"; then
+            echo 'E4a5 lab code contains autonomous network/reboot/power-control behavior' >&2
+            exit 1
+          fi
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -d security/xspv2/poc-go/keyring/powercut_lab_operation_linux_test.go)"
+
+      - name: Prove normal Agent artifacts still exclude every lab durability hook
+        run: |
+          set -euo pipefail
+          cd security/xspv2/poc-go
+          go test ./keyring -count=1
+          cd ../../../agent/xspv2
+          go test ./... -count=1
+          go build -trimpath -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
+          if strings /tmp/xmesh-agent-xspv2 | grep -Eq 'XMESH_XSPV2_(CRASH|POWERCUT|POWERCUT_LAB)_'; then
+            echo 'normal Agent artifact contains a crash/power-cut lab token' >&2
+            exit 1
+          fi
+
+      - name: Preserve the existing process-crash recovery matrix
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go test -tags xspv2_crash_test ./keyring \
+            -run 'TestActivatePreparedRotationCrashMatrix|TestRecoverRotationCrashMatrix' \
+            -count=1 -v
+
+      - name: Exercise all five real-operation external arm points
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go test -tags xspv2_powercut_qualification ./keyring \
+            -run 'TestPowercutQualification|TestPowercutLabOperation' \
+            -count=1 -v
+
+      - name: Reject ambiguous dual evidence build
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          if go test -run '^$' -tags 'xspv2_crash_test xspv2_powercut_qualification' ./keyring; then
+            echo 'process-crash and physical-power qualification hooks compiled together' >&2
+            exit 1
+          fi
+
+      - name: State evidence boundary
+        run: |
+          echo 'E4a5 proves real keyring operation reachability for all five external arm points.'
+          echo 'CI terminates blocked children only to complete source-contract tests.'
+          echo 'This is not a physical power-loss experiment; P0-E4a remains OPEN.'
