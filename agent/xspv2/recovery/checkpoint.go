@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/TriplexCorp/XMesh-Node/agent/xspv2/state"
+	cutover "github.com/TriplexCorp/XMesh-Node/security/xspv2/poc-go/cutover"
 )
 
 const (
@@ -69,15 +70,18 @@ type OwnerPublic struct {
 	PQPublic []byte
 }
 
+// LocalEvidence is intentionally opaque outside this package. Recovery callers
+// must obtain it through EvidenceFromDurableAgent; they cannot construct a
+// purported authoritative receipt from arbitrary bytes.
 type LocalEvidence struct {
-	NodeID          uint64
-	ServerAuthority string
-	KeyEpoch        uint64
-	NodeEdKeyID     string
-	NodePQKeyID     string
-	CommitRequestID string
-	CommitReceipt   []byte
-	Nexus           NexusState
+	nodeID          uint64
+	serverAuthority string
+	keyEpoch        uint64
+	nodeEdKeyID     string
+	nodePQKeyID     string
+	commitRequestID string
+	commitReceipt   []byte
+	nexus           NexusState
 }
 
 func putU64(out *bytes.Buffer, value uint64) {
@@ -326,7 +330,7 @@ func VerifySuccessor(previous, next SignedCheckpoint, pin OwnerPublic) error {
 	return nil
 }
 
-func EvidenceFromAgent(snapshot state.SecuritySnapshot, serverAuthority, requestID string, receipt []byte, nexus NexusState) (LocalEvidence, error) {
+func evidenceFromAgent(snapshot state.SecuritySnapshot, serverAuthority, requestID string, receipt []byte, nexus NexusState) (LocalEvidence, error) {
 	if snapshot.NodeID <= 0 || snapshot.KeyEpoch == 0 || snapshot.EdKeyID == "" || snapshot.PQKeyID == "" {
 		return LocalEvidence{}, errors.New("invalid durable Agent security snapshot")
 	}
@@ -337,15 +341,37 @@ func EvidenceFromAgent(snapshot state.SecuritySnapshot, serverAuthority, request
 		return LocalEvidence{}, errors.New("authoritative commit receipt is required")
 	}
 	return LocalEvidence{
-		NodeID:          uint64(snapshot.NodeID),
-		ServerAuthority: serverAuthority,
-		KeyEpoch:        snapshot.KeyEpoch,
-		NodeEdKeyID:     snapshot.EdKeyID,
-		NodePQKeyID:     snapshot.PQKeyID,
-		CommitRequestID: requestID,
-		CommitReceipt:   append([]byte(nil), receipt...),
-		Nexus:           nexus,
+		nodeID:          uint64(snapshot.NodeID),
+		serverAuthority: serverAuthority,
+		keyEpoch:        snapshot.KeyEpoch,
+		nodeEdKeyID:     snapshot.EdKeyID,
+		nodePQKeyID:     snapshot.PQKeyID,
+		commitRequestID: requestID,
+		commitReceipt:   append([]byte(nil), receipt...),
+		nexus:           nexus,
 	}, nil
+}
+
+// EvidenceFromDurableAgent is the public recovery evidence entry point. It
+// reopens the real encrypted Agent identity and accepts receipt bytes only from
+// the opaque cutover journal witness returned after full permit/ACK/receipt
+// cryptographic reverification. It never initializes, rotates or repairs state.
+func EvidenceFromDurableAgent(layout state.Layout, serverAuthority string,
+	receiptEnvelope cutover.VerifiedCommitReceiptEnvelope, nexus NexusState,
+) (LocalEvidence, error) {
+	snapshot, err := state.DescribeCurrent(layout)
+	if err != nil {
+		return LocalEvidence{}, err
+	}
+	verified := receiptEnvelope.Receipt()
+	raw := receiptEnvelope.Bytes()
+	if verified.NodeID == 0 || verified.ToEpoch == 0 || verified.RequestID == "" || len(raw) == 0 {
+		return LocalEvidence{}, errors.New("verified Agent commit receipt evidence is absent")
+	}
+	if uint64(snapshot.NodeID) != verified.NodeID || snapshot.KeyEpoch != verified.ToEpoch {
+		return LocalEvidence{}, errors.New("durable Agent identity does not match verified commit receipt")
+	}
+	return evidenceFromAgent(snapshot, serverAuthority, verified.RequestID, raw, nexus)
 }
 
 func VerifyLocal(signed SignedCheckpoint, pin OwnerPublic, local LocalEvidence, minimumGeneration uint64) error {
@@ -359,21 +385,21 @@ func VerifyLocal(signed SignedCheckpoint, pin OwnerPublic, local LocalEvidence, 
 	if checkpoint.Generation < minimumGeneration {
 		return errors.New("owner recovery checkpoint is below independent monotonic generation floor")
 	}
-	if len(local.CommitReceipt) == 0 {
+	if len(local.commitReceipt) == 0 {
 		return errors.New("local authoritative commit receipt is absent")
 	}
-	receiptDigest := shaHex(local.CommitReceipt)
-	if local.Nexus.NodeID != local.NodeID || local.Nexus.KeyEpoch != local.KeyEpoch ||
-		local.Nexus.RequestID != local.CommitRequestID || local.Nexus.ReceiptSHA256Hex != receiptDigest {
+	receiptDigest := shaHex(local.commitReceipt)
+	if local.nexus.NodeID != local.nodeID || local.nexus.KeyEpoch != local.keyEpoch ||
+		local.nexus.RequestID != local.commitRequestID || local.nexus.ReceiptSHA256Hex != receiptDigest {
 		return errors.New("Agent and Nexus recovery evidence disagree")
 	}
-	nexusDigest, err := NexusStateDigest(local.Nexus)
+	nexusDigest, err := NexusStateDigest(local.nexus)
 	if err != nil {
 		return err
 	}
-	if checkpoint.NodeID != local.NodeID || checkpoint.ServerAuthority != local.ServerAuthority ||
-		checkpoint.KeyEpoch != local.KeyEpoch || checkpoint.NodeEdKeyID != local.NodeEdKeyID ||
-		checkpoint.NodePQKeyID != local.NodePQKeyID || checkpoint.CommitRequestID != local.CommitRequestID ||
+	if checkpoint.NodeID != local.nodeID || checkpoint.ServerAuthority != local.serverAuthority ||
+		checkpoint.KeyEpoch != local.keyEpoch || checkpoint.NodeEdKeyID != local.nodeEdKeyID ||
+		checkpoint.NodePQKeyID != local.nodePQKeyID || checkpoint.CommitRequestID != local.commitRequestID ||
 		checkpoint.CommitReceiptSHA256Hex != receiptDigest || checkpoint.NexusStateSHA256Hex != nexusDigest {
 		return errors.New("local Agent/Nexus state is older than or different from owner recovery checkpoint")
 	}
