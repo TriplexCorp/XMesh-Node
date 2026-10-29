@@ -24,13 +24,13 @@ const (
 )
 
 type NexusState struct {
-	NodeID            uint64 `json:"nodeId"`
-	KeyEpoch          uint64 `json:"keyEpoch"`
-	RequestID         string `json:"requestId"`
-	PermitState       string `json:"permitState"`
-	ReceiptSHA256Hex  string `json:"receiptSha256Hex"`
-	OutboxCount       uint64 `json:"outboxCount"`
-	ReplayNonceCount  uint64 `json:"replayNonceCount"`
+	NodeID           uint64 `json:"nodeId"`
+	KeyEpoch         uint64 `json:"keyEpoch"`
+	RequestID        string `json:"requestId"`
+	PermitState      string `json:"permitState"`
+	ReceiptSHA256Hex string `json:"receiptSha256Hex"`
+	OutboxCount      uint64 `json:"outboxCount"`
+	ReplayNonceCount uint64 `json:"replayNonceCount"`
 }
 
 type Checkpoint struct {
