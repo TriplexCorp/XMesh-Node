@@ -1,8 +1,8 @@
-//go:build !xspv2_crash_test
+//go:build !xspv2_crash_test && !xspv2_powercut_qualification
 
 package keyring
 
 // rotationDurabilityCheckpoint is compiled as a no-op in normal builds.
-// The xspv2_crash_test build tag replaces it with a subprocess hard-exit
-// injector used only by the P0-E crash-consistency proof.
+// Dedicated test/lab build tags replace it with bounded crash or external
+// power-cut qualification hooks. Production Agent artifacts contain neither.
 func rotationDurabilityCheckpoint(string) {}
