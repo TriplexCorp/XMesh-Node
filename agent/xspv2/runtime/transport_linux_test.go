@@ -107,27 +107,27 @@ func durablePermitFixture(t *testing.T) (state.Layout, Permit, Pin, keyring.Publ
 	panelEd, panelPQ, panel := panelSigner(t, uint64(prior.NodeID))
 	nowMS := int64(1_800_000_000_000)
 	message := cutover.Message{
-		Kind:                   "permit",
-		IssuerID:               panel.IssuerID,
-		SignerEdKeyID:          panel.EdKeyID,
-		SignerPQKeyID:          panel.PQKeyID,
-		NodeID:                 uint64(prior.NodeID),
-		FromEpoch:              prior.KeyEpoch,
-		ToEpoch:                candidate.KeyEpoch,
-		RequestID:              "p0d-durable-state-test",
-		FromEdKeyID:            prior.EdKeyID,
-		FromPQKeyID:            prior.PQKeyID,
-		ToEdKeyID:              candidate.EdKeyID,
-		ToPQKeyID:              candidate.PQKeyID,
-		Method:                 "POST",
-		Path:                   "/api/v2/node/keys/rotation/permit",
-		IssuedAtMS:             nowMS,
-		ExpiresAtMS:            nowMS + 60_000,
-		PermitNonceHex:         "11111111111111111111111111111111",
-		NonceHex:               "11111111111111111111111111111111",
-		CandidateSHA256Hex:     candidateDigest,
-		PermitSHA256Hex:        "0000000000000000000000000000000000000000000000000000000000000000",
-		AppliedStateSHA256Hex:  "0000000000000000000000000000000000000000000000000000000000000000",
+		Kind:                  "permit",
+		IssuerID:              panel.IssuerID,
+		SignerEdKeyID:         panel.EdKeyID,
+		SignerPQKeyID:         panel.PQKeyID,
+		NodeID:                uint64(prior.NodeID),
+		FromEpoch:             prior.KeyEpoch,
+		ToEpoch:               candidate.KeyEpoch,
+		RequestID:             "p0d-durable-state-test",
+		FromEdKeyID:           prior.EdKeyID,
+		FromPQKeyID:           prior.PQKeyID,
+		ToEdKeyID:             candidate.EdKeyID,
+		ToPQKeyID:             candidate.PQKeyID,
+		Method:                "POST",
+		Path:                  "/api/v2/node/keys/rotation/permit",
+		IssuedAtMS:            nowMS,
+		ExpiresAtMS:           nowMS + 60_000,
+		PermitNonceHex:        "11111111111111111111111111111111",
+		NonceHex:              "11111111111111111111111111111111",
+		CandidateSHA256Hex:    candidateDigest,
+		PermitSHA256Hex:       "0000000000000000000000000000000000000000000000000000000000000000",
+		AppliedStateSHA256Hex: "0000000000000000000000000000000000000000000000000000000000000000",
 	}
 	signed, err := cutover.Sign(message, panelEd, panelPQ)
 	if err != nil {
@@ -138,15 +138,15 @@ func durablePermitFixture(t *testing.T) (state.Layout, Permit, Pin, keyring.Publ
 		t.Fatal(err)
 	}
 	want := cutover.ExpectedPermit{
-		NodeID:                 message.NodeID,
-		FromEpoch:              message.FromEpoch,
-		ToEpoch:                message.ToEpoch,
-		RequestID:              message.RequestID,
-		FromEdKeyID:            message.FromEdKeyID,
-		FromPQKeyID:            message.FromPQKeyID,
-		ToEdKeyID:              message.ToEdKeyID,
-		ToPQKeyID:              message.ToPQKeyID,
-		CandidateSHA256Hex:     message.CandidateSHA256Hex,
+		NodeID:             message.NodeID,
+		FromEpoch:          message.FromEpoch,
+		ToEpoch:            message.ToEpoch,
+		RequestID:          message.RequestID,
+		FromEdKeyID:        message.FromEdKeyID,
+		FromPQKeyID:        message.FromPQKeyID,
+		ToEdKeyID:          message.ToEdKeyID,
+		ToPQKeyID:          message.ToPQKeyID,
+		CandidateSHA256Hex: message.CandidateSHA256Hex,
 	}
 	permit, err := cutover.PersistVerifiedPermit(layout.Journal, raw, panel, want, nowMS+1_000)
 	if err != nil {
