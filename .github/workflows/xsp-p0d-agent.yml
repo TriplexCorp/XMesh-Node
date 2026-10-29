@@ -35,6 +35,8 @@ jobs:
           grep -Fq 'cutover.ExchangeSignedACKForReceipt' agent/xspv2/runtime/transport_linux.go
           grep -Fq 'cutover.RecoverSignedACKReceipt' agent/xspv2/runtime/transport_linux.go
           grep -Fq 'DefaultRoot = "/var/lib/xmesh-agent/xsp-v2"' agent/xspv2/state/state_linux.go
+          grep -Fq 'sourceRevision' agent/xspv2/cmd/xmesh-agent-xspv2/main.go
+          grep -Fq 'invalid or unpinned embedded source revision' agent/xspv2/cmd/xmesh-agent-xspv2/main.go
           mapfile -d '' agent_go < <(find agent/xspv2 -type f -name '*.go' -print0)
           if grep -nE '"XMESH1|tls\.VersionTLS12|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|"strict-pq=on|"allow.?weak' "${agent_go[@]}"; then
             echo 'forbidden executable downgrade/fallback pattern in P0-D Agent Go source' >&2
@@ -46,21 +48,47 @@ jobs:
           fi
       - name: Test and build Go 1.27 Agent artifact
         working-directory: agent/xspv2
+        env:
+          BUILD_VERSION: p0d2-ci
         run: |
           set -euo pipefail
           test -z "$(gofmt -d .)"
           go test ./...
           go vet ./...
-          go build -trimpath -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
-          /tmp/xmesh-agent-xspv2 --version | grep -Fxq p0d1-staging
+
+          # A normal developer build deliberately cannot claim an approved
+          # release identity because sourceRevision remains unpinned.
+          go build -trimpath -o /tmp/xmesh-agent-xspv2-unpinned ./cmd/xmesh-agent-xspv2
+          if /tmp/xmesh-agent-xspv2-unpinned --identity >/tmp/unpinned-identity.json 2>/tmp/unpinned-identity.err; then
+            echo 'unpinned Agent build unexpectedly exposed a release identity' >&2
+            exit 1
+          fi
+          grep -Fq 'invalid or unpinned embedded source revision' /tmp/unpinned-identity.err
+
+          # Release artifacts embed the exact approved version/source revision;
+          # Nexus verifies these values in addition to the artifact SHA-256.
+          test "${#GITHUB_SHA}" = 40
+          go build -trimpath \
+            -ldflags "-X main.version=$BUILD_VERSION -X main.sourceRevision=$GITHUB_SHA" \
+            -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
+          /tmp/xmesh-agent-xspv2 --version | grep -Fxq "$BUILD_VERSION"
+          /tmp/xmesh-agent-xspv2 --identity > /tmp/xsp-identity.json
+          python3 - <<'PY'
+          import json, os, re
+          with open('/tmp/xsp-identity.json', encoding='utf-8') as f:
+              d=json.load(f)
+          assert d == {'version': os.environ['BUILD_VERSION'], 'sourceRevision': os.environ['GITHUB_SHA']}
+          assert re.fullmatch(r'[0-9a-f]{40}', d['sourceRevision'])
+          PY
+
           state="$(mktemp -d)/state"
           /tmp/xmesh-agent-xspv2 --check-state "$state" > /tmp/xsp-state.json
           test "$(stat -c '%a' "$state")" = 700
           test "$(stat -c '%a' "$state/cutover")" = 700
           python3 - <<'PY'
-          import json
+          import json, os
           with open('/tmp/xsp-state.json', encoding='utf-8') as f:
               d=json.load(f)
-          assert d['version']=='p0d1-staging'
+          assert d['version']==os.environ['BUILD_VERSION']
           assert d['journal'].endswith('/cutover')
           PY
