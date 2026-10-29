@@ -1,0 +1,102 @@
+name: XSP-v2 P0-E4a Power-cut Arm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "security/xspv2/poc-go/keyring/**"
+      - "docs/XSP_V2_P0E4A_POWERCUT_ARM.md"
+      - ".github/workflows/xsp-p0e4a-powercut-arm.yml"
+      - ".github/workflows/xsp-p0e-crash-durability.yml"
+  pull_request:
+    paths:
+      - "security/xspv2/poc-go/keyring/**"
+      - "docs/XSP_V2_P0E4A_POWERCUT_ARM.md"
+      - ".github/workflows/xsp-p0e4a-powercut-arm.yml"
+      - ".github/workflows/xsp-p0e-crash-durability.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  powercut-arm-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Verify source boundary is lab-only and externally controlled
+        run: |
+          set -euo pipefail
+          normal=security/xspv2/poc-go/keyring/durability_checkpoint.go
+          crash=security/xspv2/poc-go/keyring/durability_checkpoint_crash.go
+          lab=security/xspv2/poc-go/keyring/durability_checkpoint_powercut_linux.go
+          doc=docs/XSP_V2_P0E4A_POWERCUT_ARM.md
+
+          grep -Fxq '//go:build !xspv2_crash_test && !xspv2_powercut_qualification' "$normal"
+          grep -Fxq '//go:build xspv2_crash_test && !xspv2_powercut_qualification' "$crash"
+          grep -Fxq '//go:build linux && xspv2_powercut_qualification && !xspv2_crash_test' "$lab"
+          grep -Fq 'XSP2-POWERCUT-ARMED-V1' "$lab"
+          grep -Fq 'EXTERNAL_POWER_CUT_LAB_ONLY' "$lab"
+          grep -Fq 'XMESH_XSPV2_POWERCUT_SIGNAL_FD' "$lab"
+          grep -Fq 'GitHub CI is not physical power-loss evidence and cannot close P0-E4a.' "$doc"
+
+          if grep -E 'exec\.Command|os\.StartProcess|net\.Dial|http\.(Get|Post|NewRequest)|syscall\.Reboot|unix\.Reboot|/sbin/(reboot|shutdown|poweroff)|systemctl[[:space:]]' "$lab"; then
+            echo 'lab power-cut arm contains an autonomous command/network/power-control API' >&2
+            exit 1
+          fi
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -d \
+            security/xspv2/poc-go/keyring/durability_checkpoint.go \
+            security/xspv2/poc-go/keyring/durability_checkpoint_crash.go \
+            security/xspv2/poc-go/keyring/durability_checkpoint_powercut_linux.go \
+            security/xspv2/poc-go/keyring/durability_checkpoint_powercut_linux_test.go)"
+
+      - name: Baseline normal build and tests
+        run: |
+          set -euo pipefail
+          cd security/xspv2/poc-go
+          go test ./keyring -count=1
+          cd ../../../agent/xspv2
+          go test ./... -count=1
+          go build -trimpath -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
+          if strings /tmp/xmesh-agent-xspv2 | grep -Eq 'XMESH_XSPV2_CRASH_POINT|XMESH_XSPV2_POWERCUT_POINT|EXTERNAL_POWER_CUT_LAB_ONLY'; then
+            echo 'normal Agent artifact contains a test/lab durability hook' >&2
+            exit 1
+          fi
+
+      - name: Preserve existing process-crash proof
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go test -tags xspv2_crash_test ./keyring \
+            -run 'TestActivatePreparedRotationCrashMatrix|TestRecoverRotationCrashMatrix' \
+            -count=1 -v
+
+      - name: Exercise lab-only external-controller arm
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go test -tags xspv2_powercut_qualification ./keyring \
+            -run '^TestPowercutQualification' -count=1 -v
+
+      - name: Reject ambiguous dual evidence build
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          if go test -run '^$' -tags 'xspv2_crash_test xspv2_powercut_qualification' ./keyring; then
+            echo 'process-crash and physical-power qualification hooks compiled together' >&2
+            exit 1
+          fi
+
+      - name: State evidence boundary
+        run: |
+          echo 'CI validates the lab arming primitive only.'
+          echo 'P0-E4a remains OPEN until representative real hardware/storage abrupt-power evidence is reviewed.'

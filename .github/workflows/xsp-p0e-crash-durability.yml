@@ -27,11 +27,12 @@ jobs:
           go-version: '1.27.3'
           cache: false
 
-      - name: Prove production build excludes crash injector
+      - name: Prove production build excludes crash and power-cut qualification hooks
         run: |
           set -euo pipefail
-          grep -Fxq '//go:build !xspv2_crash_test' security/xspv2/poc-go/keyring/durability_checkpoint.go
-          grep -Fxq '//go:build xspv2_crash_test' security/xspv2/poc-go/keyring/durability_checkpoint_crash.go
+          grep -Fxq '//go:build !xspv2_crash_test && !xspv2_powercut_qualification' security/xspv2/poc-go/keyring/durability_checkpoint.go
+          grep -Fxq '//go:build xspv2_crash_test && !xspv2_powercut_qualification' security/xspv2/poc-go/keyring/durability_checkpoint_crash.go
+          grep -Fxq '//go:build linux && xspv2_powercut_qualification && !xspv2_crash_test' security/xspv2/poc-go/keyring/durability_checkpoint_powercut_linux.go
           grep -Fq 'rotationDurabilityCheckpoint("after-previous")' security/xspv2/poc-go/keyring/two_phase.go
           grep -Fq 'rotationDurabilityCheckpoint("after-floor")' security/xspv2/poc-go/keyring/two_phase.go
           grep -Fq 'rotationDurabilityCheckpoint("after-active")' security/xspv2/poc-go/keyring/two_phase.go
@@ -40,8 +41,8 @@ jobs:
 
           cd agent/xspv2
           go build -trimpath -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
-          if strings /tmp/xmesh-agent-xspv2 | grep -Fq 'XMESH_XSPV2_CRASH_POINT'; then
-            echo 'normal Agent artifact contains the tagged crash injector' >&2
+          if strings /tmp/xmesh-agent-xspv2 | grep -Eq 'XMESH_XSPV2_CRASH_POINT|XMESH_XSPV2_POWERCUT_POINT|EXTERNAL_POWER_CUT_LAB_ONLY'; then
+            echo 'normal Agent artifact contains a tagged durability qualification hook' >&2
             exit 1
           fi
 
