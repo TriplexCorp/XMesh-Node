@@ -14,8 +14,11 @@ import (
 const DefaultRoot = "/var/lib/xmesh-agent/xsp-v2"
 
 type Layout struct {
-	Root    string
-	Journal string
+	Root      string
+	Journal   string
+	Keys      string
+	Vault     string
+	MasterKey string
 }
 
 func rejectSymlinkComponents(path string) error {
@@ -61,9 +64,33 @@ func validatePrivateDir(path string) error {
 	return nil
 }
 
-// Prepare creates the production-style private state boundary used by the
-// future Agent integration. It intentionally does not perform enrollment,
-// network I/O, epoch changes, key retirement, or legacy fallback.
+func preparePrivateDir(path string) error {
+	if err := rejectSymlinkComponents(path); err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return err
+	}
+	return validatePrivateDir(path)
+}
+
+func expectedLayout(root string) Layout {
+	keys := filepath.Join(root, "keys")
+	return Layout{
+		Root:      root,
+		Journal:   filepath.Join(root, "cutover"),
+		Keys:      keys,
+		Vault:     filepath.Join(keys, "node-request.vault"),
+		MasterKey: filepath.Join(keys, "node-request.master"),
+	}
+}
+
+// Prepare creates only the production-style private directory boundaries.
+// Existing enrollment identities, epoch floors, cutover journals and package
+// state are never created, replaced, reset or removed here.
 func Prepare(root string) (Layout, error) {
 	clean := filepath.Clean(root)
 	if root == "" || !filepath.IsAbs(root) || clean != root {
@@ -81,18 +108,18 @@ func Prepare(root string) (Layout, error) {
 	if err := validatePrivateDir(clean); err != nil {
 		return Layout{}, fmt.Errorf("validate state root: %w", err)
 	}
-	journal := filepath.Join(clean, "cutover")
-	if err := rejectSymlinkComponents(journal); err != nil {
-		return Layout{}, err
+
+	layout := expectedLayout(clean)
+	if err := preparePrivateDir(layout.Journal); err != nil {
+		return Layout{}, fmt.Errorf("prepare cutover journal: %w", err)
 	}
-	if err := os.Mkdir(journal, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return Layout{}, fmt.Errorf("create cutover journal: %w", err)
+	if err := preparePrivateDir(layout.Keys); err != nil {
+		return Layout{}, fmt.Errorf("prepare key state: %w", err)
 	}
-	if err := os.Chmod(journal, 0o700); err != nil {
-		return Layout{}, fmt.Errorf("harden cutover journal: %w", err)
+	for _, path := range []string{layout.Vault, layout.MasterKey} {
+		if err := rejectSymlinkComponents(path); err != nil {
+			return Layout{}, err
+		}
 	}
-	if err := validatePrivateDir(journal); err != nil {
-		return Layout{}, fmt.Errorf("validate cutover journal: %w", err)
-	}
-	return Layout{Root: clean, Journal: journal}, nil
+	return layout, nil
 }
