@@ -365,10 +365,12 @@ func EvidenceFromDurableAgent(layout state.Layout, serverAuthority string,
 	}
 	verified := receiptEnvelope.Receipt()
 	raw := receiptEnvelope.Bytes()
-	if verified.NodeID == 0 || verified.ToEpoch == 0 || verified.RequestID == "" || len(raw) == 0 {
+	if verified.NodeID == 0 || verified.ToEpoch == 0 || verified.RequestID == "" ||
+		verified.ToEdKeyID == "" || verified.ToPQKeyID == "" || len(raw) == 0 {
 		return LocalEvidence{}, errors.New("verified Agent commit receipt evidence is absent")
 	}
-	if uint64(snapshot.NodeID) != verified.NodeID || snapshot.KeyEpoch != verified.ToEpoch {
+	if uint64(snapshot.NodeID) != verified.NodeID || snapshot.KeyEpoch != verified.ToEpoch ||
+		snapshot.EdKeyID != verified.ToEdKeyID || snapshot.PQKeyID != verified.ToPQKeyID {
 		return LocalEvidence{}, errors.New("durable Agent identity does not match verified commit receipt")
 	}
 	return evidenceFromAgent(snapshot, serverAuthority, verified.RequestID, raw, nexus)
