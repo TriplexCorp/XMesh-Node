@@ -36,7 +36,7 @@ jobs:
           ! grep -R --line-number -E 'XMESH1|reset.*epoch|epoch.*reset|regenerat.*key|auto.*recover' agent/xspv2/recovery
           grep -Fq 'XSP2-OWNER-RECOVERY-CHECKPOINT-V1' agent/xspv2/recovery/checkpoint.go
           grep -Fq 'XSP2-NEXUS-RECOVERY-STATE-V1' agent/xspv2/recovery/checkpoint.go
-          grep -Fq 'ML-DSA-65 owner recovery signature invalid' agent/xspv2/recovery/checkpoint.go
+          grep -Fq 'owner recovery ML-DSA-65 signature invalid' agent/xspv2/recovery/checkpoint.go
           grep -Fq 'independent off-host generation floor is required' agent/xspv2/recovery/checkpoint.go
           grep -Fq 'local Agent/Nexus state is older than or different from owner recovery checkpoint' agent/xspv2/recovery/checkpoint.go
           grep -Fq 'TestOwnerRecoveryCheckpointDetectsCoordinatedRollback' agent/xspv2/recovery/checkpoint_test.go
