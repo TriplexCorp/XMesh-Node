@@ -34,9 +34,20 @@ jobs:
           grep -Fq '../../security/xspv2/poc-go' agent/xspv2/go.mod
           grep -Fq 'cutover.ExchangeSignedACKForReceipt' agent/xspv2/runtime/transport_linux.go
           grep -Fq 'cutover.RecoverSignedACKReceipt' agent/xspv2/runtime/transport_linux.go
+          grep -Fq 'state.AttestAppliedRotation' agent/xspv2/runtime/transport_linux.go
+          grep -Fq 'keyring.AttestAppliedRotation' agent/xspv2/state/durable_linux.go
           grep -Fq 'DefaultRoot = "/var/lib/xmesh-agent/xsp-v2"' agent/xspv2/state/state_linux.go
+          grep -Fq 'node-request.vault' agent/xspv2/state/state_linux.go
           grep -Fq 'sourceRevision' agent/xspv2/cmd/xmesh-agent-xspv2/main.go
           grep -Fq 'invalid or unpinned embedded source revision' agent/xspv2/cmd/xmesh-agent-xspv2/main.go
+
+          # The reused transport must keep connect routing separate from the
+          # authenticated TLS/HTTP authority and must not redirect/proxy.
+          grep -Fq 'request.Host = serverName' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
+          grep -Fq 'Proxy:              nil' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
+          grep -Fq 'XSP-v2 signed ACK redirection forbidden' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
+          grep -Fq 'DialStrictMutual(dialCtx, address, serverName' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
+
           mapfile -d '' agent_go < <(find agent/xspv2 -type f -name '*.go' -print0)
           if grep -nE '"XMESH1|tls\.VersionTLS12|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|"strict-pq=on|"allow.?weak' "${agent_go[@]}"; then
             echo 'forbidden executable downgrade/fallback pattern in P0-D Agent Go source' >&2
@@ -85,6 +96,9 @@ jobs:
           /tmp/xmesh-agent-xspv2 --check-state "$state" > /tmp/xsp-state.json
           test "$(stat -c '%a' "$state")" = 700
           test "$(stat -c '%a' "$state/cutover")" = 700
+          test "$(stat -c '%a' "$state/keys")" = 700
+          test ! -e "$state/keys/node-request.master"
+          test ! -e "$state/keys/node-request.vault"
           python3 - <<'PY'
           import json, os
           with open('/tmp/xsp-state.json', encoding='utf-8') as f:
