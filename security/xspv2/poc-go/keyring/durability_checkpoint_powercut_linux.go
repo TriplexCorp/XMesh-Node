@@ -30,10 +30,10 @@ const (
 )
 
 var powercutPoints = map[string]struct{}{
-	"after-previous":       {},
-	"after-floor":          {},
-	"after-active":         {},
-	"after-recovery-abort": {},
+	"after-previous":        {},
+	"after-floor":           {},
+	"after-active":          {},
+	"after-recovery-abort":  {},
 	"after-recovery-active": {},
 }
 
