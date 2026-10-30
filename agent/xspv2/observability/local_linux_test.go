@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -99,18 +100,10 @@ func TestSnapshotFailsClosedOnMissingOrCorruptState(t *testing.T) {
 		t.Fatal("missing Agent state was accepted")
 	}
 	layout, _, _ := observedAppliedRotation(t)
-	if err := osWriteFile(layout.Vault+".min-epoch", []byte("broken")); err != nil {
+	if err := os.WriteFile(layout.Vault+".min-epoch", []byte("broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Snapshot(layout.Root); err == nil {
 		t.Fatal("corrupt epoch floor was accepted")
 	}
-}
-
-func osWriteFile(path string, data []byte) error {
-	return writePrivateFile(path, data)
-}
-
-func writePrivateFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0o600)
 }
