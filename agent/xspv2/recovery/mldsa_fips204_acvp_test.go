@@ -11,20 +11,20 @@ import (
 )
 
 type acvpMLDSASigVerPrompt struct {
-	VSID       int                   `json:"vsId"`
-	Algorithm  string                `json:"algorithm"`
-	Mode       string                `json:"mode"`
-	Revision   string                `json:"revision"`
+	VSID       int                  `json:"vsId"`
+	Algorithm  string               `json:"algorithm"`
+	Mode       string               `json:"mode"`
+	Revision   string               `json:"revision"`
 	TestGroups []acvpMLDSATestGroup `json:"testGroups"`
 }
 
 type acvpMLDSATestGroup struct {
-	TGID               int                `json:"tgId"`
-	TestType           string             `json:"testType"`
-	ParameterSet       string             `json:"parameterSet"`
-	SignatureInterface string             `json:"signatureInterface"`
-	PreHash            string             `json:"preHash"`
-	ExternalMu         bool               `json:"externalMu"`
+	TGID               int                 `json:"tgId"`
+	TestType           string              `json:"testType"`
+	ParameterSet       string              `json:"parameterSet"`
+	SignatureInterface string              `json:"signatureInterface"`
+	PreHash            string              `json:"preHash"`
+	ExternalMu         bool                `json:"externalMu"`
 	Tests              []acvpMLDSATestCase `json:"tests"`
 }
 
@@ -37,10 +37,10 @@ type acvpMLDSATestCase struct {
 }
 
 type acvpMLDSASigVerExpected struct {
-	VSID       int                         `json:"vsId"`
-	Algorithm  string                      `json:"algorithm"`
-	Mode       string                      `json:"mode"`
-	Revision   string                      `json:"revision"`
+	VSID       int                          `json:"vsId"`
+	Algorithm  string                       `json:"algorithm"`
+	Mode       string                       `json:"mode"`
+	Revision   string                       `json:"revision"`
 	TestGroups []acvpMLDSAExpectedTestGroup `json:"testGroups"`
 }
 
