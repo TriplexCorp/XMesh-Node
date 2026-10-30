@@ -118,32 +118,19 @@ func TestOwnerRetirementAuthorizationRejectsTamperStaleAndStateMismatch(t *testi
 		t.Fatal("expired owner retirement authorization accepted")
 	}
 
-	edPrivate, pqPrivate, _ := ownerPair(t)
-	_ = edPrivate
-	_ = pqPrivate
-
-	// Keep the authorization cryptographically valid while making its retained
-	// previous identity disagree with the real encrypted Agent state.
-	ownerEd, ownerPQ, ownerPin := ownerPair(t)
-	mismatch := signed.Authorization
-	mismatch.OwnerID = ownerPin.OwnerID
-	mismatch.OwnerEdKeyID = ownerPin.EdKeyID
-	mismatch.OwnerPQKeyID = ownerPin.PQKeyID
-	mismatch.PriorEdKeyID = "ed-intentionally-wrong"
-	mismatchSigned, err := SignRetirementAuthorization(mismatch, ownerEd, ownerPQ)
-	if err != nil {
+	// Keep the exact same still-valid owner authorization and current checkpoint,
+	// but remove the retained old identity. Verification must fail because the
+	// authorization cannot substitute for the actual authenticated Agent state.
+	if err := os.Remove(layout.Vault + ".previous"); err != nil {
 		t.Fatal(err)
 	}
-	if err = VerifyRetirementAuthorization(mismatchSigned, ownerPin, checkpoint, 1, layout, now); err == nil {
-		t.Fatal("retirement authorization for the wrong previous key accepted")
+	if err := VerifyRetirementAuthorization(signed, pin, checkpoint, 1, layout, now); err == nil {
+		t.Fatal("valid authorization accepted after retained previous identity disappeared")
 	}
 }
 
 func TestOwnerRetirementAuthorizationRejectsCheckpointSubstitution(t *testing.T) {
 	signed, pin, checkpoint, layout := retirementFixture(t)
-	edPrivate, pqPrivate, _ := ownerPair(t)
-	_ = edPrivate
-	_ = pqPrivate
 
 	// A different, still-validly signed checkpoint cannot be substituted because
 	// the authorization carries the exact canonical checkpoint digest.
