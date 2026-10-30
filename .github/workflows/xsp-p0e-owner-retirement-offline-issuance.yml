@@ -1,0 +1,86 @@
+name: XSP-v2 P0-E Owner-retirement Offline Issuance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/recovery/retirement_request.go"
+      - "agent/xspv2/recovery/retirement_request_test.go"
+      - "agent/xspv2/state/state_linux.go"
+      - "agent/xspv2/state/open_linux_test.go"
+      - "agent/xspv2/cmd/xmesh-xspv2-retirement-request/**"
+      - "agent/xspv2/cmd/xmesh-xspv2-retirement-sign/**"
+      - ".github/workflows/xsp-p0e-owner-retirement-offline-issuance.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/recovery/retirement_request.go"
+      - "agent/xspv2/recovery/retirement_request_test.go"
+      - "agent/xspv2/state/state_linux.go"
+      - "agent/xspv2/state/open_linux_test.go"
+      - "agent/xspv2/cmd/xmesh-xspv2-retirement-request/**"
+      - "agent/xspv2/cmd/xmesh-xspv2-retirement-sign/**"
+      - ".github/workflows/xsp-p0e-owner-retirement-offline-issuance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-owner-retirement-issuance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Check offline issuance source boundary
+        run: |
+          set -euo pipefail
+          gofmt -d \
+            agent/xspv2/recovery/retirement_request.go \
+            agent/xspv2/recovery/retirement_request_test.go \
+            agent/xspv2/state/state_linux.go \
+            agent/xspv2/state/open_linux_test.go \
+            agent/xspv2/cmd/xmesh-xspv2-retirement-request/*.go \
+            agent/xspv2/cmd/xmesh-xspv2-retirement-sign/*.go | tee /tmp/offline-issuance-gofmt.diff
+          test ! -s /tmp/offline-issuance-gofmt.diff
+
+          grep -Fq 'xsp2-owner-retirement-request-1' agent/xspv2/recovery/retirement_request.go
+          grep -Fq 'VerifySignature(checkpoint, pin)' agent/xspv2/recovery/retirement_request.go
+          grep -Fq 'SignRetirementAuthorization' agent/xspv2/recovery/retirement_request.go
+          grep -Fq 'func Open(root string)' agent/xspv2/state/state_linux.go
+          grep -Fq 'owner private key must be a non-symlink regular file with mode 0600' agent/xspv2/cmd/xmesh-xspv2-retirement-sign/main.go
+          grep -Fq 'ParsePKCS8PrivateKey' agent/xspv2/cmd/xmesh-xspv2-retirement-sign/main.go
+          grep -Fq 'MLDSA65' agent/xspv2/cmd/xmesh-xspv2-retirement-sign/main.go
+
+          # Exporter and signer production CLI code plus the issuance library
+          # are offline/read-only boundaries. Tests may write temporary files to
+          # exercise negative permission/symlink cases, so they are excluded.
+          ! grep -n -E 'net/http|http[.]|XMESH1|strict-pq=on|os[.](Remove|Rename|Create)|os[.]WriteFile|Mkdir(All)?|Chmod' \
+            agent/xspv2/cmd/xmesh-xspv2-retirement-request/main.go \
+            agent/xspv2/cmd/xmesh-xspv2-retirement-sign/main.go \
+            agent/xspv2/recovery/retirement_request.go
+
+          awk '/^func Open\(root string\)/{inside=1} /^\/\/ Prepare creates/{inside=0} inside{print}' \
+            agent/xspv2/state/state_linux.go > /tmp/open-body.txt
+          test -s /tmp/open-body.txt
+          ! grep -n -E 'Mkdir(All)?|Chmod|Remove|Rename|WriteFile|Create' /tmp/open-body.txt
+
+      - name: Test Go 1.27 Agent recovery/state/CLI boundaries
+        working-directory: agent/xspv2
+        run: go test ./... -count=1
+
+      - name: Build both offline retirement tools
+        working-directory: agent/xspv2
+        run: |
+          set -euo pipefail
+          go build ./cmd/xmesh-xspv2-retirement-request
+          go build ./cmd/xmesh-xspv2-retirement-sign
+
+      - name: State bounded evidence only
+        run: |
+          echo 'PASS: public-only retirement request export and offline owner dual-sign issuance are verified.'
+          echo 'No old key is erased; no owner private key enters Nexus or normal Agent runtime.'
+          echo 'P0-E4a remains OPEN; strict-pq remains OFF; production rollout remains NOT AUTHORIZED.'

@@ -88,36 +88,68 @@ func expectedLayout(root string) Layout {
 	}
 }
 
+func canonicalRoot(root string) (string, error) {
+	clean := filepath.Clean(root)
+	if root == "" || !filepath.IsAbs(root) || clean != root {
+		return "", errors.New("state root must be a canonical absolute path")
+	}
+	if err := rejectSymlinkComponents(clean); err != nil {
+		return "", err
+	}
+	return clean, nil
+}
+
+// Open validates and returns an already-existing production state layout.
+// It never creates directories, chmods paths, repairs state or writes files.
+func Open(root string) (Layout, error) {
+	clean, err := canonicalRoot(root)
+	if err != nil {
+		return Layout{}, err
+	}
+	layout := expectedLayout(clean)
+	for _, dir := range []string{layout.Root, layout.Journal, layout.Keys} {
+		if err = validatePrivateDir(dir); err != nil {
+			return Layout{}, fmt.Errorf("validate existing Agent state directory %s: %w", dir, err)
+		}
+	}
+	for _, path := range []string{layout.Vault, layout.MasterKey} {
+		if err = rejectSymlinkComponents(path); err != nil {
+			return Layout{}, err
+		}
+		if _, err = os.Lstat(path); err != nil {
+			return Layout{}, fmt.Errorf("required Agent security file missing: %w", err)
+		}
+	}
+	return layout, nil
+}
+
 // Prepare creates only the production-style private directory boundaries.
 // Existing enrollment identities, epoch floors, cutover journals and package
 // state are never created, replaced, reset or removed here.
 func Prepare(root string) (Layout, error) {
-	clean := filepath.Clean(root)
-	if root == "" || !filepath.IsAbs(root) || clean != root {
-		return Layout{}, errors.New("state root must be a canonical absolute path")
-	}
-	if err := rejectSymlinkComponents(clean); err != nil {
+	clean, err := canonicalRoot(root)
+	if err != nil {
 		return Layout{}, err
 	}
-	if err := os.MkdirAll(clean, 0o700); err != nil {
+	if err = os.MkdirAll(clean, 0o700); err != nil {
 		return Layout{}, fmt.Errorf("create state root: %w", err)
 	}
-	if err := os.Chmod(clean, 0o700); err != nil {
+	if err = os.Chmod(clean, 0o700); err != nil {
 		return Layout{}, fmt.Errorf("harden state root: %w", err)
 	}
-	if err := validatePrivateDir(clean); err != nil {
+	if err = validatePrivateDir(clean); err != nil {
 		return Layout{}, fmt.Errorf("validate state root: %w", err)
 	}
 
 	layout := expectedLayout(clean)
-	if err := preparePrivateDir(layout.Journal); err != nil {
+	if err = preparePrivateDir(layout.Journal); err != nil {
 		return Layout{}, fmt.Errorf("prepare cutover journal: %w", err)
 	}
-	if err := preparePrivateDir(layout.Keys); err != nil {
+	if err = preparePrivateDir(layout.Keys); err != nil {
 		return Layout{}, fmt.Errorf("prepare key state: %w", err)
 	}
 	for _, path := range []string{layout.Vault, layout.MasterKey} {
-		if err := rejectSymlinkComponents(path); err != nil {
+		if err = rejectSymlinkComponents(path); err != nil {
 			return Layout{}, err
 		}
 	}
