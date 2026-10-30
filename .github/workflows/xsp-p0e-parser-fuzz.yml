@@ -1,0 +1,65 @@
+name: XSP-v2 P0-E Security Parser Fuzz
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/recovery/**"
+      - ".github/workflows/xsp-p0e-parser-fuzz.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/recovery/**"
+      - ".github/workflows/xsp-p0e-parser-fuzz.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-parser-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Check fuzz target boundary and formatting
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -d agent/xspv2/recovery/parser_fuzz_test.go)"
+          grep -Fq 'FuzzDecodeRecoveryCheckpoint' agent/xspv2/recovery/parser_fuzz_test.go
+          grep -Fq 'FuzzDecodeRetirementRequest' agent/xspv2/recovery/parser_fuzz_test.go
+          grep -Fq 'FuzzDecodeRetirementAuthorization' agent/xspv2/recovery/parser_fuzz_test.go
+          grep -Fq 'DecodeRetirementRequest(raw)' agent/xspv2/recovery/parser_fuzz_test.go
+          grep -Fq 'DecodeRetirementAuthorization(raw)' agent/xspv2/recovery/parser_fuzz_test.go
+          grep -Fq 'Decode(raw)' agent/xspv2/recovery/parser_fuzz_test.go
+
+      - name: Run recovery parser unit tests
+        working-directory: agent/xspv2
+        run: go test ./recovery -count=1
+
+      - name: Fuzz strict off-host checkpoint decoder
+        working-directory: agent/xspv2
+        env:
+          GOMAXPROCS: "2"
+        run: go test ./recovery -run '^$' -fuzz '^FuzzDecodeRecoveryCheckpoint$' -fuzztime=15s -parallel=1
+
+      - name: Fuzz strict retirement request decoder
+        working-directory: agent/xspv2
+        env:
+          GOMAXPROCS: "2"
+        run: go test ./recovery -run '^$' -fuzz '^FuzzDecodeRetirementRequest$' -fuzztime=15s -parallel=1
+
+      - name: Fuzz strict retirement authorization decoder
+        working-directory: agent/xspv2
+        env:
+          GOMAXPROCS: "2"
+        run: go test ./recovery -run '^$' -fuzz '^FuzzDecodeRetirementAuthorization$' -fuzztime=15s -parallel=1
+
+      - name: State bounded evidence only
+        run: |
+          echo 'PASS: strict recovery/retirement JSON decoders have bounded Go fuzz smoke coverage with round-trip invariants.'
+          echo 'This does NOT claim exhaustive fuzzing, external FIPS 204 KAT coverage, independent security review, or production authorization.'
+          echo 'strict-pq remains OFF; production rollout remains NOT AUTHORIZED.'
