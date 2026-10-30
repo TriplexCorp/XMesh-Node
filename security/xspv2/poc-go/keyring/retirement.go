@@ -167,6 +167,13 @@ func enforceRetirementFloorLocked(vault string, key []byte, active PublicBundle)
 	if err != nil || !ok {
 		return err
 	}
+	floor, err := readFloor(vault)
+	if err != nil {
+		return err
+	}
+	if floor < record.ToEpoch {
+		return errors.New("retirement floor rejected rolled-back persisted epoch floor")
+	}
 	if active.NodeID != record.NodeID || active.Purpose != record.Purpose || active.KeyEpoch < record.ToEpoch {
 		return errors.New("retirement floor rejected rolled-back active identity")
 	}
@@ -194,7 +201,7 @@ func expectedRetirementRecord(nodeID int64, fromEpoch, toEpoch uint64,
 	}
 }
 
-func validateRetirementResumeFile(path string, key []byte, expectedEpoch uint64,
+func validateRetirementResumeFile(path string, key []byte, expectedNodeID int64, expectedEpoch uint64,
 	expectedEdID, expectedPQID string,
 ) (bool, error) {
 	_, err := os.Lstat(path)
@@ -208,8 +215,8 @@ func validateRetirementResumeFile(path string, key []byte, expectedEpoch uint64,
 	if err != nil {
 		return false, err
 	}
-	if bundle.KeyEpoch != expectedEpoch || bundle.EdKeyID != expectedEdID || bundle.PQKeyID != expectedPQID ||
-		bundle.Purpose != "node_request" {
+	if bundle.NodeID != expectedNodeID || bundle.KeyEpoch != expectedEpoch ||
+		bundle.EdKeyID != expectedEdID || bundle.PQKeyID != expectedPQID || bundle.Purpose != "node_request" {
 		return false, errors.New("retirement resume snapshot does not match authenticated intent")
 	}
 	return true, nil
@@ -282,11 +289,11 @@ func RetireAppliedRotation(vault, master string, nodeID int64, fromEpoch, toEpoc
 		return empty, err
 	}
 
-	previousPresent, err := validateRetirementResumeFile(previousPath(vault), key, fromEpoch, priorEdID, priorPQID)
+	previousPresent, err := validateRetirementResumeFile(previousPath(vault), key, nodeID, fromEpoch, priorEdID, priorPQID)
 	if err != nil {
 		return empty, err
 	}
-	candidatePresent, err := validateRetirementResumeFile(stagedPath(vault), key, toEpoch, activeEdID, activePQID)
+	candidatePresent, err := validateRetirementResumeFile(stagedPath(vault), key, nodeID, toEpoch, activeEdID, activePQID)
 	if err != nil {
 		return empty, err
 	}
