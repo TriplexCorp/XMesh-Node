@@ -28,7 +28,8 @@ jobs:
       - name: Check fuzz target boundary and formatting
         run: |
           set -euo pipefail
-          test -z "$(gofmt -d agent/xspv2/recovery/parser_fuzz_test.go)"
+          gofmt -d agent/xspv2/recovery/parser_fuzz_test.go | tee /tmp/xsp-parser-fuzz-gofmt.diff
+          test ! -s /tmp/xsp-parser-fuzz-gofmt.diff
           grep -Fq 'FuzzDecodeRecoveryCheckpoint' agent/xspv2/recovery/parser_fuzz_test.go
           grep -Fq 'FuzzDecodeRetirementRequest' agent/xspv2/recovery/parser_fuzz_test.go
           grep -Fq 'FuzzDecodeRetirementAuthorization' agent/xspv2/recovery/parser_fuzz_test.go
