@@ -62,7 +62,11 @@ jobs:
             agent/xspv2/cmd/xmesh-xspv2-retirement-request \
             agent/xspv2/cmd/xmesh-xspv2-retirement-sign \
             agent/xspv2/recovery/retirement_request.go
-          ! grep -n -E 'Mkdir(All)?|Chmod|Remove|Rename|WriteFile' agent/xspv2/state/state_linux.go | grep 'func Open' -A40
+
+          awk '/^func Open\(root string\)/{inside=1} /^\/\/ Prepare creates/{inside=0} inside{print}' \
+            agent/xspv2/state/state_linux.go > /tmp/open-body.txt
+          test -s /tmp/open-body.txt
+          ! grep -n -E 'Mkdir(All)?|Chmod|Remove|Rename|WriteFile|Create' /tmp/open-body.txt
 
       - name: Test Go 1.27 Agent recovery/state/CLI boundaries
         working-directory: agent/xspv2
