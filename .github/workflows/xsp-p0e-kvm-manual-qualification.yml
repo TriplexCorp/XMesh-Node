@@ -1,0 +1,81 @@
+name: XSP-v2 P0-E KVM Manual Qualification Runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "security/xspv2/poc-go/keyring/kvm_qualification_linux.go"
+      - "security/xspv2/poc-go/keyring/kvm_qualification_linux_test.go"
+      - "security/xspv2/poc-go/cmd/xspv2-kvm-qualify/main.go"
+      - "docs/XSP_V2_KVM_MANUAL_QUALIFICATION.md"
+      - ".github/workflows/xsp-p0e-kvm-manual-qualification.yml"
+  pull_request:
+    paths:
+      - "security/xspv2/poc-go/keyring/kvm_qualification_linux.go"
+      - "security/xspv2/poc-go/keyring/kvm_qualification_linux_test.go"
+      - "security/xspv2/poc-go/cmd/xspv2-kvm-qualify/main.go"
+      - "docs/XSP_V2_KVM_MANUAL_QUALIFICATION.md"
+      - ".github/workflows/xsp-p0e-kvm-manual-qualification.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manual-kvm-runner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Test isolated KVM qualification preparation
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go test -tags xspv2_powercut_qualification ./keyring \
+            -run '^TestKVMQualificationPreparation' -count=1 -v
+
+      - name: Preserve existing five-point arm and real-operation proofs
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go test -tags xspv2_powercut_qualification ./keyring \
+            -run 'TestPowercutQualification|TestPowercutLabOperation' -count=1 -v
+
+      - name: Build operator-facing runner only under qualification tag
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          go build -trimpath -tags xspv2_powercut_qualification \
+            -o /tmp/xspv2-kvm-qualify ./cmd/xspv2-kvm-qualify
+          /tmp/xspv2-kvm-qualify arm -h >/tmp/arm-help.txt 2>&1
+          /tmp/xspv2-kvm-qualify inspect -h >/tmp/inspect-help.txt 2>&1
+          grep -Fq -- '--checkpoint' /tmp/arm-help.txt
+          grep -Fq -- '--run-id' /tmp/inspect-help.txt
+
+      - name: Prove normal Agent still excludes qualification controls
+        working-directory: agent/xspv2
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/xmesh-agent-xspv2 ./cmd/xmesh-agent-xspv2
+          if strings /tmp/xmesh-agent-xspv2 | grep -Eq 'XSP2-POWERCUT-ARMED-V1|xspv2-kvm-qualification'; then
+            echo 'normal Agent unexpectedly contains KVM qualification controls' >&2
+            exit 1
+          fi
+
+      - name: Reject ambiguous crash plus power-cut qualification build
+        working-directory: security/xspv2/poc-go
+        run: |
+          set -euo pipefail
+          if go build -tags 'xspv2_crash_test xspv2_powercut_qualification' ./cmd/xspv2-kvm-qualify; then
+            echo 'ambiguous dual evidence build unexpectedly compiled' >&2
+            exit 1
+          fi
+
+      - name: State bounded evidence only
+        run: |
+          echo 'PASS: manual KVM runner reaches the existing PQ keyring durability machinery without enabling production strict-pq.'
+          echo 'CI does not satisfy a real VPS stop/start run; issue #138 still requires five external provider stop/start experiments.'
