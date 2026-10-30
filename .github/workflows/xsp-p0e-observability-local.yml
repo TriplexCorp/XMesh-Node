@@ -1,0 +1,83 @@
+name: XSP-v2 P0-E Local Observability
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/observability/**"
+      - "agent/xspv2/cmd/xmesh-agent-xspv2-observe/**"
+      - ".github/workflows/xsp-p0e-observability-local.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/observability/**"
+      - "agent/xspv2/cmd/xmesh-agent-xspv2-observe/**"
+      - ".github/workflows/xsp-p0e-observability-local.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-observability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Enforce read-only non-secret observability boundary
+        run: |
+          set -euo pipefail
+          gofmt -d \
+            agent/xspv2/observability/local_linux.go \
+            agent/xspv2/observability/local_linux_test.go \
+            agent/xspv2/cmd/xmesh-agent-xspv2-observe/main.go | tee /tmp/observability-gofmt.diff
+          test ! -s /tmp/observability-gofmt.diff
+
+          grep -Fq 'XSP_V2_OBSERVABILITY' agent/xspv2/cmd/xmesh-agent-xspv2-observe/main.go
+          grep -Fq 'staging-only' agent/xspv2/cmd/xmesh-agent-xspv2-observe/main.go
+          grep -Fq 'state.Open(root)' agent/xspv2/observability/local_linux.go
+          grep -Fq 'state.DescribeCurrent(layout)' agent/xspv2/observability/local_linux.go
+          grep -Fq 'keyring.DescribeRetirement(layout.Vault, layout.MasterKey)' agent/xspv2/observability/local_linux.go
+
+          ! grep -R -n -E 'net/http|http[.]|os/exec|exec[.]Command|/bin/sh|bash' \
+            agent/xspv2/observability \
+            agent/xspv2/cmd/xmesh-agent-xspv2-observe
+          ! grep -R -n -E 'PrepareRotation|ActivatePreparedRotation|RecoverRotation|RetireAppliedRotation|CreateMasterKey|Initialize\(' \
+            agent/xspv2/observability/local_linux.go \
+            agent/xspv2/cmd/xmesh-agent-xspv2-observe/main.go
+
+          # Reading the protected master-key path is required to authenticate
+          # the retirement marker, but no secret/path/public bytes may be part
+          # of the serialized observability schema.
+          ! grep -n -E 'json:"(edPublic|pqPublic|authorizationSha256|masterKey|stateRoot|journal)' \
+            agent/xspv2/observability/local_linux.go
+
+      - name: Test redaction and fail-closed local state reads
+        working-directory: agent/xspv2
+        run: go test ./observability -count=1 -v
+
+      - name: Build default-off local observability CLI
+        working-directory: agent/xspv2
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/xmesh-agent-xspv2-observe ./cmd/xmesh-agent-xspv2-observe
+          if /tmp/xmesh-agent-xspv2-observe --state-root /tmp/nonexistent >/tmp/observe.out 2>/tmp/observe.err; then
+            echo 'observability unexpectedly ran without staging-only gate' >&2
+            exit 1
+          fi
+          grep -Fxq 'XSP_V2_OBSERVABILITY must equal staging-only' /tmp/observe.err
+          test ! -s /tmp/observe.out
+
+      - name: Re-run Agent regression suite
+        working-directory: agent/xspv2
+        run: go test ./... -count=1
+
+      - name: State bounded evidence only
+        run: |
+          echo 'PASS: local XSP-v2 observability is read-only, default-off and emits bounded non-secret metadata only.'
+          echo 'No network path, production activation, private/public key bytes, owner authorization digest or raw cutover journal payload is exposed.'
+          echo 'This is the Node-local half of the observability gate; Nexus durable-state observability remains a separate paired layer.'
+          echo 'strict-pq remains OFF; production rollout remains NOT AUTHORIZED.'
