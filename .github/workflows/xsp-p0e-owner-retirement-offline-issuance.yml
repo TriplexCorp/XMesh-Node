@@ -55,12 +55,12 @@ jobs:
           grep -Fq 'ParsePKCS8PrivateKey' agent/xspv2/cmd/xmesh-xspv2-retirement-sign/main.go
           grep -Fq 'MLDSA65' agent/xspv2/cmd/xmesh-xspv2-retirement-sign/main.go
 
-          # Exporter and signer are offline/read-only boundaries. Neither may
-          # erase/replace key state, contact a network service or activate a
-          # legacy/weaker/production path.
-          ! grep -R -n -E 'net/http|http[.]|XMESH1|strict-pq=on|os[.](Remove|Rename|Create)|os[.]WriteFile|Mkdir(All)?|Chmod' \
-            agent/xspv2/cmd/xmesh-xspv2-retirement-request \
-            agent/xspv2/cmd/xmesh-xspv2-retirement-sign \
+          # Exporter and signer production CLI code plus the issuance library
+          # are offline/read-only boundaries. Tests may write temporary files to
+          # exercise negative permission/symlink cases, so they are excluded.
+          ! grep -n -E 'net/http|http[.]|XMESH1|strict-pq=on|os[.](Remove|Rename|Create)|os[.]WriteFile|Mkdir(All)?|Chmod' \
+            agent/xspv2/cmd/xmesh-xspv2-retirement-request/main.go \
+            agent/xspv2/cmd/xmesh-xspv2-retirement-sign/main.go \
             agent/xspv2/recovery/retirement_request.go
 
           awk '/^func Open\(root string\)/{inside=1} /^\/\/ Prepare creates/{inside=0} inside{print}' \
