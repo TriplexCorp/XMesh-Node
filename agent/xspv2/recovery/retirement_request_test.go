@@ -9,11 +9,6 @@ import (
 	"testing"
 )
 
-func issuanceFixture(t *testing.T) (RetirementRequest, SignedCheckpoint, OwnerPublic, []byte, []byte, int64, interface{}) {
-	t.Helper()
-	panic("unused helper placeholder")
-}
-
 func TestRetirementRequestAndOfflineIssuanceRoundTrip(t *testing.T) {
 	layout, previous, candidate := appliedRetainedRotation(t)
 	edPrivate, pqPrivate, pin := ownerPair(t)
