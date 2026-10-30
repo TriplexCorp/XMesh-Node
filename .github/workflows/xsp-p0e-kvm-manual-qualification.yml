@@ -53,8 +53,8 @@ jobs:
             -o /tmp/xspv2-kvm-qualify ./cmd/xspv2-kvm-qualify
           /tmp/xspv2-kvm-qualify arm -h >/tmp/arm-help.txt 2>&1
           /tmp/xspv2-kvm-qualify inspect -h >/tmp/inspect-help.txt 2>&1
-          grep -Fq -- '--checkpoint' /tmp/arm-help.txt
-          grep -Fq -- '--run-id' /tmp/inspect-help.txt
+          grep -Fq -- '-checkpoint' /tmp/arm-help.txt
+          grep -Fq -- '-run-id' /tmp/inspect-help.txt
 
       - name: Prove normal Agent still excludes qualification controls
         working-directory: agent/xspv2
