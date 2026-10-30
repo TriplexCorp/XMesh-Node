@@ -49,7 +49,10 @@ jobs:
             agent/xspv2/observability/local_linux.go \
             agent/xspv2/cmd/xmesh-agent-xspv2-observe/main.go
 
-          ! grep -n -E 'EdPublic|PQPublic|AuthorizationSHA256|MasterKey|Journal|Root[[:space:]]+string.*json' \
+          # Reading the protected master-key path is required to authenticate
+          # the retirement marker, but no secret/path/public bytes may be part
+          # of the serialized observability schema.
+          ! grep -n -E 'json:"(edPublic|pqPublic|authorizationSha256|masterKey|stateRoot|journal)' \
             agent/xspv2/observability/local_linux.go
 
       - name: Test redaction and fail-closed local state reads
