@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"strings"
 
 	"github.com/TriplexCorp/XMesh-Node/agent/xspv2/state"
 )
@@ -15,22 +17,22 @@ import (
 const retirementRequestSchema = "xsp2-owner-retirement-request-1"
 
 type RetirementRequest struct {
-	Schema                   string `json:"schema"`
-	NodeID                   uint64 `json:"nodeId"`
-	ServerAuthority          string `json:"serverAuthority"`
-	FromEpoch                uint64 `json:"fromEpoch"`
-	ToEpoch                  uint64 `json:"toEpoch"`
-	PriorEdKeyID             string `json:"priorEdKeyId"`
-	PriorPQKeyID             string `json:"priorPqKeyId"`
-	ActiveEdKeyID            string `json:"activeEdKeyId"`
-	ActivePQKeyID            string `json:"activePqKeyId"`
-	CheckpointGeneration     uint64 `json:"checkpointGeneration"`
-	CheckpointSHA256Hex      string `json:"checkpointSha256Hex"`
-	CheckpointIssuedAtMS     int64  `json:"checkpointIssuedAtMs"`
-	OwnerID                  string `json:"ownerId"`
-	OwnerEdKeyID             string `json:"ownerEdKeyId"`
-	OwnerPQKeyID             string `json:"ownerPqKeyId"`
-	RequestID                string `json:"requestId"`
+	Schema               string `json:"schema"`
+	NodeID               uint64 `json:"nodeId"`
+	ServerAuthority      string `json:"serverAuthority"`
+	FromEpoch            uint64 `json:"fromEpoch"`
+	ToEpoch              uint64 `json:"toEpoch"`
+	PriorEdKeyID         string `json:"priorEdKeyId"`
+	PriorPQKeyID         string `json:"priorPqKeyId"`
+	ActiveEdKeyID        string `json:"activeEdKeyId"`
+	ActivePQKeyID        string `json:"activePqKeyId"`
+	CheckpointGeneration uint64 `json:"checkpointGeneration"`
+	CheckpointSHA256Hex  string `json:"checkpointSha256Hex"`
+	CheckpointIssuedAtMS int64  `json:"checkpointIssuedAtMs"`
+	OwnerID              string `json:"ownerId"`
+	OwnerEdKeyID         string `json:"ownerEdKeyId"`
+	OwnerPQKeyID         string `json:"ownerPqKeyId"`
+	RequestID            string `json:"requestId"`
 }
 
 func validateRetirementRequest(value RetirementRequest) error {
@@ -38,6 +40,9 @@ func validateRetirementRequest(value RetirementRequest) error {
 		value.FromEpoch == ^uint64(0) || value.ToEpoch != value.FromEpoch+1 ||
 		value.CheckpointGeneration == 0 || value.CheckpointIssuedAtMS <= 0 {
 		return errors.New("invalid retirement request schema, node, epoch, checkpoint generation or timestamp")
+	}
+	if strings.ContainsAny(value.ServerAuthority, "/:@?#") {
+		return errors.New("server authority must be an authenticated DNS name")
 	}
 	if _, err := decodeDigest(value.CheckpointSHA256Hex, false); err != nil {
 		return fmt.Errorf("invalid retirement request checkpoint digest: %w", err)
@@ -87,22 +92,22 @@ func BuildRetirementRequest(checkpoint SignedCheckpoint, layout state.Layout, re
 		return RetirementRequest{}, err
 	}
 	request := RetirementRequest{
-		Schema:                   retirementRequestSchema,
-		NodeID:                   cp.NodeID,
-		ServerAuthority:          cp.ServerAuthority,
-		FromEpoch:                retained.FromEpoch,
-		ToEpoch:                  retained.ToEpoch,
-		PriorEdKeyID:             retained.PriorEdKeyID,
-		PriorPQKeyID:             retained.PriorPQKeyID,
-		ActiveEdKeyID:            retained.ActiveEdKeyID,
-		ActivePQKeyID:            retained.ActivePQKeyID,
-		CheckpointGeneration:     cp.Generation,
-		CheckpointSHA256Hex:      digest,
-		CheckpointIssuedAtMS:     cp.IssuedAtMS,
-		OwnerID:                  cp.OwnerID,
-		OwnerEdKeyID:             cp.OwnerEdKeyID,
-		OwnerPQKeyID:             cp.OwnerPQKeyID,
-		RequestID:                requestID,
+		Schema:               retirementRequestSchema,
+		NodeID:               cp.NodeID,
+		ServerAuthority:      cp.ServerAuthority,
+		FromEpoch:            retained.FromEpoch,
+		ToEpoch:              retained.ToEpoch,
+		PriorEdKeyID:         retained.PriorEdKeyID,
+		PriorPQKeyID:         retained.PriorPQKeyID,
+		ActiveEdKeyID:        retained.ActiveEdKeyID,
+		ActivePQKeyID:        retained.ActivePQKeyID,
+		CheckpointGeneration: cp.Generation,
+		CheckpointSHA256Hex:  digest,
+		CheckpointIssuedAtMS: cp.IssuedAtMS,
+		OwnerID:              cp.OwnerID,
+		OwnerEdKeyID:         cp.OwnerEdKeyID,
+		OwnerPQKeyID:         cp.OwnerPQKeyID,
+		RequestID:            requestID,
 	}
 	if err = validateRetirementRequest(request); err != nil {
 		return RetirementRequest{}, err
@@ -164,7 +169,7 @@ func IssueRetirementAuthorization(request RetirementRequest, checkpoint SignedCh
 	if err := validateRetirementRequest(request); err != nil {
 		return SignedRetirementAuthorization{}, err
 	}
-	if lifetimeMS <= 0 || lifetimeMS > 300000 || nowMS <= 0 || nowMS > int64(^uint64(0)>>1)-lifetimeMS {
+	if lifetimeMS <= 0 || lifetimeMS > 300000 || nowMS <= 0 || nowMS > math.MaxInt64-lifetimeMS {
 		return SignedRetirementAuthorization{}, errors.New("invalid retirement authorization issue time or lifetime")
 	}
 	cp := checkpoint.Checkpoint
