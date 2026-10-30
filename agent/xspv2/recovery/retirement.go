@@ -17,27 +17,27 @@ import (
 const retirementAuthorizationDomain = "XSP2-OWNER-RETIRE-PREVIOUS-V1"
 
 type RetirementAuthorization struct {
-	NodeID                  uint64 `json:"nodeId"`
-	ServerAuthority         string `json:"serverAuthority"`
-	FromEpoch               uint64 `json:"fromEpoch"`
-	ToEpoch                 uint64 `json:"toEpoch"`
-	PriorEdKeyID            string `json:"priorEdKeyId"`
-	PriorPQKeyID            string `json:"priorPqKeyId"`
-	ActiveEdKeyID           string `json:"activeEdKeyId"`
-	ActivePQKeyID           string `json:"activePqKeyId"`
-	CheckpointGeneration    uint64 `json:"checkpointGeneration"`
-	CheckpointSHA256Hex     string `json:"checkpointSha256Hex"`
-	IssuedAtMS              int64  `json:"issuedAtMs"`
-	ExpiresAtMS             int64  `json:"expiresAtMs"`
-	RequestID               string `json:"requestId"`
-	OwnerID                 string `json:"ownerId"`
-	OwnerEdKeyID            string `json:"ownerEdKeyId"`
-	OwnerPQKeyID            string `json:"ownerPqKeyId"`
+	NodeID               uint64 `json:"nodeId"`
+	ServerAuthority      string `json:"serverAuthority"`
+	FromEpoch            uint64 `json:"fromEpoch"`
+	ToEpoch              uint64 `json:"toEpoch"`
+	PriorEdKeyID         string `json:"priorEdKeyId"`
+	PriorPQKeyID         string `json:"priorPqKeyId"`
+	ActiveEdKeyID        string `json:"activeEdKeyId"`
+	ActivePQKeyID        string `json:"activePqKeyId"`
+	CheckpointGeneration uint64 `json:"checkpointGeneration"`
+	CheckpointSHA256Hex  string `json:"checkpointSha256Hex"`
+	IssuedAtMS           int64  `json:"issuedAtMs"`
+	ExpiresAtMS          int64  `json:"expiresAtMs"`
+	RequestID            string `json:"requestId"`
+	OwnerID              string `json:"ownerId"`
+	OwnerEdKeyID         string `json:"ownerEdKeyId"`
+	OwnerPQKeyID         string `json:"ownerPqKeyId"`
 }
 
 type SignedRetirementAuthorization struct {
 	Authorization RetirementAuthorization `json:"authorization"`
-	Signatures    Signatures               `json:"signatures"`
+	Signatures    Signatures              `json:"signatures"`
 }
 
 func CanonicalRetirementAuthorization(value RetirementAuthorization) ([]byte, error) {
