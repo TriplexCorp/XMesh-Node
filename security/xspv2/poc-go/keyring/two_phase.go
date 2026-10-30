@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 )
 
-func stagedPath(vault string) string { return vault + ".next" }
+func stagedPath(vault string) string   { return vault + ".next" }
 func previousPath(vault string) string { return vault + ".previous" }
 
 func mustBeAbsent(path string) error {
