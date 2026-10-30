@@ -22,22 +22,23 @@ type RetainedState struct {
 }
 
 type RetirementState struct {
-	Present      bool   `json:"present"`
-	FromEpoch    uint64 `json:"fromEpoch,omitempty"`
-	ToEpoch      uint64 `json:"toEpoch,omitempty"`
-	PriorKeyIDs  KeyIDs `json:"priorKeyIds,omitempty"`
-	ActiveKeyIDs KeyIDs `json:"activeKeyIds,omitempty"`
+	Present      bool    `json:"present"`
+	FromEpoch    uint64  `json:"fromEpoch,omitempty"`
+	ToEpoch      uint64  `json:"toEpoch,omitempty"`
+	PriorKeyIDs  *KeyIDs `json:"priorKeyIds,omitempty"`
+	ActiveKeyIDs *KeyIDs `json:"activeKeyIds,omitempty"`
 }
 
 type LocalSnapshot struct {
-	Schema          string          `json:"schema"`
-	NodeID          int64           `json:"nodeId"`
-	KeyEpoch        uint64          `json:"keyEpoch"`
-	ActiveKeyIDs    KeyIDs          `json:"activeKeyIds"`
-	Retained        RetainedState   `json:"retained"`
-	Retirement      RetirementState `json:"retirement"`
-	ReadOnly        bool            `json:"readOnly"`
-	ProductionReady bool            `json:"productionReady"`
+	Schema              string          `json:"schema"`
+	NodeID              int64           `json:"nodeId"`
+	KeyEpoch            uint64          `json:"keyEpoch"`
+	ActiveKeyIDs        KeyIDs          `json:"activeKeyIds"`
+	Retained            RetainedState   `json:"retained"`
+	Retirement          RetirementState `json:"retirement"`
+	ReadOnly            bool            `json:"readOnly"`
+	ProductionActivated bool            `json:"productionActivated"`
+	StrictPQEnabled     bool            `json:"strictPQEnabled"`
 }
 
 // Snapshot re-opens the already-existing durable Agent state and returns only
@@ -76,8 +77,8 @@ func Snapshot(root string) (LocalSnapshot, error) {
 	if present {
 		result.Retirement.FromEpoch = record.FromEpoch
 		result.Retirement.ToEpoch = record.ToEpoch
-		result.Retirement.PriorKeyIDs = KeyIDs{Ed25519: record.PriorEdKeyID, MLDSA65: record.PriorPQKeyID}
-		result.Retirement.ActiveKeyIDs = KeyIDs{Ed25519: record.ActiveEdKeyID, MLDSA65: record.ActivePQKeyID}
+		result.Retirement.PriorKeyIDs = &KeyIDs{Ed25519: record.PriorEdKeyID, MLDSA65: record.PriorPQKeyID}
+		result.Retirement.ActiveKeyIDs = &KeyIDs{Ed25519: record.ActiveEdKeyID, MLDSA65: record.ActivePQKeyID}
 	}
 	return result, nil
 }
