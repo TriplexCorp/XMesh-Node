@@ -1,0 +1,63 @@
+name: XSP-v2 P0-E ML-DSA-65 FIPS 204 ACVP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/recovery/mldsa_fips204_acvp_test.go"
+      - ".github/workflows/xsp-p0e-mldsa65-fips204-acvp.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/recovery/mldsa_fips204_acvp_test.go"
+      - ".github/workflows/xsp-p0e-mldsa65-fips204-acvp.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mldsa65-fips204-acvp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out exact NIST ACVP ML-DSA FIPS 204 vectors
+        uses: actions/checkout@v4
+        with:
+          repository: usnistgov/ACVP-Server
+          ref: a7f283cdc87d2d6dd93c1bac59e5622c5f9f8324
+          path: nist-acvp
+          fetch-depth: 1
+          sparse-checkout: |
+            gen-val/json-files/ML-DSA-sigVer-FIPS204
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Verify exact external vector source and test boundary
+        run: |
+          set -euo pipefail
+          test "$(go env GOVERSION)" = "go1.27.3"
+          test -z "$(gofmt -d agent/xspv2/recovery/mldsa_fips204_acvp_test.go)"
+
+          cd nist-acvp
+          test "$(git rev-parse HEAD)" = "a7f283cdc87d2d6dd93c1bac59e5622c5f9f8324"
+          test "$(git rev-parse HEAD:gen-val/json-files/ML-DSA-sigVer-FIPS204/prompt.json)" = "22b0803253f7aa24644229acd04c387d260e874a"
+          test "$(git rev-parse HEAD:gen-val/json-files/ML-DSA-sigVer-FIPS204/expectedResults.json)" = "dba8bcfe5f090503c9390701c11677389752cecd"
+          test "$(git rev-parse HEAD:gen-val/json-files/ML-DSA-sigVer-FIPS204/registration.json)" = "23dcb3ef6e694c4e95c99914e581fb2b37ba1bc8"
+
+      - name: Run exact NIST ACVP ML-DSA-65 compatible sigVer subset
+        working-directory: agent/xspv2
+        env:
+          NIST_ACVP_MLDSA_SIGVER_DIR: ${{ github.workspace }}/nist-acvp/gen-val/json-files/ML-DSA-sigVer-FIPS204
+        run: |
+          set -euo pipefail
+          go test ./recovery -run '^TestMLDSA65FIPS204NISTACVPSigVer$' -count=1 -v
+
+      - name: State bounded evidence only
+        run: |
+          echo 'PASS: Go 1.27.3 crypto/mldsa ML-DSA-65 verification matches the compatible official NIST ACVP FIPS 204 sigVer subset.'
+          echo 'Scope is external interface + pure ML-DSA + externalMu=false; preHash/externalMu/internal-interface ACVP groups are outside this API-compatible gate.'
+          echo 'Published ACVP samples are not exhaustive implementation assurance; independent review remains required.'
+          echo 'P0-E4a remains OPEN; strict-pq remains OFF; production rollout remains NOT AUTHORIZED.'
