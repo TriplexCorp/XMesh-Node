@@ -1,0 +1,59 @@
+name: XSP-v2 P0-E Owner-authorized Old-key Retirement
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/recovery/**"
+      - "agent/xspv2/state/**"
+      - "security/xspv2/poc-go/keyring/retained_rotation.go"
+      - "security/xspv2/poc-go/keyring/retained_rotation_test.go"
+      - ".github/workflows/xsp-p0e-owner-retirement.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/recovery/**"
+      - "agent/xspv2/state/**"
+      - "security/xspv2/poc-go/keyring/retained_rotation.go"
+      - "security/xspv2/poc-go/keyring/retained_rotation_test.go"
+      - ".github/workflows/xsp-p0e-owner-retirement.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  owner-retirement-authorization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Check owner retirement authorization source boundary
+        run: |
+          set -euo pipefail
+          gofmt -d agent/xspv2/recovery/*.go agent/xspv2/state/*.go security/xspv2/poc-go/keyring/retained_rotation*.go | tee /tmp/owner-retirement-gofmt.diff
+          test ! -s /tmp/owner-retirement-gofmt.diff
+
+          grep -Fq 'XSP2-OWNER-RETIRE-PREVIOUS-V1' agent/xspv2/recovery/retirement.go
+          grep -Fq 'owner retirement Ed25519 signature invalid' agent/xspv2/recovery/retirement.go
+          grep -Fq 'owner retirement ML-DSA-65 signature invalid' agent/xspv2/recovery/retirement.go
+          grep -Fq 'independent off-host generation floor is required' agent/xspv2/recovery/retirement.go
+          grep -Fq 'retirement authorization is not bound to the accepted owner recovery checkpoint' agent/xspv2/recovery/retirement.go
+          grep -Fq 'retained Agent key state does not match owner retirement authorization' agent/xspv2/recovery/retirement.go
+          grep -Fq 'DescribeRetainedRotation' security/xspv2/poc-go/keyring/retained_rotation.go
+          grep -Fq 'bytes.Equal(activeRaw, candidateRaw)' security/xspv2/poc-go/keyring/retained_rotation.go
+
+          # This gate is authorization/preflight only. It must not erase or
+          # replace key state, create a network route, or activate production.
+          ! grep -n -E 'os[.](Remove|Rename)|atomicFile|net/http|http[.]|XMESH1|strict-pq=on' agent/xspv2/recovery/retirement.go
+          ! grep -n -E 'os[.](Remove|Rename)|atomicFile' agent/xspv2/state/durable_linux.go
+
+      - name: Test Go 1.27 Agent owner retirement authorization
+        working-directory: agent/xspv2
+        run: go test ./...
+
+      - name: Test retained keyring evidence
+        working-directory: security/xspv2/poc-go
+        run: go test ./keyring/...
