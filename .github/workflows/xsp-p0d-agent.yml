@@ -48,12 +48,15 @@ jobs:
           grep -Fq 'XSP-v2 signed ACK redirection forbidden' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
           grep -Fq 'DialStrictMutual(dialCtx, address, serverName' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
 
-          mapfile -d '' agent_go < <(find agent/xspv2 -type f -name '*.go' -print0)
-          if grep -nE '"XMESH1|tls\.VersionTLS12|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|"strict-pq=on|"allow.?weak' "${agent_go[@]}"; then
+          # Production source checks deliberately exclude *_test.go. Crash and
+          # durability tests may spawn subprocesses to inject hard exits, but
+          # the shipped Agent must retain no shell/command or downgrade path.
+          mapfile -d '' agent_prod_go < <(find agent/xspv2 -type f -name '*.go' ! -name '*_test.go' -print0)
+          if grep -nE '"XMESH1|tls\.VersionTLS12|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|"strict-pq=on|"allow.?weak' "${agent_prod_go[@]}"; then
             echo 'forbidden executable downgrade/fallback pattern in P0-D Agent Go source' >&2
             exit 1
           fi
-          if grep -nE '"os/exec"|exec\.Command|"/bin/sh"|"bash"' "${agent_go[@]}"; then
+          if grep -nE '"os/exec"|exec\.Command|"/bin/sh"|"bash"' "${agent_prod_go[@]}"; then
             echo 'forbidden shell/command execution pattern in P0-D Agent Go source' >&2
             exit 1
           fi
