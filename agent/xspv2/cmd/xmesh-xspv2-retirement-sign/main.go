@@ -14,16 +14,38 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/TriplexCorp/XMesh-Node/agent/xspv2/recovery"
 )
 
+func rejectSymlinkComponents(path string) error {
+	current := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("owner private-key path contains symlink component: %s", current)
+		}
+	}
+	return nil
+}
+
 func readPrivatePKCS8(path string) (any, error) {
 	clean := filepath.Clean(path)
 	if path == "" || !filepath.IsAbs(path) || clean != path {
 		return nil, errors.New("owner private-key path must be canonical and absolute")
+	}
+	if err := rejectSymlinkComponents(clean); err != nil {
+		return nil, err
 	}
 	info, err := os.Lstat(clean)
 	if err != nil {
