@@ -24,6 +24,19 @@ type SecuritySnapshot struct {
 	CandidateRetained bool
 }
 
+// RetainedRotationSnapshot contains public-only evidence for the exact
+// previous->active rotation that still has both authenticated snapshots kept.
+type RetainedRotationSnapshot struct {
+	NodeID        int64
+	Purpose       string
+	FromEpoch     uint64
+	ToEpoch       uint64
+	PriorEdKeyID  string
+	PriorPQKeyID  string
+	ActiveEdKeyID string
+	ActivePQKeyID string
+}
+
 func validateLayout(layout Layout) error {
 	if layout.Root == "" || filepath.Clean(layout.Root) != layout.Root || !filepath.IsAbs(layout.Root) {
 		return errors.New("invalid Agent state root")
@@ -97,6 +110,28 @@ func DescribeCurrent(layout Layout) (SecuritySnapshot, error) {
 		return SecuritySnapshot{}, err
 	}
 	return snapshot(pub, previous, candidate), nil
+}
+
+// DescribeRetainedRotation reopens all three authenticated public identities
+// through the existing keyring under its wrapping-key lock. It is read-only.
+func DescribeRetainedRotation(layout Layout) (RetainedRotationSnapshot, error) {
+	if err := validateLayout(layout); err != nil {
+		return RetainedRotationSnapshot{}, err
+	}
+	retained, err := keyring.DescribeRetainedRotation(layout.Vault, layout.MasterKey)
+	if err != nil {
+		return RetainedRotationSnapshot{}, fmt.Errorf("describe retained Agent rotation: %w", err)
+	}
+	return RetainedRotationSnapshot{
+		NodeID:        retained.Active.NodeID,
+		Purpose:       retained.Active.Purpose,
+		FromEpoch:     retained.Previous.KeyEpoch,
+		ToEpoch:       retained.Active.KeyEpoch,
+		PriorEdKeyID:  retained.Previous.EdKeyID,
+		PriorPQKeyID:  retained.Previous.PQKeyID,
+		ActiveEdKeyID: retained.Active.EdKeyID,
+		ActivePQKeyID: retained.Active.PQKeyID,
+	}, nil
 }
 
 // AttestAppliedRotation binds the real-Agent layout to the already-proven
