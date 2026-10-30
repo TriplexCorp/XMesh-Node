@@ -62,6 +62,15 @@ func secureDir(file string) error {
 	return nil
 }
 
+func syncParentDir(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
 func atomicFile(path string, raw []byte) error {
 	if err := secureDir(path); err != nil {
 		return err
@@ -87,12 +96,7 @@ func atomicFile(path string, raw []byte) error {
 	if err = os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return syncParentDir(path)
 }
 
 func floorPath(vault string) string { return vault + ".min-epoch" }
@@ -149,6 +153,12 @@ func CreateMasterKey(path string) error {
 			return err
 		}
 		return closeErr
+	}
+	// A successful file fsync alone does not guarantee that the newly created
+	// directory entry survives abrupt power loss on every supported filesystem.
+	// Do not report provisioning success until the parent directory is durable.
+	if err = syncParentDir(path); err != nil {
+		return err
 	}
 	return nil
 }
