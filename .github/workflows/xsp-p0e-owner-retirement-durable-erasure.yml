@@ -1,0 +1,106 @@
+name: XSP-v2 P0-E Owner-retirement Durable Erasure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/xspv2/recovery/retirement.go"
+      - "agent/xspv2/recovery/retirement_erasure_test.go"
+      - "agent/xspv2/recovery/retirement_erasure_crash_linux_test.go"
+      - "security/xspv2/poc-go/keyring/retirement.go"
+      - "security/xspv2/poc-go/keyring/retirement_test.go"
+      - "security/xspv2/poc-go/keyring/retirement_floor_test.go"
+      - "security/xspv2/poc-go/keyring/retirement_crash_linux_test.go"
+      - "security/xspv2/poc-go/keyring/retained_rotation.go"
+      - "security/xspv2/poc-go/keyring/applied_attestation.go"
+      - "security/xspv2/poc-go/keyring/two_phase.go"
+      - "security/xspv2/poc-go/keyring/sealed.go"
+      - ".github/workflows/xsp-p0e-owner-retirement-durable-erasure.yml"
+  pull_request:
+    paths:
+      - "agent/xspv2/recovery/retirement.go"
+      - "agent/xspv2/recovery/retirement_erasure_test.go"
+      - "agent/xspv2/recovery/retirement_erasure_crash_linux_test.go"
+      - "security/xspv2/poc-go/keyring/retirement.go"
+      - "security/xspv2/poc-go/keyring/retirement_test.go"
+      - "security/xspv2/poc-go/keyring/retirement_floor_test.go"
+      - "security/xspv2/poc-go/keyring/retirement_crash_linux_test.go"
+      - "security/xspv2/poc-go/keyring/retained_rotation.go"
+      - "security/xspv2/poc-go/keyring/applied_attestation.go"
+      - "security/xspv2/poc-go/keyring/two_phase.go"
+      - "security/xspv2/poc-go/keyring/sealed.go"
+      - ".github/workflows/xsp-p0e-owner-retirement-durable-erasure.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  durable-owner-retirement-erasure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Check retirement erasure source boundary and formatting
+        run: |
+          set -euo pipefail
+          gofmt -d \
+            agent/xspv2/recovery/retirement.go \
+            agent/xspv2/recovery/retirement_erasure_test.go \
+            agent/xspv2/recovery/retirement_erasure_crash_linux_test.go \
+            security/xspv2/poc-go/keyring/retirement.go \
+            security/xspv2/poc-go/keyring/retirement_test.go \
+            security/xspv2/poc-go/keyring/retirement_floor_test.go \
+            security/xspv2/poc-go/keyring/retirement_crash_linux_test.go \
+            security/xspv2/poc-go/keyring/retained_rotation.go \
+            security/xspv2/poc-go/keyring/applied_attestation.go \
+            security/xspv2/poc-go/keyring/two_phase.go \
+            security/xspv2/poc-go/keyring/sealed.go | tee /tmp/retirement-erasure-gofmt.diff
+          test ! -s /tmp/retirement-erasure-gofmt.diff
+
+          grep -Fq 'XSP2-RETIRED-ROTATION-V1' security/xspv2/poc-go/keyring/retirement.go
+          grep -Fq 'hmac.New(sha256.New, key)' security/xspv2/poc-go/keyring/retirement.go
+          grep -Fq 'after-retirement-intent' security/xspv2/poc-go/keyring/retirement.go
+          grep -Fq 'after-retirement-previous' security/xspv2/poc-go/keyring/retirement.go
+          grep -Fq 'after-retirement-next' security/xspv2/poc-go/keyring/retirement.go
+          grep -Fq 'RetirementAuthorizationDigest' agent/xspv2/recovery/retirement.go
+          grep -Fq 'RetireAuthorizedPrevious' agent/xspv2/recovery/retirement.go
+          grep -Fq 'retirement floor rejected rolled-back persisted epoch floor' security/xspv2/poc-go/keyring/retirement.go
+          grep -Fq 'retirement history exists; vault reinitialization refused' security/xspv2/poc-go/keyring/sealed.go
+
+          # Mutation is strictly local and limited to the retained .previous/.next
+          # snapshots after a durable authenticated intent. No network, legacy
+          # fallback, owner-key issuance or production activation belongs here.
+          ! grep -R -n -E 'net/http|http[.]|XMESH1|strict-pq=on|CreateMasterKey|Generate\(' \
+            agent/xspv2/recovery/retirement.go \
+            security/xspv2/poc-go/keyring/retirement.go
+          test "$(grep -c 'os.Remove(previousPath(vault))' security/xspv2/poc-go/keyring/retirement.go)" -eq 1
+          test "$(grep -c 'os.Remove(stagedPath(vault))' security/xspv2/poc-go/keyring/retirement.go)" -eq 1
+          ! grep -n 'os.Remove(vault)' security/xspv2/poc-go/keyring/retirement.go
+          ! grep -n 'os.Remove(floorPath' security/xspv2/poc-go/keyring/retirement.go
+
+      - name: Test Go 1.27 Agent retirement orchestration
+        working-directory: agent/xspv2
+        run: go test ./... -count=1
+
+      - name: Test keyring retirement and rollback floor
+        working-directory: security/xspv2/poc-go
+        run: go test ./keyring/... -count=1
+
+      - name: Test keyring retirement crash matrix
+        working-directory: security/xspv2/poc-go
+        run: go test -tags xspv2_crash_test ./keyring -run '^TestRetireAppliedRotationCrashMatrix$' -count=1
+
+      - name: Test owner authorization resume after durable intent crash
+        working-directory: agent/xspv2
+        run: go test -tags xspv2_crash_test ./recovery -run '^TestRetireAuthorizedPreviousResumesAfterDurableIntentPastExpiry$' -count=1
+
+      - name: State bounded evidence only
+        run: |
+          echo 'PASS: explicit owner authorization can drive crash-safe retirement of retained old key snapshots.'
+          echo 'The authenticated retirement marker survives restart, blocks rollback/reintroduction, and preserves active/floor state.'
+          echo 'P0-E4a physical qualification remains OPEN; strict-pq remains OFF; production rollout remains NOT AUTHORIZED.'
