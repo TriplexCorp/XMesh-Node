@@ -39,8 +39,14 @@ func DescribeRetainedRotation(vault, master string) (RetainedRotation, error) {
 	if err != nil {
 		return empty, err
 	}
+	if err = enforceRetirementFloorLocked(vault, key, active); err != nil {
+		return empty, err
+	}
 	_, candidate, err := openWithMaster(stagedPath(vault), key)
 	if err != nil {
+		return empty, err
+	}
+	if err = validateRetirementRecordForPair(vault, key, previous, candidate); err != nil {
 		return empty, err
 	}
 	floor, err := readFloor(vault)
