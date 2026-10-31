@@ -8,6 +8,7 @@ standalone = (root / "install.sh").read_text()
 operational = (root / "deploy/install-v6-strict-operational-agents.sh").read_text()
 adapter = (root / "deploy/xmesh-strict-pq-curl.sh").read_text()
 guard = (root / "deploy/xmesh-policy-guard.py").read_text()
+tls_provision = (root / "deploy/xmesh-tls-provision.py").read_text()
 
 # Fresh v6 must not use the historical classical enrollment/install path.
 assert "/api/v1/node/enroll" not in bootstrap
@@ -33,6 +34,16 @@ assert "xmesh-node-control.timer" in pre_gate
 # The managed Xray is explicitly kept down again after router startup until
 # desired-config is reconciled by the strict operational installer.
 assert 'docker stop -t 5 xmesh-managed-xray' in bootstrap[router_at:ops_at]
+
+# The sandboxed reconciler uses ProtectHome=true, so its router source/config
+# must live outside /root. Managed ACME packages are prepared here as well;
+# package-manager execution inside reconciliation is forbidden.
+assert "INSTALL_DIR=/opt/xmesh-node" in bootstrap
+assert "/root/XMesh-Node" not in bootstrap
+assert "certbot" in bootstrap.split("apt_get install -y", 1)[1].split("\n", 1)[0]
+assert 'subprocess.run(["apt-get"' not in tls_provision
+assert 'shutil.which("certbot")' in tls_provision
+assert "rerun the reviewed XMesh Node bootstrap" in tls_provision
 
 # Standalone install is also fail-closed. It installs the product client and
 # verifies/creates strict-PQ activation before the first managed router start.
@@ -71,4 +82,4 @@ assert "curl --" not in adapter
 assert "http.Client" not in adapter
 
 assert 'choices=["prepare", "offline", "commit", "sample"]' in guard
-print("Fresh v6 strict-PQ fail-closed bootstrap, standalone install and verified per-user metering contract: OK")
+print("Fresh v6 strict-PQ fail-closed bootstrap, TLS sandbox boundary, standalone install and verified per-user metering contract: OK")
