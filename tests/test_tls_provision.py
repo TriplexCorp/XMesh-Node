@@ -58,6 +58,17 @@ class ProvisionTests(unittest.TestCase):
                               "provider": "letsencrypt-http01"}},
             {"inbounds": []}), 1)
 
+    def test_deploy_hook_path_matches_operational_installer(self):
+        installer = (ROOT / "deploy" / "install-v6-strict-operational-agents.sh").read_text()
+        canonical = "/usr/local/libexec/xmesh-tls-renew-hook"
+        self.assertEqual(str(tls.DEPLOY_HOOK), canonical)
+        self.assertIn(
+            'install -o root -g root -m 0700 "$ROOT/deploy/xmesh-tls-renew-hook.sh" '
+            + canonical,
+            installer,
+        )
+        self.assertNotIn("/usr/local/sbin/xmesh-tls-renew-hook", (ROOT / "deploy" / "xmesh-tls-provision.py").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
