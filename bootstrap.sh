@@ -8,12 +8,18 @@ export LC_ALL=C
 
 if [[ $EUID -ne 0 ]]; then
   command -v sudo >/dev/null 2>&1 || { echo "Run as root (sudo is unavailable)." >&2; exit 1; }
-  exec sudo --preserve-env=XMESH_NEXUS_RELEASE_REF bash "$0" "$@"
+  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF bash "$0" "$@"
 fi
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-  echo "Usage: bash bootstrap.sh https://panel.example.com NODE_ID [node-port]" >&2
+  echo "Usage: XMESH_NODE_RELEASE_REF=<40-hex-reviewed-sha> bash bootstrap.sh https://panel.example.com NODE_ID [node-port]" >&2
   exit 2
 fi
+
+RELEASE_REF="${XMESH_NODE_RELEASE_REF:-}"
+[[ "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "XMESH_NODE_RELEASE_REF must be the exact reviewed 40-hex XMesh-Node release SHA." >&2
+  exit 2
+}
 
 PANEL="${1%/}"
 NODE="$2"
@@ -62,17 +68,22 @@ docker compose version >/dev/null
 INSTALL_DIR=/opt/xmesh-node
 if [[ -d /root/XMesh-Node/.git ]]; then INSTALL_DIR=/root/XMesh-Node; fi
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-  git clone --depth 1 https://github.com/TriplexCorp/XMesh-Node.git "$INSTALL_DIR"
-else
-  git -C "$INSTALL_DIR" pull --ff-only
+  git clone --filter=blob:none --no-checkout https://github.com/TriplexCorp/XMesh-Node.git "$INSTALL_DIR"
 fi
+# A v6 product install never consumes moving main. Fetch and detach at the
+# exact release SHA supplied by the authenticated panel command.
+git -C "$INSTALL_DIR" fetch --force --depth 1 origin "$RELEASE_REF"
+git -C "$INSTALL_DIR" checkout --detach --force FETCH_HEAD
 NODE_RELEASE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
-[[ "$NODE_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid Node release SHA." >&2; exit 1; }
+[[ "$NODE_RELEASE_SHA" == "$RELEASE_REF" ]] || {
+  echo "Refusing unpinned Node source: checkout SHA does not match XMESH_NODE_RELEASE_REF." >&2
+  exit 1
+}
 [[ "$(tr -d '\r\n' < "$INSTALL_DIR/VERSION")" == "6.0.0" ]] || {
   echo "Fresh strict-PQ bootstrap requires XMesh Node v6.0.0." >&2; exit 1;
 }
 
-echo "XMesh Node revision: $NODE_RELEASE_SHA"
+echo "XMesh Node reviewed revision: $NODE_RELEASE_SHA"
 echo "Enforcing pre-activation fail-closed state..."
 # An upgrade/retry must never leave an older managed runtime serving while the
 # new v6 identity is not yet PQ-active. Unknown/unmanaged containers are not touched.
@@ -142,6 +153,7 @@ cat > /etc/xmesh-node/product.env <<EOF
 XMESH_API_URL=$PANEL
 XMESH_NODE_ID=$NODE
 XMESH_STRICT_PQ_REQUIRED=1
+XMESH_NODE_RELEASE_REF=$NODE_RELEASE_SHA
 EOF
 chmod 0600 /etc/xmesh-node/product.env
 
