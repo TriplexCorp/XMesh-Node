@@ -3,6 +3,8 @@
 
 Called after xmesh-policy-guard.py prepare verifies the signed desired policy.
 Never derive certificate names from Xray stderr or arbitrary profile file paths.
+Package installation is deliberately outside this hardened reconciliation worker:
+the bootstrap prepares certbot before the systemd sandbox is entered.
 """
 import hashlib
 import json
@@ -59,7 +61,7 @@ def main():
     ).returncode == 0:
         return 0
     # Persistent throttle prevents fast reconciliation timers from causing
-    # ACME rate-limit abuse, repeated apt transactions, or repeated DNS probing.
+    # ACME rate-limit abuse or repeated DNS probing.
     marker = STATE / ("acme-attempt-" + hashlib.sha256(domain.encode()).hexdigest()[:20])
     if marker.exists() and time.time() - marker.stat().st_mtime < COOLDOWN:
         return fail("certificate unavailable; automatic ACME attempt is in cooldown (30 minutes)")
@@ -70,17 +72,16 @@ def main():
             test.bind(("0.0.0.0", 80))
     except OSError:
         return fail("TCP/80 occupied; HTTP-01 needs a free port or an external certificate manager")
-    if not shutil.which("certbot"):
-        print("XMesh managed TLS: installing certbot for explicitly configured domain", file=sys.stderr)
-        try:
-            subprocess.run(["apt-get", "-o", "DPkg::Lock::Timeout=300", "install", "-y", "certbot"],
-                           check=True, timeout=300)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return fail("could not install certbot; check apt repositories")
+    # The service runs with ProtectSystem=strict, NoNewPrivileges and a bounded
+    # writable-path allowlist. It must never invoke apt/dpkg or mutate host
+    # packages. bootstrap.sh installs certbot before this worker is reachable.
+    certbot = shutil.which("certbot")
+    if not certbot:
+        return fail("certbot missing; rerun the reviewed XMesh Node bootstrap")
     print("XMesh managed TLS: requesting ACME certificate for configured node domain", file=sys.stderr)
     try:
         result = subprocess.run([
-            "certbot", "certonly", "--standalone", "--preferred-challenges", "http",
+            certbot, "certonly", "--standalone", "--preferred-challenges", "http",
             "--non-interactive", "--agree-tos", "--no-eff-email",
             "--email", email, "-d", domain, "--keep-until-expiring",
             "--deploy-hook", "/usr/local/sbin/xmesh-tls-renew-hook",
