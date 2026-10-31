@@ -4,6 +4,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 bootstrap = (root / "bootstrap.sh").read_text()
+standalone = (root / "install.sh").read_text()
 operational = (root / "deploy/install-v6-strict-operational-agents.sh").read_text()
 adapter = (root / "deploy/xmesh-strict-pq-curl.sh").read_text()
 guard = (root / "deploy/xmesh-policy-guard.py").read_text()
@@ -33,6 +34,18 @@ assert "xmesh-node-control.timer" in pre_gate
 # desired-config is reconciled by the strict operational installer.
 assert 'docker stop -t 5 xmesh-managed-xray' in bootstrap[router_at:ops_at]
 
+# Standalone install is also fail-closed. It installs the product client and
+# verifies/creates strict-PQ activation before the first managed router start.
+assert 'XMESH_API_URL' in standalone
+assert 'XMESH_NODE_ID' in standalone
+assert 'XMESH_ENROLLMENT_TOKEN_FILE' in standalone
+assert 'deploy/install-xsp-v2-production-agent.sh' in standalone
+standalone_verify = standalone.index('"$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null')
+standalone_up = standalone.index('docker compose up -d --no-build')
+assert standalone_verify < standalone_up
+assert 'docker stop -t 5 xmesh-node' in standalone[:standalone_verify]
+assert 'automaticClassicalFallback' in standalone[:standalone_up]
+
 # Operational workers must re-check the receipt before their first panel I/O.
 assert '"$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null' in operational
 first_sync = operational.index("systemctl start xmesh-xray-sync.service")
@@ -58,4 +71,4 @@ assert "curl --" not in adapter
 assert "http.Client" not in adapter
 
 assert 'choices=["prepare", "offline", "commit", "sample"]' in guard
-print("Fresh v6 strict-PQ fail-closed bootstrap and verified per-user metering contract: OK")
+print("Fresh v6 strict-PQ fail-closed bootstrap, standalone install and verified per-user metering contract: OK")
