@@ -69,6 +69,18 @@ class ProvisionTests(unittest.TestCase):
         )
         self.assertNotIn("/usr/local/sbin/xmesh-tls-renew-hook", (ROOT / "deploy" / "xmesh-tls-provision.py").read_text())
 
+    def test_certbot_mutable_state_stays_inside_reconciler_state_dir(self):
+        source = (ROOT / "deploy" / "xmesh-tls-provision.py").read_text()
+        installer = (ROOT / "deploy" / "install-v6-strict-operational-agents.sh").read_text()
+        self.assertIn('certbot_work = STATE / "certbot-work"', source)
+        self.assertIn('certbot_logs = STATE / "certbot-logs"', source)
+        self.assertIn('"--work-dir", str(certbot_work), "--logs-dir", str(certbot_logs)', source)
+        # Do not widen the systemd sandbox to generic host logging/work paths.
+        self.assertNotIn("/var/log/letsencrypt", installer)
+        self.assertNotIn("/var/lib/letsencrypt", installer)
+        self.assertIn("/var/lib/xmesh-xray-sync", installer)
+        self.assertIn("-/etc/letsencrypt", installer)
+
 
 if __name__ == "__main__":
     unittest.main()
