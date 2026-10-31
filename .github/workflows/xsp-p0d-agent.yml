@@ -66,9 +66,12 @@ jobs:
           ACTIVATION_VERSION: strict-pq-ci
         run: |
           set -euo pipefail
-          format_diff="$(gofmt -d .)"
-          if [[ -n "$format_diff" ]]; then
-            printf '%s\n' "$format_diff"
+          rm -f /tmp/xsp-gofmt.diff
+          if ! gofmt -d . | tee /tmp/xsp-gofmt.diff; then
+            echo 'gofmt could not parse Agent source' >&2
+            exit 1
+          fi
+          if [[ -s /tmp/xsp-gofmt.diff ]]; then
             echo 'gofmt changes are required in Agent source' >&2
             exit 1
           fi
