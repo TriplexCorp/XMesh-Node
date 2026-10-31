@@ -537,6 +537,14 @@ func validatePin(pin panelPin) ([]byte, []byte, error) {
 }
 
 func verifyPanelEnvelope(raw []byte, cfg productConfig, messageType, path, requestID string) (parsedEnvelope, error) {
+	return verifyPanelEnvelopeWithFreshness(raw, cfg, messageType, path, requestID, true)
+}
+
+func verifyDurablePanelEnvelope(raw []byte, cfg productConfig, messageType, path, requestID string) (parsedEnvelope, error) {
+	return verifyPanelEnvelopeWithFreshness(raw, cfg, messageType, path, requestID, false)
+}
+
+func verifyPanelEnvelopeWithFreshness(raw []byte, cfg productConfig, messageType, path, requestID string, requireFreshness bool) (parsedEnvelope, error) {
 	parsed, err := parseEnvelope(raw, messageType, path, 2)
 	if err != nil {
 		return parsedEnvelope{}, err
@@ -545,11 +553,15 @@ func verifyPanelEnvelope(raw []byte, cfg productConfig, messageType, path, reque
 	if err != nil {
 		return parsedEnvelope{}, err
 	}
-	now := time.Now().UnixMilli()
 	if parsed.Env.NodeID != cfg.NodeID || parsed.Env.RequestID != requestID || parsed.Env.IssuerID != cfg.PanelPin.IssuerID ||
-		parsed.Env.Ed25519KeyID != cfg.PanelPin.Ed25519KeyID || parsed.Env.MLDSA65KeyID != cfg.PanelPin.MLDSA65KeyID ||
-		parsed.Env.KeyEpoch != 1 || now > parsed.Env.ExpiresAtMS || parsed.Env.IssuedAtMS > now+120000 || now > parsed.Env.IssuedAtMS+120000 {
+		parsed.Env.Ed25519KeyID != cfg.PanelPin.Ed25519KeyID || parsed.Env.MLDSA65KeyID != cfg.PanelPin.MLDSA65KeyID || parsed.Env.KeyEpoch != 1 {
 		return parsedEnvelope{}, errors.New("panel response binding rejected")
+	}
+	if requireFreshness {
+		now := time.Now().UnixMilli()
+		if now > parsed.Env.ExpiresAtMS || parsed.Env.IssuedAtMS > now+120000 || now > parsed.Env.IssuedAtMS+120000 {
+			return parsedEnvelope{}, errors.New("panel response freshness rejected")
+		}
 	}
 	if !ed25519.Verify(edPublic, parsed.SigningInput, parsed.EdSig) {
 		return parsedEnvelope{}, errors.New("panel Ed25519 signature rejected")
@@ -949,7 +961,7 @@ func verifyActive(panel string, nodeID int64) error {
 	if active.ReceiptSHA256 != hex.EncodeToString(receiptHash[:]) {
 		return errors.New("strict-PQ receipt hash mismatch")
 	}
-	parsed, err := verifyPanelEnvelope(receiptRaw, cfg, "panel.product.activation-receipt", "/api/v2/product/activate", active.RequestID)
+	parsed, err := verifyDurablePanelEnvelope(receiptRaw, cfg, "panel.product.activation-receipt", "/api/v2/product/activate", active.RequestID)
 	if err != nil {
 		return err
 	}
@@ -957,8 +969,9 @@ func verifyActive(panel string, nodeID int64) error {
 	if err := json.Unmarshal(parsed.Payload, &payload); err != nil {
 		return err
 	}
-	if !payload.ProductionActivation || !payload.StrictPQEnabled || payload.AutomaticClassicalFallback || payload.NodeID != nodeID ||
-		payload.RequestBindingSHA256 != active.RequestBindingSHA256 {
+	if payload.Schema != "xmesh-v6-strict-pq-activation-receipt-1" || payload.KeyEpoch != int64(active.KeyEpoch) ||
+		!payload.ProductionActivation || !payload.StrictPQEnabled || payload.AutomaticClassicalFallback || payload.NodeID != nodeID ||
+		payload.RequestBindingSHA256 != active.RequestBindingSHA256 || payload.ActivatedAt != active.ActivatedAt {
 		return errors.New("strict-PQ durable receipt no longer verifies")
 	}
 	return nil
