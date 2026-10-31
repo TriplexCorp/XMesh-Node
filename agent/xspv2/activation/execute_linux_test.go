@@ -20,13 +20,14 @@ func validApproval(t *testing.T) (approvalDocument, []byte, time.Time, string, s
 	a.ReleaseCandidate.NodeRevision = revision
 	a.ReleaseCandidate.NexusImageSHA256 = "sha256:" + strings.Repeat("d", 64)
 	a.ReleaseCandidate.AgentArtifactSHA256 = artifact
-	a.Evidence.IndependentSecurityReviewAccepted = true
+	a.Evidence.AIAssistedSecurityReviewAccepted = true
 	a.Evidence.KVMVPSDurabilityQualificationAccepted = true
 	a.Evidence.ProviderStorageRiskAccepted = true
 	a.Evidence.FinalCanaryPassed = true
 	a.Evidence.RolloutPlanReviewed = true
-	a.Evidence.IndependentSecurityReviewResultSHA256 = strings.Repeat("1", 64)
+	a.Evidence.AIAssistedSecurityReviewResultSHA256 = strings.Repeat("1", 64)
 	a.Evidence.KVMVPSDurabilityResultSHA256 = strings.Repeat("2", 64)
+	a.Evidence.ProviderStorageRiskAcceptanceSHA256 = strings.Repeat("6", 64)
 	a.Evidence.FinalCanaryResultSHA256 = strings.Repeat("3", 64)
 	a.Evidence.RolloutPlanSHA256 = strings.Repeat("4", 64)
 	a.Evidence.RolloutPlanReviewSHA256 = strings.Repeat("5", 64)
@@ -72,5 +73,15 @@ func TestApprovalBindsArtifactNodeWindowAndNoFallback(t *testing.T) {
 	bad.TransportPolicy.ClassicalOnlyAllowed = true
 	if err := validateApproval(raw, bad, shaHex(raw), revision, artifact, 13, now); err == nil {
 		t.Fatal("classical fallback accepted")
+	}
+	bad = a
+	bad.Evidence.AIAssistedSecurityReviewAccepted = false
+	if err := validateApproval(raw, bad, shaHex(raw), revision, artifact, 13, now); err == nil {
+		t.Fatal("missing AI-assisted security review accepted")
+	}
+	bad = a
+	bad.Evidence.ProviderStorageRiskAcceptanceSHA256 = ""
+	if err := validateApproval(raw, bad, shaHex(raw), revision, artifact, 13, now); err == nil {
+		t.Fatal("missing provider-storage acceptance digest accepted")
 	}
 }
