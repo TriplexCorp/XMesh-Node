@@ -12,7 +12,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh
+      - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
+      - run: test "$(cat VERSION)" = "6.0.0"
       - run: python3 -m py_compile deploy/xmesh-policy-guard.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
@@ -26,3 +27,34 @@ jobs:
       - run: go build ./...
       - run: docker build --tag xmesh-node:ci .
       - run: docker run --rm -v "$PWD/config.example.json:/etc/xmesh-node/config.json:ro" xmesh-node:ci -check -config /etc/xmesh-node/config.json
+
+  postquantum-v6:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Build and verify v6 strict-PQ production Agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat VERSION)" = "6.0.0"
+          revision="$(git rev-parse HEAD)"
+          cd agent/xspv2
+          go test ./... -count=1
+          go build -trimpath -ldflags "-X main.version=control-v6.0.0 -X main.sourceRevision=$revision" \
+            -o /tmp/xmesh-agent-xspv2-activate ./cmd/xmesh-agent-xspv2-activate
+          identity="$(/tmp/xmesh-agent-xspv2-activate --identity)"
+          digest="$(sha256sum /tmp/xmesh-agent-xspv2-activate | awk '{print $1}')"
+          python3 - "$identity" "$revision" "$digest" <<'PY'
+          import json,sys
+          value=json.loads(sys.argv[1])
+          assert value == {
+              'version':'control-v6.0.0',
+              'sourceRevision':sys.argv[2],
+              'artifactSha256':sys.argv[3],
+          }, value
+          print(json.dumps(value,separators=(',',':')))
+          PY
