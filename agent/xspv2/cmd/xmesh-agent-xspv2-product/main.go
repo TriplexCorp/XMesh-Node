@@ -424,6 +424,7 @@ func checkUniqueJSONKeys(raw []byte) error {
 				if err := walk(depth + 1); err != nil {
 					return err
 				}
+			}
 			end, err := decoder.Token()
 			if err != nil || end != json.Delim(']') {
 				return errors.New("unbalanced JSON array")
