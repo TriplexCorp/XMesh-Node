@@ -66,7 +66,11 @@ jobs:
           ACTIVATION_VERSION: strict-pq-ci
         run: |
           set -euo pipefail
-          test -z "$(gofmt -d .)"
+          rm -f /tmp/xsp-gofmt.diff
+          (gofmt -d . | tee /tmp/xsp-gofmt.diff) || true
+
+          # Compile/test even when formatting drift exists so security CI never
+          # hides a real parser/type/test failure behind whitespace diagnostics.
           go test ./...
           go vet ./...
 
@@ -130,3 +134,8 @@ jobs:
           assert d['version']==os.environ['BUILD_VERSION']
           assert d['journal'].endswith('/cutover')
           PY
+
+          if [[ -s /tmp/xsp-gofmt.diff ]]; then
+            echo 'gofmt changes are required in Agent source' >&2
+            exit 1
+          fi
