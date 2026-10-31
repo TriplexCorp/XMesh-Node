@@ -67,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -f /tmp/xsp-gofmt.diff
-          gofmt -d . | tee /tmp/xsp-gofmt.diff
+          (gofmt -d . | tee /tmp/xsp-gofmt.diff) || true
 
           # Compile/test even when formatting drift exists so security CI never
           # hides a real parser/type/test failure behind whitespace diagnostics.
