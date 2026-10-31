@@ -14,9 +14,14 @@ if [[ ! -f config.json ]]; then
 fi
 if [[ ! -r config.json ]]; then echo 'config.json is not readable' >&2; exit 1; fi
 chmod 0644 config.json
+[[ -f VERSION && "$(tr -d '\r\n' < VERSION)" == "6.0.0" ]] || { echo 'XMesh Node v6 VERSION marker missing' >&2; exit 1; }
 # Host mode requires TCP/443 (and UDP/443 if configured) to be available.
 docker compose build
 docker compose run --rm --no-deps xmesh-node -check -config /etc/xmesh-node/config.json
-echo "Starting XMesh Node. Ensure host TCP/443 and UDP/443 are not occupied."
+echo "Starting XMesh Node v6.0.0 POSTQUANTUM. Ensure host TCP/443 and UDP/443 are not occupied."
 docker compose up -d --no-build
+revision="$(git rev-parse HEAD)"
+[[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid Node source revision' >&2; exit 1; }
+bash deploy/install-xsp-v2-production-agent.sh "$revision"
 docker compose ps
+echo "XMesh Node v6.0.0 POSTQUANTUM runtime installed."
