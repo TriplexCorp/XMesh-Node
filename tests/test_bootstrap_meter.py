@@ -45,6 +45,21 @@ assert 'subprocess.run(["apt-get"' not in tls_provision
 assert 'shutil.which("certbot")' in tls_provision
 assert "rerun the reviewed XMesh Node bootstrap" in tls_provision
 
+# xmesh-xray-sync keeps ProtectSystem=strict but must be able to atomically
+# replace the router's bind-mounted config in /opt/xmesh-node. The broader
+# metrics/control/meter units must not inherit this checkout write access.
+sync_unit = operational.split("cat > /etc/systemd/system/xmesh-xray-sync.service <<EOF", 1)[1].split("EOF", 1)[0]
+assert "ProtectSystem=strict" in sync_unit
+assert "ProtectHome=true" in sync_unit
+assert "ReadWritePaths=" in sync_unit and "/opt/xmesh-node" in sync_unit
+for marker in (
+    "cat > /etc/systemd/system/xmesh-node-metrics.service <<EOF",
+    "cat > /etc/systemd/system/xmesh-node-control.service <<EOF",
+    "cat > /etc/systemd/system/xmesh-node-user-meter.service <<'EOF'",
+):
+    unit = operational.split(marker, 1)[1].split("EOF", 1)[0]
+    assert "/opt/xmesh-node" not in unit
+
 # Standalone install is also fail-closed. It installs the product client and
 # verifies/creates strict-PQ activation before the first managed router start.
 assert 'XMESH_API_URL' in standalone
@@ -82,4 +97,4 @@ assert "curl --" not in adapter
 assert "http.Client" not in adapter
 
 assert 'choices=["prepare", "offline", "commit", "sample"]' in guard
-print("Fresh v6 strict-PQ fail-closed bootstrap, TLS sandbox boundary, standalone install and verified per-user metering contract: OK")
+print("Fresh v6 strict-PQ fail-closed bootstrap, TLS/router sandbox boundaries, standalone install and verified per-user metering contract: OK")
