@@ -95,19 +95,19 @@ type activeState struct {
 }
 
 type enrollRequest struct {
-	Token              string          `json:"token"`
-	NodeID             int64           `json:"nodeId"`
-	Purpose            string          `json:"purpose"`
-	KeyEpoch           uint64          `json:"keyEpoch"`
-	ChallengeHex       string          `json:"challengeHex"`
-	Ed25519KeyID       string          `json:"ed25519KeyId"`
-	MLDSA65KeyID       string          `json:"mldsa65KeyId"`
-	Ed25519PublicB64   string          `json:"ed25519PublicB64"`
-	MLDSA65PublicB64   string          `json:"mldsa65PublicB64"`
-	Ed25519SignatureB64 string         `json:"ed25519SignatureB64"`
-	MLDSA65SignatureB64 string         `json:"mldsa65SignatureB64"`
-	TLSPublicKeyB64    string          `json:"tlsPublicKeyB64"`
-	ReleaseIdentity    releaseIdentity `json:"releaseIdentity"`
+	Token                string          `json:"token"`
+	NodeID               int64           `json:"nodeId"`
+	Purpose              string          `json:"purpose"`
+	KeyEpoch             uint64          `json:"keyEpoch"`
+	ChallengeHex         string          `json:"challengeHex"`
+	Ed25519KeyID         string          `json:"ed25519KeyId"`
+	MLDSA65KeyID         string          `json:"mldsa65KeyId"`
+	Ed25519PublicB64     string          `json:"ed25519PublicB64"`
+	MLDSA65PublicB64     string          `json:"mldsa65PublicB64"`
+	Ed25519SignatureB64 string          `json:"ed25519SignatureB64"`
+	MLDSA65SignatureB64 string          `json:"mldsa65SignatureB64"`
+	TLSPublicKeyB64      string          `json:"tlsPublicKeyB64"`
+	ReleaseIdentity      releaseIdentity `json:"releaseIdentity"`
 }
 
 type enrollResponse struct {
@@ -168,11 +168,8 @@ type activationReceiptPayload struct {
 }
 
 type tunnelPayload struct {
-	Path      string `json:"path"`
-	BodyB64   string `json:"bodyB64"`
-	Timestamp int64  `json:"timestamp"`
-	Nonce     string `json:"nonce"`
-	Signature string `json:"signature"`
+	Path    string `json:"path"`
+	BodyB64 string `json:"bodyB64"`
 }
 
 type tunnelResponsePayload struct {
@@ -755,19 +752,19 @@ func bootstrap(panel string, nodeID int64, tokenPath string) error {
 		return err
 	}
 	request := enrollRequest{
-		Token:               token,
-		NodeID:              nodeID,
-		Purpose:             public.Purpose,
-		KeyEpoch:            public.KeyEpoch,
-		ChallengeHex:        challenge,
-		Ed25519KeyID:        public.EdKeyID,
-		MLDSA65KeyID:        public.PQKeyID,
-		Ed25519PublicB64:    b64.EncodeToString(public.EdPublic),
-		MLDSA65PublicB64:    b64.EncodeToString(public.PQPublic),
+		Token:                token,
+		NodeID:               nodeID,
+		Purpose:              public.Purpose,
+		KeyEpoch:             public.KeyEpoch,
+		ChallengeHex:         challenge,
+		Ed25519KeyID:         public.EdKeyID,
+		MLDSA65KeyID:         public.PQKeyID,
+		Ed25519PublicB64:     b64.EncodeToString(public.EdPublic),
+		MLDSA65PublicB64:     b64.EncodeToString(public.PQPublic),
 		Ed25519SignatureB64: proof.Ed25519SignatureB64,
 		MLDSA65SignatureB64: proof.MLDSA65SignatureB64,
-		TLSPublicKeyB64:     b64.EncodeToString(publicDER),
-		ReleaseIdentity:     id,
+		TLSPublicKeyB64:      b64.EncodeToString(publicDER),
+		ReleaseIdentity:      id,
 	}
 	requestRaw, err := json.Marshal(request)
 	if err != nil {
@@ -938,7 +935,6 @@ func verifyActive(panel string, nodeID int64) error {
 		!active.ProductionActivation || !active.StrictPQEnabled || active.AutomaticClassicalFallback || active.ReleaseIdentity != cfg.ReleaseIdentity {
 		return errors.New("strict-PQ active marker invalid")
 	}
-	// A receipt without the local PQ TLS credential is not an operational strict-PQ node.
 	if _, err := loadTLSKey(); err != nil {
 		return fmt.Errorf("strict-PQ client key unavailable: %w", err)
 	}
@@ -994,31 +990,7 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 	if err != nil {
 		return err
 	}
-	innerNonce, err := randomHex(16)
-	if err != nil {
-		return err
-	}
-	stamp := time.Now().Unix()
-	bodyDigest := sha256.Sum256(body)
-	innerCanonical := fmt.Sprintf(
-		"XMESH1\nPOST\n%s\n%d\n%d\n%s\n%s\n",
-		path,
-		cfg.NodeID,
-		stamp,
-		innerNonce,
-		hex.EncodeToString(bodyDigest[:]),
-	)
-	edSignature, _, err := keys.Sign([]byte(innerCanonical))
-	if err != nil {
-		return err
-	}
-	innerRaw, err := json.Marshal(tunnelPayload{
-		Path:      path,
-		BodyB64:   b64.EncodeToString(body),
-		Timestamp: stamp,
-		Nonce:     innerNonce,
-		Signature: hex.EncodeToString(edSignature),
-	})
+	innerRaw, err := json.Marshal(tunnelPayload{Path: path, BodyB64: b64.EncodeToString(body)})
 	if err != nil {
 		return err
 	}
