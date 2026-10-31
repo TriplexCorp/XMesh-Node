@@ -1,8 +1,13 @@
 package keyring
 
-// Experimental owner-approved XSP-v2 key possession proof.
-// Signed ONLY from locally protected key material, NEVER sent to the Nexus
-// production API. Must run against an explicitly isolated staging endpoint.
+// XSP-v2 owner-authorized dual-key possession proof primitives.
+//
+// Production v6 callers may use the initial-enrollment domain only when the
+// challenge is bound to an owner-issued, one-use, short-lived enrollment
+// authorization and the resulting public identity is subsequently activated
+// through the strict hybrid TLS product channel. This primitive does NOT by
+// itself authorize runtime operation, rotate keys, establish transport trust,
+// or assert strictPQEnabled=true.
 import (
  "crypto/ed25519"
  "crypto/mldsa"
@@ -58,7 +63,9 @@ func marshalProofInput(bundle PublicBundle,challenge []byte,domain string,from u
  return buf,nil
 }
 
-// EnrollmentSigningInput matches Rust initial enrollment verification bytes.
+// EnrollmentSigningInput is the protocol-stable initial enrollment domain.
+// Authorization/TTL/replay checks are intentionally enforced by the server,
+// not inferred from this signing primitive.
 func EnrollmentSigningInput(bundle PublicBundle,challenge []byte)([]byte,error){
  return marshalProofInput(bundle,challenge,"XSP2-KEY-ENROLL-V1",0)
 }
@@ -72,8 +79,8 @@ func RotationSigningInput(bundle PublicBundle,fromEpoch uint64,challenge []byte)
  return marshalProofInput(bundle,challenge,"XSP2-KEY-ROTATE-PREPARE-V1",fromEpoch)
 }
 
-// BuildEnrollmentProof refuses wrong epochs and uses BOTH private keys.
-// Proof is one-use on the backend, tied to owner-approved registered keys.
+// BuildEnrollmentProof refuses wrong epochs and uses BOTH private keys. The
+// backend must consume the corresponding authorization exactly once.
 func BuildEnrollmentProof(keys *VolatileKeys,bundle PublicBundle,challengeHex string)(EnrollmentProof,error){
  var zero EnrollmentProof
  if len(challengeHex)!=64{return zero,errors.New("invalid enrollment challenge size")}
@@ -88,6 +95,9 @@ func BuildEnrollmentProof(keys *VolatileKeys,bundle PublicBundle,challengeHex st
   MLDSA65SignatureB64:base64.StdEncoding.EncodeToString(pq),
  },nil
 }
+
+// ProveFromEncryptedVault opens the protected local identity and produces the
+// bounded dual-signature possession proof. It does not expose private keys.
 func ProveFromEncryptedVault(vault,master,challengeHex string)(EnrollmentProof,error){
  var zero EnrollmentProof
  keys,bundle,err:=Open(vault,master);if err!=nil{return zero,err}
