@@ -263,14 +263,34 @@ systemctl daemon-reload
 
 # Re-check the exact durable receipt immediately before first operational I/O.
 "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null
-# First reconciliation is synchronous. If there is no profile yet it exits
-# cleanly while leaving Xray stopped; any auth/transport/policy failure aborts.
-systemctl start xmesh-xray-sync.service
-# First metrics run establishes a baseline and performs no unsafe fallback.
+
+# Persist the retry topology before the first reconciliation. A transient
+# desired-config/TLS/router failure must never strand an enrolled v6 node with
+# unit files installed but its sync/heartbeat/metrics timers disabled.
+OPERATIONAL_TIMERS=(
+  xmesh-xray-sync.timer
+  xmesh-node-metrics.timer
+  xmesh-node-control.timer
+  xmesh-node-user-meter.timer
+)
+systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null
+
+# Heartbeat/metrics are independent of whether the very first Xray policy can
+# be applied. Start them now so Nexus can keep observing the enrolled node.
 systemctl start xmesh-node-metrics.service || true
 systemctl start xmesh-node-control.service || true
 
-systemctl enable --now xmesh-xray-sync.timer xmesh-node-metrics.timer xmesh-node-control.timer xmesh-node-user-meter.timer
+# First reconciliation is synchronous. If there is no profile yet it exits
+# cleanly while leaving Xray stopped. On any other failure arm the timers before
+# returning non-zero: the node stays fail-closed but can self-heal on the next
+# authenticated strict-PQ poll after the operator fixes the profile/TLS/router.
+if ! systemctl start xmesh-xray-sync.service; then
+  systemctl start "${OPERATIONAL_TIMERS[@]}" || true
+  echo "Initial Xray reconciliation failed; strict-PQ operational timers remain active and will retry automatically." >&2
+  exit 1
+fi
+
+systemctl start "${OPERATIONAL_TIMERS[@]}"
 
 echo "XMesh v6 operational agents installed behind strict-PQ-only transport."
 echo "Direct operational HTTPS is not configured; all panel POSTs traverse the product tunnel."
