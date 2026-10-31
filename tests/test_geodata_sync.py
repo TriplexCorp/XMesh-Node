@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,23 @@ class GeoDataWorkerTests(unittest.TestCase):
                     "https://user:pass@example.org/a.dat"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 geo.public_destination(url)
+
+    def test_fetch_bypasses_strict_pq_path_curl_adapter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "geosite.dat"
+
+            def run(command, **_kwargs):
+                self.assertEqual(command[0], "/usr/bin/curl")
+                self.assertIn("--noproxy", command)
+                output = Path(command[command.index("--output") + 1])
+                output.write_bytes(b"verified-geodata-payload")
+                return SimpleNamespace(returncode=0, stdout="200", stderr="")
+
+            with patch.object(geo, "public_destination", return_value=("example.org", "93.184.216.34")), \
+                 patch.object(geo.subprocess, "run", side_effect=run):
+                geo.fetch_url("https://example.org/geosite.dat", target)
+
+            self.assertEqual(target.read_bytes(), b"verified-geodata-payload")
 
     def test_update_is_transactional_and_reports_hashes(self):
         with tempfile.TemporaryDirectory() as temp:
