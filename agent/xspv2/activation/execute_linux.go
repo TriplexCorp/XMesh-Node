@@ -78,8 +78,8 @@ type ExpectedPermit struct {
 }
 
 type approvalDocument struct {
-	Schema          string `json:"schema"`
-	DeploymentClass string `json:"deploymentClass"`
+	Schema           string `json:"schema"`
+	DeploymentClass  string `json:"deploymentClass"`
 	ReleaseCandidate struct {
 		NexusRuntimeRevision string `json:"nexusRuntimeRevision"`
 		NodeRevision         string `json:"nodeRevision"`
@@ -87,8 +87,8 @@ type approvalDocument struct {
 		AgentArtifactSHA256  string `json:"agentArtifactSha256"`
 	} `json:"releaseCandidate"`
 	Evidence struct {
-		AIAssistedSecurityReviewAccepted     bool   `json:"aiAssistedSecurityReviewAccepted"`
-		AIAssistedSecurityReviewResultSHA256 string `json:"aiAssistedSecurityReviewResultSha256"`
+		AIAssistedSecurityReviewAccepted      bool   `json:"aiAssistedSecurityReviewAccepted"`
+		AIAssistedSecurityReviewResultSHA256  string `json:"aiAssistedSecurityReviewResultSha256"`
 		KVMVPSDurabilityQualificationAccepted bool   `json:"kvmVpsDurabilityQualificationAccepted"`
 		KVMVPSDurabilityResultSHA256          string `json:"kvmVpsDurabilityResultSha256"`
 		ProviderStorageRiskAccepted           bool   `json:"providerStorageRiskAccepted"`
@@ -114,7 +114,7 @@ type approvalDocument struct {
 		ClassicalOnlyAllowed      bool     `json:"classicalOnlyAllowed"`
 	} `json:"transportPolicy"`
 	Decision struct {
-		StrictPQAction      string `json:"strictPqAction"`
+		StrictPQAction     string `json:"strictPqAction"`
 		LegacyXMESH1Action string `json:"legacyXMESH1Action"`
 	} `json:"decision"`
 	Approval struct {
