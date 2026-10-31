@@ -1,0 +1,22 @@
+name: XSP-v2 Activation Format Diagnostic
+on:
+  pull_request:
+    paths:
+      - "agent/xspv2/activation/**"
+      - ".github/workflows/xsp-activation-gofmt-diagnostic.yml"
+permissions:
+  contents: read
+jobs:
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Print exact gofmt diff
+        run: |
+          set -o pipefail
+          gofmt -d agent/xspv2/activation | tee /tmp/gofmt.diff
+          test ! -s /tmp/gofmt.diff
