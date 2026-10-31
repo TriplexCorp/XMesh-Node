@@ -49,7 +49,9 @@ command -v systemctl >/dev/null 2>&1 || { echo "systemd is required." >&2; exit 
 
 export DEBIAN_FRONTEND=noninteractive
 apt_get update
-apt_get install -y ca-certificates curl gnupg git python3 openssl coreutils util-linux
+# Certbot is a bootstrap dependency, not a reconciliation dependency. The
+# hardened xmesh-xray-sync.service cannot and must not invoke apt/dpkg itself.
+apt_get install -y ca-certificates curl gnupg git python3 openssl coreutils util-linux certbot
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   install -m 0755 -d /etc/apt/keyrings
   curl --proto '=https' --tlsv1.2 -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
