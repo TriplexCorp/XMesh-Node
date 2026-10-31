@@ -1,287 +1,406 @@
 # XMesh Node
 
-## XSP-v2 PQ-only — статус после Nexus #55 / Node #26 (27.10.2026)
+> Управляемая edge-нода для XMesh Nexus: TCP/TLS routing, UDP forwarding, Xray reconciliation, telemetry и production-capable XSP/2 strict-PQ control plane без автоматического classical fallback.
 
-**Проверенные ветки `main`:** Node `d2f916bfef36f7093de0cf0d57744f8f40c423cb` ([PR #26](https://github.com/TriplexCorp/XMesh-Node/pull/26)); Nexus `7507437102df59c3bbd4682170c1b81300fdd565` ([PR #55](https://github.com/TriplexCorp/XMesh-Nexus/pull/55)). Post-merge Node [Go Crypto CI #40531422433](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40531422433) и [Node CI #40531422490](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40531422490) — **success**; Nexus [Backend #40536860094](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40536860094) и [OpenSSL 3.5 Crypto #40536860140](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40536860140) — **success** на соответствующих SHA. Это статус исходников и CI, **не deployment**.
+![Version](https://img.shields.io/badge/version-6.0.0-111827)
+![Control plane](https://img.shields.io/badge/control%20plane-strict--PQ-0f766e)
+![Fallback](https://img.shields.io/badge/classical%20fallback-disabled-b91c1c)
 
-- **Что уже реализовано в изолированном Go 1.27 staging:** обязательный `tlsprobe.DialStrict` ([#23](https://github.com/TriplexCorp/XMesh-Node/pull/23)) — TLS 1.3 с **реально согласованным `X25519MLKEM768`** и проверенным сертификатом; Ed25519 **И** ML-DSA-65 Nexus commit receipt verifier ([#24](https://github.com/TriplexCorp/XMesh-Node/pull/24)); приватный fsynced immutable receipt journal ([#25](https://github.com/TriplexCorp/XMesh-Node/pull/25)); HTTPS-клиент ([#26](https://github.com/TriplexCorp/XMesh-Node/pull/26)) для отправки **точного сохранённого dual-signed ACK** и проверки/сохранения подписанного Nexus receipt. Реальный HTTP сценарий проверен **на локальном TLS test server**, не на Nexus API.
-- **Что готово на Nexus staging:** реальный PostgreSQL ACK/epoch commit/readback, канонический Ed25519 **AND** ML-DSA-65 receipt ([#54](https://github.com/TriplexCorp/XMesh-Nexus/pull/54)), и immutable signed receipt outbox с миграцией `0105` ([#55](https://github.com/TriplexCorp/XMesh-Nexus/pull/55)), сохраняющий те же подписанные байты при retry.
-- **Следующий P0:** защищённый Nexus `panel_response` signer/доверенные pins/owner approval; Node-authenticated Nexus `POST /api/v2/node/keys/rotation/ack` и полноценный PQ-only TLS ingress; затем интеграция кода в **основной Agent** и настоящий двусторонний E2E. Серверный HTTP handler и защищённый signer пока **отсутствуют**, Agent Go 1.23 **не использует** изолированный Go 1.27 модуль.
-- **Никакого downgrade:** будущий control-plane соединяется только при TLS 1.3 `X25519MLKEM768` **И** двойных подписях Ed25519 + ML-DSA-65; у пользователя не будет варианта выбрать классический режим. [Единая PQ-only политика](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_PQ_ONLY_SECURITY_POLICY.md). Пользовательский VPN data-plane отдельно обслуживает Xray.
+## Текущий статус — 31 октября 2026
 
-_Старые staging-снимки ниже сохранены как история; устаревшие формулировки «ещё нет receipt/outbox» не отражают последние PR. См. [актуальный Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md) и [handoff](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_NEW_CHAT_HANDOFF.md)._
+XMesh Node `v6.0.0` содержит рабочий strict-PQ managed path для свежего подключения из XMesh Nexus. Bootstrap работает **fail-closed**: router, Xray, metrics, control и reconciliation не запускаются, пока локально не подтверждён durable activation receipt.
 
-**Новый staging-этап XSP-v2 (PQ-only сетевой ACK → receipt):** изолированный Go 1.27 модуль `security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go` отправляет **точный ранее сохранённый и перепроверенный dual-signed ACK** через `tlsprobe.DialStrict` (TLS 1.3, только `X25519MLKEM768`, проверенная идентичность Nexus) на контрактный `POST /api/v2/node/keys/rotation/ack`. Ответ считается успешным **только после проверки Ed25519 И ML-DSA-65 подписей Nexus и fsync receipt journal**. Нет редиректов, прокси, классического TLS fallback, принятия HTTP 200/204 без подписанной квитанции. Проверяется тестовым HTTPS-сервером в CI. **Настоящий Nexus HTTP handler для этого маршрута ещё не подключён; это не работающая интеграция с production Go 1.23 Agent.** Дальше — авторизованный Nexus route с защищённым signer/outbox и end-to-end тест на отдельной установке.
+Проверенный production bootstrap release:
 
-**Новое staging-звено для будущего обновления Agent:** Linux Go 1.27 `cutover/commit_receipt_journal_linux.go` принимает **только дважды проверенный Nexus commit receipt**, жёстко связывает его с точным ранее сохранённым подписанным ACK, permit, epoch и pin `panel_response`, затем сохраняет исходные байты в приватном `0600` журнале с `fsync` файла/каталога и защитой от конкурентных/конфликтующих retry. При повторной загрузке все подписи проверяются заново. **Никаких сетевых вызовов, переключения vault, удаления старых ключей или production Agent Go 1.23**; работа против отката всего диска и полноценный защищённый rollout ещё нужны.
-
-**Экспериментальный Node verifier receipt V1:** Go 1.27 `security/xspv2/poc-go/cutover/receipt.go` проверяет **обе** подписи Nexus по закреплённым `panel_response` ключам и сравнивает квитанцию с исходным локально сохранённым permit, точными подписанными байтами ACK, nonce и epoch. Поддельная или неполная квитанция отклоняется. Это пока **не запущенный production Go Agent** и не разрешение удалять старые ключи. [Контракт Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_SIGNED_COMMIT_RECEIPT.md).
-
-## Единственный режим будущего Node↔Nexus: постквантовый, без fallback
-
-Для **будущего рабочего XSP-v2 Agent** пользователь не выбирает режим безопасности: нужны **TLS 1.3 + фактически согласованный `X25519MLKEM768` с проверенным сервером** и **Ed25519 И ML-DSA-65** для управляющих сообщений. Не выполнено хотя бы одно требование — **Node не устанавливает управляющее соединение** и не пробует `XMESH1`/Ed25519-only/X25519-only. Нет обходных флагов или опции «продолжить небезопасно». Изолированная Go 1.27 реализация `tlsprobe.DialStrict` уже возвращает подключение только после строгой TLS-проверки; это **ещё не рабочий Go 1.23 Agent**. Существующая legacy-нода продолжает работу только до отдельного согласованного перехода, не как «второй вариант» продукта. [Нормативная PQ-only политика Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_PQ_ONLY_SECURITY_POLICY.md).
-
-## Продолжение в новом диалоге — читай сначала (27.10.2026)
-
-**Перед новой разработкой XSP-v2 открыть [Nexus: актуальный handoff и следующий P0](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_NEW_CHAT_HANDOFF.md), [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md), затем проверить свежий `main`, открытые PR и CI двух репозиториев.** Там находится общий план, статусы всех merge, проверенные CI по SHA и задачи для безопасного окончания post-quantum control plane.
-
-**Node `main` уже содержит экспериментальную Go 1.27 криптографию и state gates:** [#13/#14](https://github.com/TriplexCorp/XMesh-Node/pull/14) — dual Ed25519 + ML-DSA-65 signed Nexus permit / Node applied ACK; [#15/#16](https://github.com/TriplexCorp/XMesh-Node/pull/16) — approved candidate digest и отпечатки старого/нового public keyset; [#17](https://github.com/TriplexCorp/XMesh-Node/pull/17) — fsynced permit journal; [#18](https://github.com/TriplexCorp/XMesh-Node/pull/18) — fsynced dual-signed ACK journal; [#19](https://github.com/TriplexCorp/XMesh-Node/pull/19) — подтверждение реально активного encrypted vault, epoch floor, previous/next ciphertext и lifecycle lock; [#20](https://github.com/TriplexCorp/XMesh-Node/pull/20) — CI inventory guard. Эти PR слиты в `main`.
-
-**Актуальный статус XSP-v2 (27.10.2026):** Nexus `main` `7507437102df59c3bbd4682170c1b81300fdd565` ([PR #55](https://github.com/TriplexCorp/XMesh-Nexus/pull/55), merged), Node `main` до этой README-правки `d2f916bfef36f7093de0cf0d57744f8f40c423cb` ([PR #26](https://github.com/TriplexCorp/XMesh-Node/pull/26), merged). Nexus: dual-signed Ed25519 + ML-DSA-65 permit/ACK, атомарный commit, readback, **Nexus signed commit receipt [#54](https://github.com/TriplexCorp/XMesh-Nexus/pull/54)** и **неизменяемый PostgreSQL outbox `0105` [#55](https://github.com/TriplexCorp/XMesh-Nexus/pull/55)**. Node: verifier receipt [#24](https://github.com/TriplexCorp/XMesh-Node/pull/24), fsynced receipt journal [#25](https://github.com/TriplexCorp/XMesh-Node/pull/25), **PQ-only TLS 1.3 `X25519MLKEM768` HTTP-клиент [#26](https://github.com/TriplexCorp/XMesh-Node/pull/26)** с негативными тестами, без fallback. [Nexus Backend #40536860094](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40536860094) и [OpenSSL PQ Crypto #40536860140](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40536860140), [Node CI #40531422490](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40531422490) и [Go PQ Crypto #40531422433](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40531422433) — **post-merge success на указанных SHA**.
-
-**Следующий P0:** защищённый `panel_response` signer и строго авторизованный Nexus `POST /api/v2/node/keys/rotation/ack` через проверенный **PQ-only ingress**. Пока это **не** работающая сквозная связь с настоящим Nexus API и не обновлённый основной Agent: Go 1.27 модуль остаётся исследовательским, рабочая цепочка требует последующей интеграции и E2E проверки. Не считать HTTP status или обычный TLS доказательством PQ-защиты; нет двух подписей/ML-KEM/доверия — нет соединения.
-
-_Следующие исторические разделы о `prepare/prove` показывают тогдашний этап; «ACK отсутствует» там означает, что он ещё не существовал **на тот момент**, а не то, что в нынешнем `main` нет staging ACK verifier/journal._
-
-**Управляемая VPN-нода для XMesh Nexus:** Docker-маршрутизатор TCP/TLS ClientHello (SNI/ALPN), настраиваемый UDP-forwarder, подписанный heartbeat и агенты, которые синхронизируют и применяют конфигурацию Xray с панели. Нода устанавливается автоматически из Nexus или отдельно как самостоятельный Docker-router.
-
-## Основной способ: автоматическое подключение из Nexus
-
-Для управляемой ноды **не нужно вручную устанавливать Docker, Compose, Go, Xray-контрольный агент или метрики**. В панели **XMesh Nexus → Узлы → Подключить ноду и метрики** создайте узел и скопируйте bootstrap-команду **без токена**. Запустите её на целевой VPS с Ubuntu, root/sudo и systemd. Одноразовый токен скопируйте отдельно и вставьте по защищённому запросу установщика (срок действия — 10 минут).
-
-`bootstrap.sh` автоматически подготавливает Docker Engine/Compose и зависимости, развёртывает репозиторий, проверяет `config.json` и ID ноды, создаёт/сохраняет Ed25519-ключ, регистрирует **только публичный ключ**, запускает Docker-router, метрики и таймеры управления и синхронизации Xray. **Профиль XRAY STUDIO можно назначить позже** — до назначения нода находится в состоянии `awaiting_profile`, без фиктивного Xray-конфига. [Шаги подключения и проверки](#быстрое-подключение-из-xmesh-nexus-docker--метрики).
-
-**Отдельный `bash install.sh` в этом репозитории — самостоятельная установка Docker-router:** в отличие от управляемого bootstrap, он **не устанавливает Docker**, а требует уже имеющийся Engine/Compose и настроенный `config.json`. Не путайте эти два сценария. Nginx/HTTPS **панели Nexus** автоматически настраивает [установщик панели](https://github.com/TriplexCorp/XMesh-Nexus#установка-панели), а Node не заменяет его конфигурацию.
-
-**Восстановление после ошибки подключения:** обычный `XMESH1`/Ed25519 bootstrap при конфликте public key выдаёт **HTTP 409**. После обновления Nexus владелец может явно одобрить legacy переподключение через одноразовый recovery-token; новая подпись проверяется до изменения доверенного ключа. [Подробные шаги ниже](#быстрое-подключение-из-xmesh-nexus-docker--метрики). Это не имеет отношения к experimental XSP-v2.
-
-## Устранение «Проверка профиля не установлена» (27 октября 2026)
-
-Если карточка Nexus показывает **Xray запущен**, **Agent активен**, но «Проверка профиля не установлена», это означает `profileCheck=helper_missing` в подписанном heartbeat управляющего агента: на VPS отсутствует файл `/usr/local/libexec/xmesh-profile-attest.py`. Это **не** подтверждение неисправности XRAY STUDIO-профиля. Исторический `bootstrap.sh` устанавливал policy guard и Xray sync, но пропускал attestation helper. Теперь управляемый bootstrap устанавливает и проверяет этот модуль **до** первого Xray sync, используя зафиксированную ревизию Node.
-
-**На уже подключённой ноде не нужно заменять Ed25519-ключ или переустанавливать Docker.** Обновите панель Nexus, затем нажмите в карточке **«Обновить Agent»** и дождитесь подтверждения новой версии и следующего подписанного heartbeat. Штатный обновляющий скрипт Nexus загружает `xmesh-profile-attest.py`, проверяет Python-синтаксис, ставит файл атомарно и перезапускает нужные таймеры. Новый heartbeat может сообщить `verified` только после локальной криптографической проверки подписи политики, digest активного JSON и container mount. Для дополнительной диагностики на самой VPS: `sudo ls -l /usr/local/libexec/xmesh-profile-attest.py`, `sudo python3 /usr/local/libexec/xmesh-profile-attest.py --json`, `sudo journalctl -u xmesh-node-control.service -n 40 --no-pager`. Результат `policy_invalid`, `active_config_mismatch` и другие ошибки требуют отдельной диагностики — не обходите проверку подписи.
-
-### Исторический staging-этап XSP-v2: owner prepare → proof (полный cutover всё ещё не развернут)
-
-После [Node PR #10](https://github.com/TriplexCorp/XMesh-Node/pull/10) `keytool prove-prepared` создаёт **отдельную** dual-signature подпись Ed25519 + ML-DSA-65 над доменом `XSP2-KEY-ROTATE-PREPARE-V1`, связанным с `nodeId`, `fromEpoch`/`keyEpoch`, challenge и обеими новыми public key IDs. [Nexus PR #30](https://github.com/TriplexCorp/XMesh-Nexus/pull/30) в *feature-gated staging* регистрирует владельцем одобренную **публичную** pending-пару в migration `0102` и проверяет обе подписи. См. [контракт staging-операций](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_STAGING_ROTATION_PREPARE.md).
-
-Ответ Nexus `preparedProofVerified: true` вместе с `cutoverAuthorized: false` **не является подписанным разрешением активировать** `keytool activate-rotation`, отзыв старой пары либо повышением suite floor. Производственный агент Go 1.23 и bootstrap **не используют** исследовательские ключи. После этого исторического этапа в `main` появились signing/verification primitives, журналы Node и атомарный staging ACK CAS helper Nexus [#46](https://github.com/TriplexCorp/XMesh-Nexus/pull/46). **После этого исторического рубежа в Nexus уже слиты SQL fault-тесты #48, настоящие подписанные Rust→DB тесты #49 и внутренний readback #50. Следующий P0 — канонический dual-signed Nexus commit receipt, durable outbox и его отдельная проверка на Node; затем protected signer и e2e recovery.** Тестовая VPS и независимый security review обязательны.
-
-## XSP-v2 — P0: post-quantum security в разработке (27 октября 2026)
-
-**Текущий управляемый Node (Go 1.23) по-прежнему работает по `XMESH1`/Ed25519; `strict-pq` не включён.** Вся описанная ниже реализация XSP-v2 находится в **отдельном Go 1.27.3 staging/PoC-модуле** `security/xspv2/poc-go` и экспериментальном Rust API Nexus; штатный `bootstrap.sh` не включает эти механизмы.
-
-| Этап | Реализовано в test-only/staging | Открытые production-задачи |
-| --- | --- | --- |
-| **Wire и crypto** | Общие [wire-векторы](docs/XSP_V2_WIRE_SPEC.md), строгий декодер `envelope` (результат **Untrusted**), Ed25519 **AND** ML-DSA-65 подписи и независимая Rust ↔ Go проверка | Freeze протокола, FIPS 204 KAT, fuzz и security review |
-| **Защита приватных ключей** | AES-256-GCM vault `keyring`, отдельный wrapping key, права `0600/0700`, локальная staging-двухфазная ротация `prepare/activate/recover` с сохранением прежнего sealed keyset; [инструкция](docs/XSP_V2_TWO_PHASE_VAULT_STAGING.md) | Production KMS/backup, защищённое восстановление и двухфазная смена ключей |
-| **Регистрация по одобрению владельца** | `keytool prove` подписывает 32-байтный challenge **обоими приватными ключами**; Nexus staging API принимает только заранее одобренные владельцем публичные ключи/следующую эпоху, проверяет обе подписи, срок **10 минут** и одноразовость | UI и защищённый канал, независимое противодействие rollback, canary-нодa |
-| **Сетевой протокол и TLS** | В Nexus staging heartbeat проверяет обе подписи и уникальный nonce, возвращая только **неподписанный 204**; Go/OpenSSL и изолированный Nginx CI подтверждают TLS 1.3/`X25519MLKEM768`, проверку имени сервера/CA и отказ от downgrade | Подписанные ответы и команды, полноценный node-only ingress с реальным сертификатом и проверка TLS на отдельной VPS |
-
-**Текущие подтверждённые CI (27 октября 2026, по конкретным SHA):** [Node `main` `4714307`: Node CI #40455937718 — success](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40455937718), [Go Crypto #40455937695 — success](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40455937695); [Nexus PR #30 `fb334b5`: полный Backend CI #40456461465 — success](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40456461465) с PostgreSQL migration `0102`, [Rust/OpenSSL Crypto #40456461449 — success](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40456461449), включая реальные подготовленные Go→Rust подписи. Подтверждены staging-код и лабораторная совместимость, **не** live VPS и не подписанный cutover/ACK. [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
-
-**Правильный путь для управляемой Node остаётся прежним:** установить ноду из панели (**Узлы → Подключить ноду и метрики**); Docker/Compose и агенты готовит автоматический bootstrap. Не запускайте `keytool` и не заменяйте production-ключи ноды ради PoC. Для экспериментальной схемы понадобятся отдельная тестовая VPS и подтверждение владельца.
-
-Документация: [регистрация и ротация двойных ключей](docs/XSP_V2_OWNER_KEY_ENROLLMENT.md) · [стендовый API и vault](docs/XSP_V2_EXPERIMENTAL_GATEWAY.md) · [двухфазный staging vault](docs/XSP_V2_TWO_PHASE_VAULT_STAGING.md) · [TLS-probe](docs/XSP_V2_TLS_PROBE.md) · [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
-
-## Подписанная офлайн-политика и Hysteria 2
-
-`xmesh-policy-guard.py` проверяет подписанный профиль Xray и сопоставляет
-`policy.users` с фактически созданными пользователями протокола:
-VLESS использует `settings.clients[].id`, Hysteria2 — `settings.users[].auth`,
-другие поддерживаемые протоколы используют свой тип учётных данных.
-Сопоставление по имени `xmesh-u<ID>--<tag>` связывает учётную запись
-с ID пользователя панели; для паролей SS2022 используется отдельный PSK,
-а не UUID. Проверка не разрешает дополнительные учётные записи и не
-отключает Ed25519, проверку digest или локальные ограничения трафика.
-Ранее VLESS-only проверка выдавала `Signed policy and VLESS clients differ`,
-поэтому Hysteria не доходила до проверки Xray и маршрутизатора.
-
-Для диагностики используйте `journalctl -u xmesh-xray-sync.service -n 70 --no-pager`.
-Пока подпись, состав пользователей и конфигурация не согласованы, предыдущая
-рабочая конфигурация Xray намеренно сохраняется.
-
-## Обновление управляемой ноды до control-v5.1.3
-
-После выпуска **обоих репозиториев** (XMesh-Node и XMesh Nexus) установите обновление
-управляющего агента **control-v5.1.3** из обновлённой панели Nexus: **Узлы → Обновить Agent**. Релиз исправляет установку `xmesh-profile-attest.py`, необходимого для честного `profileCheck`, не заменяя существующие ключи Ed25519 или профиль Xray.
-В версии исправлена отправка независимого состояния маршрутизатора и Xray,
-сохранена проверка подписанных профилей, включая оба транспорта, и закрыты
-циклические TCP/UDP-маршруты. Автоматическое обновление агента также
-подтягивает актуальный XMesh-Node и офлайн-проверяющий модуль.
-
-Для диагностики на VPS: `systemctl status xmesh-node-control.timer`,
-`journalctl -u xmesh-node-agent-upgrade.service -n 70 --no-pager`,
-`docker ps --filter name=xmesh-node`, `journalctl -u xmesh-xray-sync.service -n 60 --no-pager`.
-Версия после обновления проверяется командой
-`grep '^AGENT_VERSION=' /usr/local/sbin/xmesh-node-control`.
-Если обновление через панель недоступно, на уже установленной ноде можно
-выполнить штатный `sudo /usr/local/sbin/xmesh-update-agent` и снова проверить
-версию и состояние служб. Не перезаписывайте приватный ключ ноды.
-
-При первом подключении с помощью `bootstrap.sh` heartbeat маршрутизатора
-больше не дублирует heartbeat управляющего агента. В старых конфигурациях
-маршрутизатора могут сохраняться поля `panel_url` / `node_id`, но новый
-Nexus игнорирует такой устаревший heartbeat, не затирая статус агента.
-
-### Реальная приёмка «Польша-2» — VLESS/XHTTP/H3 (27 октября 2026)
-
-На Node 13 оператор подтвердил `control-v5.1.3`, `status=verified` в локальной attestation и совпадение `appliedRevision=desiredRevision` в Nexus (`17fe9dee…dcf8d6bfecf`). Фактический профиль — **VLESS + XHTTP + TLS + ALPN `h3`**, не Hysteria2. Xray слушает UDP `127.0.0.1:12431`, XMesh-Node — внешний UDP/443 и направляет его через `udp_backend=127.0.0.1:12431`. Значение `default_tcp=127.0.0.1:12431` существует в edge-конфигурации, но Xray TCP listener для H3-only не подтверждён: это не доказательство работы TCP-транспорта.
-
-Оператор подтвердил реальное подключение клиента через мобильный интернет и работу после штатного `docker restart` Xray и XMesh-Node. Оба контейнера восстановились с `restart=unless-stopped`, локальная attestation осталась `verified`, UDP-listeners сохранились. TLS Lets Encrypt был `valid` до 2027-01-25 и `autoRenew=true`; фактическое продление ещё не проверялось. Операционная приёмка **не** заменяет испытания cold boot, аварийного восстановления/backup-restore, HTTP 409 re-enrollment на отдельной тестовой Node или production XSP-v2. См. [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
-
-## VLESS + Hysteria2 на одном публичном 443
-
-Управляемый профиль XRAY STUDIO может содержать **один TCP-прокси inbound и один Hysteria2 inbound** (порядок не важен). Nexus выдаёт им два локальных порта: `xrayLocalPort` и следующий за ним. XMesh-Node сохраняет раздельные `default_tcp` и `udp_backend`; публичный TCP и UDP могут использовать одинаковый номер порта. Пример при `xrayLocalPort=5000` и порядке VLESS → Hysteria2: TCP/443 → `127.0.0.1:5000`, UDP/443 → `127.0.0.1:5001`.
-
-Для XHTTP в TCP-профиле используйте `h2`/`http/1.1`, **без `h3`**: разделять несколько QUIC-бэкендов один UDP-forwarder не умеет. Схема не поддерживает произвольные три и более пользовательских inbound. Сохранены Ed25519-проверка конфигурации, offline-policy и блокировки пользователей обоих протоколов. Требуется обновление и панели, и XMesh-Node, затем реальный тест на VPS. Перед миграцией сохраните конфиги и проверьте оба локальных порта, сертификат и firewall UDP.
-
-## Hysteria 2: автоматическое UDP-проксирование
-
-При синхронизации профиля Xray с одним inbound протокола `hysteria` агент определяет UDP-транспорт и согласует `listen_udp: ":443"` и `udp_backend: "127.0.0.1:<xrayLocalPort>"` в установленном `config.json` маршрутизатора. Изменение применяется с пересозданием `xmesh-node` (файл подключён Docker bind-mount). При переходе обратно на TCP ранее управляемый UDP-listener отключается; самостоятельно настроенный UDP-backend не перезаписывается. TCP `default_tcp` при UDP-профиле не перенаправляется автоматически.
-
-Для работы нужны действующий Hysteria2 inbound на UDP `127.0.0.1:<xrayLocalPort>`, доступный контейнеру сертификат, назначенные пользователи и разрешённый UDP/443 на VPS и у провайдера. Выполните `ss -lunp | grep -E ':(443|5000)\\b'`, `docker logs --tail 50 xmesh-managed-xray` и `journalctl -u xmesh-xray-sync.service -n 60 --no-pager`. **Наличие UDP-listener маршрутизатора не доказывает, что Xray успешно применил Hysteria2.**
-
-## Первый запуск без XRAY STUDIO-профиля
-
-Подключение ноды **не требует заранее созданного Xray-профиля**. На пустой панели достаточно создать запись узла и воспользоваться «Подключить ноду и метрики». Bootstrap устанавливает Docker, маршрутизатор, ключи Ed25519, телеметрию и таймер синхронизации.
-
-Если профиль ещё не назначен, Nexus возвращает аутентифицированному узлу **HTTP 202** с кодом состояния `awaiting_profile` вместо HTTP 409. Это нормальное ожидание: Xray не запускается с фиктивным конфигом, `xmesh-xray-sync.service` завершается успешно, а таймер проверяет назначение раз в минуту. В карточке узла отображается «Подключена · ждёт профиль».
-
-После создания XRAY STUDIO-профиля выберите его у узла в панели. Нода автоматически получит проверяемую подписанную политику и применит Xray в следующем цикле синхронизации; повторный одноразовый токен или переустановка не нужны. Ошибки реальной конфигурации (несуществующий назначенный профиль, неверный JSON, несовместимые TLS-режимы) по-прежнему блокируют применение без обхода подписей.
-
-Если профиль **сняли** с уже работавшей ноды, агент остановит только XMesh-managed Xray, сохранив регистрацию, ключи, маршрутизатор и данные. При повторном назначении корректного профиля работа возобновится обычной синхронизацией.
-
-## Быстрое подключение из XMesh Nexus (Docker + метрики)
-
-В панели откройте **Узлы → Подключить ноду и метрики**. Сначала скопируйте команду БЕЗ токена и запустите на целевом VPS; установщик попросит одноразовый токен отдельным скрытым вводом. Скопируйте его отдельно из панели и вставьте при запросе. Токен действует **10 минут**, не публикуйте его. Он не передаётся аргументом процесса; регистрация дополнительно требует Ed25519-подпись сообщения, связывающего токен и публичный ключ.
-
-Установщик автоматически:
-- устанавливает Docker Engine и Compose на чистой Ubuntu (если они отсутствуют) до регистрации одноразового токена;
-- использует существующий `/root/XMesh-Node` или устанавливает исходники в `/opt/xmesh-node`;
-- проверяет существующий `config.json` и не допускает незаметную смену ID ноды;
-- сохраняет ранее созданный ключ Ed25519 и регистрирует **только публичный** ключ в панели;
-- собирает и запускает контейнер Docker, а затем подключает системные метрики через таймер systemd;
-- проверяет JSON-конфигурацию перед запуском Docker.
-
-**Требуются:** интерактивный терминал, Ubuntu с systemd и права root. Установщик сам поставит Docker Engine, Compose plugin, Git, curl, OpenSSL и Python 3 через официальный репозиторий Docker. Go на сервере не нужен. На других ОС автоматическая установка пока не поддерживается. Скрипт не останавливает Nginx и не занимает TCP/443 без отдельной настройки. По умолчанию выбирается TCP/8443.
-
-Если ключ для данного ID уже зарегистрирован, установщик может использовать **тот же ключ**, но не заменит другой действующий ключ по обычному токену. Если при `/api/v1/node/enroll` пришёл **HTTP 409**, в Nexus за этим ID закреплён другой Ed25519 public key. **Не удаляйте прежний ключ заранее.** В обновлённой панели **Узлы → Подключить агент ноды** предложит владельцу отдельное подтверждение переподключения и создаст 10-минутный recovery-token ([Nexus PR #26](https://github.com/TriplexCorp/XMesh-Nexus/pull/26)). `bootstrap.sh` сохраняет локальный приватный ключ и проверяет token + подпись; прежний ключ останется действующим до успешного подтверждения нового, после чего старый агент потеряет управление. Если прежняя нода тоже должна остаться в сети, **создайте вторую запись Node с новым ID**, не выполняя recovery. [Node bootstrap fix #7](https://github.com/TriplexCorp/XMesh-Node/pull/7), [CI `main` #40448354429](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40448354429). Слияние PR не обновляет установленную панель на VPS.
-
-Проверка после установки:
-
-```bash
-docker logs --tail 30 xmesh-node
-systemctl status xmesh-node-metrics.timer
-journalctl -u xmesh-node-metrics.service -n 30 --no-pager
+```text
+2745b03677fc6e12761021c5dad6d48138af87d4
 ```
 
-Наличие heartbeat означает только связь с маршрутизатором, **не** успешное применение профиля Xray. Подписанная синхронизация, запуск и управление Xray по назначенному профилю уже реализованы отдельными агентами; проверяйте `xmesh-xray-sync.timer`, статус Xray и актуальную ревизию. Произвольный QUIC/UDP-мультиплексор нескольких разных протоколов на одном UDP/443 не заявляется.
+Это merge XMesh-Node [PR #60](https://github.com/TriplexCorp/XMesh-Node/pull/60), который исправил operational failure после истечения 120-секундного окна свежести первоначального activation response. Nexus после [PR #210](https://github.com/TriplexCorp/XMesh-Nexus/pull/210) закрепляет именно этот reviewed Node SHA для новых установок.
 
-## What it does
+| Область | Состояние v6 |
+| --- | --- |
+| Managed bootstrap | ✅ exact reviewed SHA, Ubuntu + systemd, fail-closed до PQ activation |
+| Transport | ✅ TLS 1.3 + `X25519MLKEM768` |
+| Client TLS identity | ✅ ML-DSA-65 certificate |
+| XSP/2 message authentication | ✅ Ed25519 **AND** ML-DSA-65 |
+| Panel identity | ✅ pinned signing keys from enrollment |
+| Activation | ✅ signed durable receipt + local active state |
+| Operational metrics/control/Xray sync | ✅ только через strict-PQ product tunnel |
+| Automatic classical fallback | ❌ запрещён |
+| Managed Xray start | ✅ только после strict-PQ desired-config reconciliation |
+| User VPN data plane | Xray; отдельный от control plane |
 
-- Routes TCP TLS connections by **exact SNI** or **wildcard suffix** without terminating TLS, with optional ALPN selection.
-- Relays original ClientHello bytes unchanged to localhost backends (Xray, Caddy, Nginx, etc.).
-- Default TCP route handles missing/unknown SNI (including non-TLS traffic when configured).
-- Independent UDP/443 listener and a **single explicitly configured UDP backend**.
-- Explicit route priority, bounded hello buffering and timeouts, basic TCP concurrency limits.
-- Bind TCP and UDP on the **same numeric port** (different transport sockets).
+## Что такое XMesh Node
 
-**Important:** This is NOT a magical way to put every transport on the same 443 socket. TCP vs UDP can coexist, but QUIC/H3 and other UDP protocols cannot be safely demultiplexed without protocol-aware handling. Distinct TLS clients sharing exactly the same SNI + ALPN also cannot be told apart reliably. For Reality, XHTTP, Trojan, WebSocket, TLS sites, etc., route to distinct loopback listeners with distinct SNI when available.
+XMesh Node состоит из двух логически разных частей:
 
-## Connect XMesh Node to XMesh Nexus (signed heartbeat)
+1. **Data-plane edge/router** — принимает TCP/TLS и UDP на публичном интерфейсе и направляет трафик к loopback-бэкендам, обычно Xray.
+2. **Managed control plane** — получает policy/config/control от XMesh Nexus, отправляет metrics и применяет Xray через authenticated XSP/2 strict-PQ transport.
 
-The panel and node support a **signed heartbeat** reporting whether the router process is alive. **Managed Xray configuration delivery, local signature checks and process reconciliation are implemented separately** by the node control/sync agents installed by Nexus bootstrap; router heartbeat alone does not attest that Xray was started or a policy was applied. For an ordinary managed installation, use the automated onboarding section above instead of these manual heartbeat-only steps.
+```text
+                         CONTROL PLANE
 
-1. Create a node in XMesh Nexus and open **Nodes → Configure metrics**. Register
-   the **Ed25519 public key** from the metrics agent installed on the same VPS.
-   The panel node ID must match the metrics agent's `XMESH_NODE_ID`.
-2. On the node host, configure these additional fields in `config.json`:
+ XMesh Node VPS                                      XMesh Nexus
+ ┌───────────────────────────┐                  ┌──────────────────────┐
+ │ xmesh-agent-xspv2-product │ ── TLS 1.3 ───▶ │ public TCP/443       │
+ │                           │    X25519MLKEM768│ strict-PQ ingress    │
+ │ Ed25519 + ML-DSA-65       │ ◀─ signed ───── │ dual-signed response │
+ └─────────────┬─────────────┘                  └──────────────────────┘
+               │
+      ┌────────┼─────────┐
+      ▼        ▼         ▼
+   metrics   control   Xray sync
+
+                          DATA PLANE
+
+ Internet ── TCP/UDP ──▶ XMesh Node router ──▶ loopback Xray/backend
+```
+
+Control-plane post-quantum guarantees **не означают**, что пользовательский VPN data plane автоматически становится post-quantum. Xray и его клиентские протоколы являются отдельным слоем.
+
+## Strict-PQ security contract
+
+### Transport
+
+Managed v6 product transport требует:
+
+- TLS **1.3 only**;
+- реально согласованный `X25519MLKEM768`;
+- проверенный server CA / SNI;
+- ML-DSA-65 client certificate;
+- отсутствие автоматического перехода на classical TLS/control transport.
+
+Если эти условия не выполнены, managed operational request должен завершиться ошибкой.
+
+### XSP/2 envelope
+
+Управляющие сообщения связываются с:
+
+- protocol/suite/direction;
+- message type;
+- issuer и Node ID;
+- HTTP method/path;
+- Ed25519 и ML-DSA-65 key IDs;
+- key epoch;
+- issued/expires time;
+- nonce;
+- request ID;
+- release revision;
+- SHA-256 payload.
+
+Envelope принимается только после проверки **обеих** подписей: Ed25519 и ML-DSA-65.
+
+### Live freshness и durable activation receipt
+
+У v6 намеренно разные правила для живого сообщения и уже зафиксированного durable proof:
+
+- свежий activation/tunnel response обязан пройти live freshness window;
+- после успешной активации exact receipt сохраняется локально и его SHA-256 фиксируется в `active.json`;
+- последующие `verify-active` снова проверяют endpoint binding, Node ID, request ID, panel issuer/key IDs, key epoch и **обе** подписи;
+- исторический durable activation receipt не объявляется недействительным только потому, что прошёл его первоначальный live TTL;
+- live operational responses по-прежнему проверяются на свежесть.
+
+Именно разделение live freshness и durable cryptographic evidence исправлено в [PR #60](https://github.com/TriplexCorp/XMesh-Node/pull/60). Оно не включает classical fallback и не ослабляет freshness для сетевого tunnel traffic.
+
+## Основной способ установки: из XMesh Nexus
+
+Для managed Node используйте **команду, которую выдаёт Nexus** в разделе подключения ноды. Панель закрепляет reviewed XMesh-Node SHA и выдаёт одноразовый enrollment token отдельно от bootstrap-команды.
+
+Fresh v6 bootstrap требует:
+
+- Ubuntu;
+- systemd;
+- root/sudo;
+- исходящий HTTPS;
+- интерактивный TTY для первоначального одноразового token;
+- exact 40-hex reviewed `XMESH_NODE_RELEASE_REF`.
+
+Общая форма команды:
+
+```bash
+curl --proto '=https' --tlsv1.2 \
+  -H 'Cache-Control: no-cache' \
+  -fsSLo /tmp/xmesh-bootstrap-v6.sh \
+  https://raw.githubusercontent.com/TriplexCorp/XMesh-Node/2745b03677fc6e12761021c5dad6d48138af87d4/bootstrap.sh
+
+grep -Fq 'XMesh Node v6 fresh installer. Security invariant:' /tmp/xmesh-bootstrap-v6.sh
+
+sudo env XMESH_NODE_RELEASE_REF=2745b03677fc6e12761021c5dad6d48138af87d4 \
+  bash /tmp/xmesh-bootstrap-v6.sh https://panel.example.com NODE_ID NODE_PORT
+```
+
+Предпочтительный вариант — **не собирать эту команду вручную**, а копировать её из актуальной панели Nexus: там уже подставлены правильные panel origin, Node ID, port и reviewed release SHA.
+
+### Что делает bootstrap
+
+До strict-PQ activation bootstrap:
+
+- проверяет Ubuntu/systemd;
+- устанавливает необходимые host dependencies и Docker/Compose, если их нет;
+- checkout'ит **только exact reviewed Node SHA**;
+- останавливает старые managed timers/runtime на время security gate;
+- собирает и устанавливает strict-PQ product client;
+- создаёт/использует dual-key identity и ML-DSA TLS identity;
+- выполняет owner-authorized enrollment и activation;
+- проверяет signed durable receipt.
+
+Только после успешного gate он:
+
+- запускает XMesh router;
+- устанавливает strict-PQ operational adapter;
+- включает metrics/control/Xray reconciliation timers;
+- разрешает managed Xray стартовать через desired-config reconciliation.
+
+Ключевой инвариант `bootstrap.sh`:
+
+```text
+NO router, Xray, metrics, control or reconciliation runtime may start
+until the strict-PQ product client has verified a durable activation receipt.
+```
+
+## Повторный запуск / repair уже активированной ноды
+
+Если `/var/lib/xmesh-agent/product/active.json` и сохранённый receipt валидны, новый bootstrap сначала выполняет `verify-active`. При успехе он выводит:
+
+```text
+Existing strict-PQ activation receipt verified.
+```
+
+и **не требует новый enrollment token** только ради повторной установки reviewed runtime.
+
+Не удаляйте вручную:
+
+- `/var/lib/xmesh-agent/product/`;
+- `/var/lib/xmesh-agent/xsp-v2/keys/`;
+- client certificate/private key;
+- durable activation receipt;
+
+если задача — обычный repair/update. Удаление этих данных меняет identity/recovery semantics и должно выполняться только как отдельная осознанная процедура.
+
+## Проверка после установки
+
+### 1. Durable strict-PQ activation
+
+```bash
+sudo /usr/local/bin/xmesh-agent-xspv2-product \
+  verify-active \
+  --panel https://panel.example.com \
+  --node-id NODE_ID
+
+sudo cat /var/lib/xmesh-agent/product/active.json
+```
+
+Ожидаемые claims:
 
 ```json
 {
-  "panel_url": "https://panel.example.com",
-  "node_id": 1,
-  "private_key_file": "/etc/xmesh-node-metrics/node.key"
+  "schema": "xmesh-v6-strict-pq-active-1",
+  "productionActivation": true,
+  "strictPQEnabled": true,
+  "automaticClassicalFallback": false
 }
 ```
 
-**Merge these fields into your existing JSON**; do not replace SNI routing fields.
-`panel_url` must be the externally reachable HTTPS origin. With the default
-Docker Compose, the agent's key directory is mounted read-only into the
-container. Never place the private key into a Git repository or paste it into
-the panel.
+### 2. Core operational timers
 
-3. Run `docker compose up -d --build` and `docker compose logs --tail=40`.
-   Signed heartbeats are sent immediately and every 60 seconds. XMesh Nexus
-   marks the node offline when no heartbeat arrives for 150 seconds.
-   `HTTP 401` means the Ed25519 public key is unregistered, mismatched, or
-   the node's timestamp is outside the allowed window. Synchronize NTP and
-   verify the ID.
+```bash
+systemctl status xmesh-node-control.timer --no-pager
+systemctl status xmesh-node-metrics.timer --no-pager
+systemctl status xmesh-xray-sync.timer --no-pager
+```
 
-If the metrics agent is not installed on that host, create an Ed25519
-PKCS#8 private key using OpenSSL and register its public key in the panel.
-Do not modify or replace an existing metrics agent key without updating
-its registration. The current node and metrics reporter use one registered
-identity for a given panel node.
+### 3. Последние operational runs
 
-## Самостоятельная установка Docker-router (альтернативный способ)
+```bash
+systemctl status xmesh-node-control.service --no-pager
+systemctl status xmesh-node-metrics.service --no-pager
+systemctl status xmesh-xray-sync.service --no-pager
 
-Этот сценарий предназначен для опытного администратора, который **не использует автоматическую установку из Nexus**. Для прямого `bash install.sh` на VPS **Docker Engine и Compose должны быть уже установлены**: он создаёт образ и запускает роутер, но **не** ставит Docker/Nginx/Certbot, не регистрирует управляемую ноду и не поднимает систему метрик и control-таймеров. Go и отдельный systemd-юнит для самого маршрутизатора не нужны — сборка Go выполняется в Docker.
+journalctl \
+  -u xmesh-node-control.service \
+  -u xmesh-node-metrics.service \
+  -u xmesh-xray-sync.service \
+  -n 100 --no-pager
+```
+
+### 4. Containers
+
+```bash
+docker ps --filter name=xmesh-node
+docker ps --filter name=xmesh-managed-xray
+```
+
+Managed Xray может отсутствовать/быть остановлен до получения корректного desired config. Наличие router container само по себе не доказывает применение Xray policy.
+
+## Operational services
+
+Три основных v6 workers:
+
+| Unit | Назначение |
+| --- | --- |
+| `xmesh-node-metrics.service` | telemetry/metrics через strict-PQ product transport |
+| `xmesh-node-control.service` | heartbeat, polling и control operations через strict-PQ transport |
+| `xmesh-xray-sync.service` | signed policy / desired-config reconciliation и managed Xray |
+
+Для совместимости существующая worker business logic может локально формировать исторические Ed25519 headers, но network `curl` подменяется узким strict-PQ adapter'ом. Эти historical headers не являются сетевой авторизацией XSP/2 и не создают classical fallback.
+
+## Xray policy и reconciliation
+
+`xmesh-xray-sync` сохраняет fail-safe поведение:
+
+- применяет только проверяемую policy/config;
+- не заменяет рабочую Xray конфигурацию неподтверждёнными данными;
+- может находиться в `awaiting_profile`, если профиль ещё не назначен;
+- запускает managed Xray только после разрешённого reconciliation;
+- использует `xmesh-policy-guard.py` и локальную attestation для проверки состава пользователей и активного JSON.
+
+Если panel временно недоступна, текущий Xray не должен быть уничтожен только из-за transport error. Offline policy применяется только если ранее была выдана и локально проходит требуемые проверки.
+
+## Router / edge capabilities
+
+Сам XMesh Node router:
+
+- маршрутизирует TCP TLS по **exact SNI** и wildcard suffix;
+- может учитывать ALPN;
+- передаёт исходный ClientHello в backend без TLS termination;
+- имеет default TCP route для unknown/missing SNI, если он настроен;
+- поддерживает отдельный UDP listener и **один явно заданный UDP backend**;
+- позволяет TCP и UDP использовать одинаковый номер публичного порта как разные transport sockets;
+- ограничивает буферы/таймауты/concurrency;
+- принимает только loopback backend addresses по policy конфигурации.
+
+### Важные границы
+
+XMesh Node **не** является универсальным мультиплексором любого протокола на одном socket.
+
+- TCP и UDP могут использовать один numeric port, потому что это разные transport sockets.
+- Несколько независимых QUIC/UDP протоколов нельзя безопасно разделить одним простым UDP forwarder без protocol-aware demux.
+- Клиентов с одинаковыми SNI + ALPN нельзя надёжно разделить только по ClientHello.
+- Router не завершает пользовательский TLS и не обходит authentication backend'а.
+
+## Standalone Docker-router
+
+Если нужен только edge router без managed Nexus control plane, можно использовать отдельный standalone path.
+
+Требуются уже установленные Docker Engine и Compose:
 
 ```bash
 git clone https://github.com/TriplexCorp/XMesh-Node.git
 cd XMesh-Node
-bash install.sh                    # creates config.json on first run
-nano config.json                  # set your REAL SNI and loopback backends
-bash install.sh                    # builds Go within Docker and launches
+bash install.sh
+nano config.json
+bash install.sh
 docker compose logs -f xmesh-node
 ```
 
-On updates run `git pull --ff-only && docker compose up -d --build`.
-To check configuration without starting a daemon:
+Проверка конфигурации без запуска daemon:
+
 ```bash
-docker compose run --rm --no-deps xmesh-node -check -config /etc/xmesh-node/config.json
+docker compose run --rm --no-deps \
+  xmesh-node -check -config /etc/xmesh-node/config.json
 ```
 
-**Networking:** Compose intentionally uses `network_mode: host`, so the node reaches Xray/Caddy listeners on host `127.0.0.1`. This means no `ports:` section, and any existing listener on host TCP/443 or UDP/443 conflicts with the node. Stop/move that listener first; keep backends on distinct loopback ports. Host mode reduces network isolation, so only deploy a trusted image and lock down the VPS. If you later need container-to-container routing, use a dedicated Docker network and update the loopback-only backend validation accordingly.
+Standalone `install.sh`:
 
-The JSON routing configuration is not a secret and is readable by the unprivileged container. Do not place passwords or private keys in it. Settings remain in the bind-mounted `config.json` across rebuilds.
+- не выполняет v6 Nexus enrollment;
+- не создаёт strict-PQ activation;
+- не устанавливает managed metrics/control/Xray timers;
+- не делает standalone router автоматически «управляемой нодой» Nexus.
 
-## Legacy host build (optional)
+Compose использует `network_mode: host`, чтобы router мог обращаться к loopback backend'ам на host. Любой другой процесс, уже занимающий тот же IP/port/transport, конфликтует с router.
 
-## Build
+## Сборка и разработка
 
-Requires Go 1.23 or newer.
+Основной router module использует Go `1.23+`:
 
 ```bash
 go test ./...
-go build -o xmesh-node .
-sudo install -m 0755 xmesh-node /usr/local/bin/xmesh-node
-sudo install -d -m 0755 /etc/xmesh-node
-sudo cp config.example.json /etc/xmesh-node/config.json
-sudo cp deploy/xmesh-node.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now xmesh-node
+go vet ./...
+go build ./...
 ```
 
-**Before starting:** update backend ports/SNI names in the sample config, ensure backend listeners are bound to 127.0.0.1, validate with `xmesh-node -check -config /etc/xmesh-node/config.json`, and stop any existing process holding TCP/443 or UDP/443 respectively. The same port cannot be bound by two unrelated processes on the same IP and transport.
+XSP/2 production-capable Agent artifacts и cryptographic test modules проверяются отдельными Go 1.27 CI jobs.
 
-## Security / boundaries
+Полный CI репозитория проверяет, среди прочего:
 
-Routes are allowlisted by configuration; backend addresses must be loopback IP addresses (IPv4 or IPv6). The edge deliberately does not terminate TLS, inspect encrypted application payloads or bypass TLS authentication. Protect the node's configuration and restrict its management interface. Production controller enrolment and signed configuration delivery are planned, **not yet implemented**. This daemon does not claim to be connected to XMesh Nexus.
+- shell/Python syntax;
+- router/unit tests с race detector;
+- strict-PQ Go modules;
+- production Agent artifact boundary;
+- crash durability;
+- snapshot anti-rollback;
+- Docker image build/config check.
 
-UDP forwarding is suitable for a selected service (e.g. one QUIC/H3 endpoint), not multiple unrelated UDP services. Network counters / CPU metrics are separately provided by the existing XMesh metrics agent.
+Для reviewed PR #60 exact-head CI перед merge был green в:
 
-## Config
+- `Node CI` #736;
+- `XSP-v2 P0-D Agent Artifact` #97;
+- `XSP-v2 P0-E Crash Durability` #86;
+- `XSP-v2 P0-E Snapshot Anti-Rollback` #84.
 
-See [config.example.json](config.example.json). First-match routing uses ordered rules, then `default_tcp`. Use `alpn` only if the client actually advertises the protocol. Wildcard SNI `*.example.com` matches subdomains only.
+CI подтверждает код и тестовые contracts на проверенном SHA; это не заменяет диагностику конкретной VPS.
 
-## Roadmap
+## Troubleshooting
 
-**Контроль CI и merge (27.10.2026):** Nexus #48–51 merged; на `1aa86d6` [Crypto CI #40508989566](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40508989566) и [Backend CI #40508989925](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40508989925) — success; на `2782fdaa` [Backend CI #40511173969](https://github.com/TriplexCorp/XMesh-Nexus/actions/runs/40511173969) — success. Node `main` перед этой README-правкой `9c289d5`, [Node CI #40495468245](https://github.com/TriplexCorp/XMesh-Node/actions/runs/40495468245) — success. Это проверка репозиториев, **не работа VPS**.
+### `panel response binding rejected` через несколько минут после activation
 
-**XSP-v2 P0 — экспериментальные основы готовы, production-внедрение не начато.** Полный статус и CI см. [выше](#xsp-v2--p0-post-quantum-security-в-разработке-27-октября-2026) и в [Roadmap Nexus](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md).
+Если нода была установлена со старым reviewed SHA `7b6ec04d7dfe6e9b785f9988b5c43afb64499456`, operational workers могли начать падать примерно после окончания первоначального live freshness window.
 
-- [x] PR01/PR02: общий бинарный формат и cross-language Rust ↔ Go Ed25519 + ML-DSA-65 с отрицательными тестами
-- [x] PR07 lab: X25519MLKEM768/TLS 1.3, Nginx/OpenSSL/Go handshake, отсутствие downgrade в изолированном CI
-- [x] P0 staging: строгий Go-декодер, AES-256-GCM key vault, `keytool prove` и проверка **двойного** challenge-proof в Rust Nexus
-- [x] P0 staging: владелец утверждает конкретные ключи/epoch; транзакционная смена публичных ключей и запрет повтора challenge в отдельном API Nexus
-- [ ] **Release gate:** Nexus Backend/Crypto и Node CI (последние подтверждены по SHA выше) **плюс ещё не проведённые** E2E Node↔Nexus receipt/rollback/canary, security review и утверждение полного протокола. Пройденный CI не равен production release.
-- [ ] **Production:** двухфазная ротация, долговременное защищённое хранение, подписанные ответы/ACK, продакшен-агент и монотонный suite-floor на Node
-- [ ] **Real VPS:** выделенный node-only TLS endpoint, подтверждённые CA/SNI/handshake/прокси-сегменты, canary, recovery и ручное включение без downgrade
+Причина была не в PQ handshake: `verify-active` повторно применял live TTL к уже сохранённому durable activation receipt. Исправление находится в release:
 
-- Secure node registration with control plane and authenticated configuration synchronization
-- Explicit protocol-aware QUIC routing on UDP/443
-- Atomic reloads, readiness endpoint, structured metrics and audited runtime management
-- Xray-core process supervision / configuration validation
+```text
+2745b03677fc6e12761021c5dad6d48138af87d4
+```
+
+Обновите Nexus и повторно запустите выданную им bootstrap-команду. При валидной сохранённой activation identity новый enrollment token для обычного repair не требуется.
+
+### Xray CLI unavailable in metrics
+
+Сообщение вида:
+
+```text
+Xray CLI not installed on host (possibly containerized)
+```
+
+означает, что host-side collector не нашёл ожидаемый CLI. Это нужно разбирать отдельно от strict-PQ transport. Само по себе оно не объясняет `panel response binding rejected`.
+
+### Диагностические команды
+
+```bash
+journalctl -u xmesh-node-control.service -n 100 --no-pager
+journalctl -u xmesh-node-metrics.service -n 100 --no-pager
+journalctl -u xmesh-xray-sync.service -n 100 --no-pager
+
+docker logs --tail 100 xmesh-node
+docker logs --tail 100 xmesh-managed-xray
+```
+
+## Документация
+
+Актуальные security contracts и исторические XSP/2 материалы остаются в `docs/`:
+
+- [`docs/POSTQUANTUM_SECURITY_INVARIANT.md`](docs/POSTQUANTUM_SECURITY_INVARIANT.md)
+- [`docs/POSTQUANTUM_V6.md`](docs/POSTQUANTUM_V6.md)
+- [`docs/STRICT_PQ_ONLY.md`](docs/STRICT_PQ_ONLY.md)
+- [`docs/STRICT_PQ_ONLY_BOOTSTRAP.md`](docs/STRICT_PQ_ONLY_BOOTSTRAP.md)
+- [`docs/XSP_V2_CRYPTO_POC.md`](docs/XSP_V2_CRYPTO_POC.md)
+- [`docs/XSP_V2_WIRE_SPEC.md`](docs/XSP_V2_WIRE_SPEC.md)
+- [`docs/XSP_V2_APPLIED_ACK_VAULT_GATE.md`](docs/XSP_V2_APPLIED_ACK_VAULT_GATE.md)
+
+Общий product/security roadmap ведётся в XMesh Nexus:
+
+- [Enterprise Roadmap](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/ENTERPRISE_ROADMAP.md)
+- [PQ-only security policy](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/XSP_V2_PQ_ONLY_SECURITY_POLICY.md)
+- [Single public TCP/443 control-plane topology](https://github.com/TriplexCorp/XMesh-Nexus/blob/main/docs/SINGLE_PUBLIC_443_CONTROL_PLANE.md)
+
+## Security reporting / operational rule
+
+Не публикуйте в issues или логах:
+
+- enrollment tokens;
+- private Ed25519/ML-DSA keys;
+- client private TLS keys;
+- production secrets из Nexus/Node environment.
+
+Для production incident сначала сохраняйте точные service logs, active receipt metadata и reviewed source SHA. Не лечите strict-PQ failure включением classical fallback: v6 contract намеренно fail-closed.
