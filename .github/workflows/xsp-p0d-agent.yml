@@ -40,17 +40,16 @@ jobs:
           grep -Fq 'node-request.vault' agent/xspv2/state/state_linux.go
           grep -Fq 'sourceRevision' agent/xspv2/cmd/xmesh-agent-xspv2/main.go
           grep -Fq 'invalid or unpinned embedded source revision' agent/xspv2/cmd/xmesh-agent-xspv2/main.go
+          grep -Fq 'ReloadVerifiedPermitForReceiptRecovery' security/xspv2/poc-go/cutover/production_recovery_linux.go
+          grep -Fq 'Agent artifact SHA-256 does not match executing binary' agent/xspv2/activation/execute_linux.go
+          grep -Fq 'approval is outside its bounded validity window' agent/xspv2/activation/execute_linux.go
+          grep -Fq 'approval transport policy weakened' agent/xspv2/activation/execute_linux.go
 
-          # The reused transport must keep connect routing separate from the
-          # authenticated TLS/HTTP authority and must not redirect/proxy.
           grep -Fq 'request.Host = serverName' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
           grep -Fq 'Proxy:              nil' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
           grep -Fq 'XSP-v2 signed ACK redirection forbidden' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
           grep -Fq 'DialStrictMutual(dialCtx, address, serverName' security/xspv2/poc-go/cutover/pq_only_ack_receipt_exchange_linux.go
 
-          # Production source checks deliberately exclude *_test.go. Crash and
-          # durability tests may spawn subprocesses to inject hard exits, but
-          # the shipped Agent must retain no shell/command or downgrade path.
           mapfile -d '' agent_prod_go < <(find agent/xspv2 -type f -name '*.go' ! -name '*_test.go' -print0)
           if grep -nE '"XMESH1|tls\.VersionTLS12|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|"strict-pq=on|"allow.?weak' "${agent_prod_go[@]}"; then
             echo 'forbidden executable downgrade/fallback pattern in P0-D Agent Go source' >&2
@@ -60,18 +59,17 @@ jobs:
             echo 'forbidden shell/command execution pattern in P0-D Agent Go source' >&2
             exit 1
           fi
-      - name: Test and build Go 1.27 Agent artifact
+      - name: Test and build Go 1.27 Agent artifacts
         working-directory: agent/xspv2
         env:
           BUILD_VERSION: p0d2-ci
+          ACTIVATION_VERSION: strict-pq-ci
         run: |
           set -euo pipefail
           test -z "$(gofmt -d .)"
           go test ./...
           go vet ./...
 
-          # A normal developer build deliberately cannot claim an approved
-          # release identity because sourceRevision remains unpinned.
           go build -trimpath -o /tmp/xmesh-agent-xspv2-unpinned ./cmd/xmesh-agent-xspv2
           if /tmp/xmesh-agent-xspv2-unpinned --identity >/tmp/unpinned-identity.json 2>/tmp/unpinned-identity.err; then
             echo 'unpinned Agent build unexpectedly exposed a release identity' >&2
@@ -79,8 +77,13 @@ jobs:
           fi
           grep -Fq 'invalid or unpinned embedded source revision' /tmp/unpinned-identity.err
 
-          # Release artifacts embed the exact approved version/source revision;
-          # Nexus verifies these values in addition to the artifact SHA-256.
+          go build -trimpath -o /tmp/xmesh-agent-xspv2-activate-unpinned ./cmd/xmesh-agent-xspv2-activate
+          if /tmp/xmesh-agent-xspv2-activate-unpinned --identity >/tmp/unpinned-activate.json 2>/tmp/unpinned-activate.err; then
+            echo 'unpinned activation build unexpectedly exposed a release identity' >&2
+            exit 1
+          fi
+          grep -Fq 'activation binary has no approved source revision' /tmp/unpinned-activate.err
+
           test "${#GITHUB_SHA}" = 40
           go build -trimpath \
             -ldflags "-X main.version=$BUILD_VERSION -X main.sourceRevision=$GITHUB_SHA" \
@@ -93,6 +96,24 @@ jobs:
               d=json.load(f)
           assert d == {'version': os.environ['BUILD_VERSION'], 'sourceRevision': os.environ['GITHUB_SHA']}
           assert re.fullmatch(r'[0-9a-f]{40}', d['sourceRevision'])
+          PY
+
+          go build -trimpath \
+            -ldflags "-X main.version=$ACTIVATION_VERSION -X main.sourceRevision=$GITHUB_SHA" \
+            -o /tmp/xmesh-agent-xspv2-activate ./cmd/xmesh-agent-xspv2-activate
+          /tmp/xmesh-agent-xspv2-activate --identity > /tmp/xsp-activation-identity.json
+          python3 - <<'PY'
+          import hashlib,json,os,re
+          binary='/tmp/xmesh-agent-xspv2-activate'
+          with open(binary,'rb') as f:
+              digest=hashlib.sha256(f.read()).hexdigest()
+          with open('/tmp/xsp-activation-identity.json',encoding='utf-8') as f:
+              d=json.load(f)
+          assert d['version']==os.environ['ACTIVATION_VERSION']
+          assert d['sourceRevision']==os.environ['GITHUB_SHA']
+          assert d['artifactSha256']==digest
+          assert re.fullmatch(r'[0-9a-f]{64}',digest)
+          print('activationArtifactSha256='+digest)
           PY
 
           state="$(mktemp -d)/state"
