@@ -104,8 +104,8 @@ type enrollRequest struct {
 	MLDSA65KeyID         string          `json:"mldsa65KeyId"`
 	Ed25519PublicB64     string          `json:"ed25519PublicB64"`
 	MLDSA65PublicB64     string          `json:"mldsa65PublicB64"`
-	Ed25519SignatureB64 string          `json:"ed25519SignatureB64"`
-	MLDSA65SignatureB64 string          `json:"mldsa65SignatureB64"`
+	Ed25519SignatureB64  string          `json:"ed25519SignatureB64"`
+	MLDSA65SignatureB64  string          `json:"mldsa65SignatureB64"`
 	TLSPublicKeyB64      string          `json:"tlsPublicKeyB64"`
 	ReleaseIdentity      releaseIdentity `json:"releaseIdentity"`
 }
@@ -752,19 +752,19 @@ func bootstrap(panel string, nodeID int64, tokenPath string) error {
 		return err
 	}
 	request := enrollRequest{
-		Token:                token,
-		NodeID:               nodeID,
-		Purpose:              public.Purpose,
-		KeyEpoch:             public.KeyEpoch,
-		ChallengeHex:         challenge,
-		Ed25519KeyID:         public.EdKeyID,
-		MLDSA65KeyID:         public.PQKeyID,
-		Ed25519PublicB64:     b64.EncodeToString(public.EdPublic),
-		MLDSA65PublicB64:     b64.EncodeToString(public.PQPublic),
-		Ed25519SignatureB64: proof.Ed25519SignatureB64,
-		MLDSA65SignatureB64: proof.MLDSA65SignatureB64,
-		TLSPublicKeyB64:      b64.EncodeToString(publicDER),
-		ReleaseIdentity:      id,
+		Token:                 token,
+		NodeID:                nodeID,
+		Purpose:               public.Purpose,
+		KeyEpoch:              public.KeyEpoch,
+		ChallengeHex:          challenge,
+		Ed25519KeyID:          public.EdKeyID,
+		MLDSA65KeyID:          public.PQKeyID,
+		Ed25519PublicB64:      b64.EncodeToString(public.EdPublic),
+		MLDSA65PublicB64:      b64.EncodeToString(public.PQPublic),
+		Ed25519SignatureB64:  proof.Ed25519SignatureB64,
+		MLDSA65SignatureB64:  proof.MLDSA65SignatureB64,
+		TLSPublicKeyB64:       b64.EncodeToString(publicDER),
+		ReleaseIdentity:       id,
 	}
 	requestRaw, err := json.Marshal(request)
 	if err != nil {
