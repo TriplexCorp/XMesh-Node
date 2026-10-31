@@ -21,6 +21,7 @@ from urllib.parse import urljoin, urlsplit
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_REDIRECTS = 4
 DEFAULT_UPDATE_HOURS = 24
+SYSTEM_CURL = "/usr/bin/curl"
 FILE_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}\.dat$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 STATE_NAMES = {"assets", "assets.previous", "assets.next", "geo-status.json", "geo-changed"}
@@ -70,8 +71,12 @@ def fetch_url(url, target):
         address = f"[{ip}]" if ":" in ip else ip
         headers = target.with_suffix(".headers")
         try:
+            # Operational panel POSTs intentionally resolve `curl` through the
+            # strict-PQ PATH adapter. GeoData is a separately bounded external
+            # HTTPS fetch from a verified signed policy, so it must invoke the
+            # real system curl explicitly instead of inheriting that adapter.
             command = [
-                "curl", "--silent", "--show-error", "--noproxy", "*",
+                SYSTEM_CURL, "--silent", "--show-error", "--noproxy", "*",
                 "--proto", "=https", "--tlsv1.2", "--max-time", "60",
                 "--connect-timeout", "12", "--max-filesize", str(MAX_FILE_BYTES),
                 "--max-redirs", "0", "--resolve", f"{host}:443:{address}",
