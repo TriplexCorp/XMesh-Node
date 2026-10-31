@@ -81,11 +81,23 @@ def main():
         return fail("certbot missing; rerun the reviewed XMesh Node bootstrap")
     if not DEPLOY_HOOK.is_file() or not os.access(DEPLOY_HOOK, os.X_OK):
         return fail("TLS deploy hook missing; rerun the reviewed XMesh Node bootstrap")
+
+    # Keep Certbot's mutable work/log state inside the reconciler's already
+    # approved state directory. ProtectSystem=strict intentionally makes
+    # /var/log/letsencrypt and /var/lib/letsencrypt read-only. Certificate
+    # material itself still lands under the separately allowlisted
+    # /etc/letsencrypt via Certbot's default config-dir.
+    certbot_work = STATE / "certbot-work"
+    certbot_logs = STATE / "certbot-logs"
+    certbot_work.mkdir(mode=0o700, parents=True, exist_ok=True)
+    certbot_logs.mkdir(mode=0o700, parents=True, exist_ok=True)
+
     print("XMesh managed TLS: requesting ACME certificate for configured node domain", file=sys.stderr)
     try:
         result = subprocess.run([
             certbot, "certonly", "--standalone", "--preferred-challenges", "http",
             "--non-interactive", "--agree-tos", "--no-eff-email",
+            "--work-dir", str(certbot_work), "--logs-dir", str(certbot_logs),
             "--email", email, "-d", domain, "--keep-until-expiring",
             "--deploy-hook", str(DEPLOY_HOOK),
         ], timeout=240)
