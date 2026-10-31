@@ -19,10 +19,18 @@ router_at = bootstrap.index("docker compose up -d --no-build")
 ops_at = bootstrap.index('bash "$INSTALL_DIR/deploy/install-v6-strict-operational-agents.sh"')
 assert verify_at < router_at < ops_at
 
-# The managed Xray is explicitly kept down until desired-config is reconciled
-# by the strict operational installer.
-stop_xray_at = bootstrap.index('docker stop -t 5 xmesh-managed-xray')
-assert stop_xray_at < verify_at
+# Before the first activation check the installer disables all managed units
+# and stops the exact managed containers through the bounded container loop.
+pre_gate = bootstrap[:verify_at]
+assert "for container in xmesh-node xmesh-managed-xray; do" in pre_gate
+assert 'docker update --restart=no "$container"' in pre_gate
+assert 'docker stop -t 5 "$container"' in pre_gate
+assert "xmesh-xray-sync.timer" in pre_gate
+assert "xmesh-node-metrics.timer" in pre_gate
+assert "xmesh-node-control.timer" in pre_gate
+
+# The managed Xray is explicitly kept down again after router startup until
+# desired-config is reconciled by the strict operational installer.
 assert 'docker stop -t 5 xmesh-managed-xray' in bootstrap[router_at:ops_at]
 
 # Operational workers must re-check the receipt before their first panel I/O.
