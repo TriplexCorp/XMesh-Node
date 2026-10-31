@@ -74,11 +74,24 @@ assert 'automaticClassicalFallback' in standalone[:standalone_up]
 
 # Operational workers must re-check the receipt before their first panel I/O.
 assert '"$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null' in operational
-first_sync = operational.index("systemctl start xmesh-xray-sync.service")
+first_sync = operational.index("if ! systemctl start xmesh-xray-sync.service; then")
 ops_verify = operational.rindex('"$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null', 0, first_sync)
 assert ops_verify < first_sync
-assert "systemctl enable --now xmesh-xray-sync.timer" in operational
+
+# Timer persistence must no longer depend on the first reconciliation being
+# successful. The topology is enabled before sync, and both the failure path
+# and normal path start the same fixed timer set.
+timer_enable = operational.index('systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null')
+assert timer_enable < first_sync
+failure_end = operational.index('fi\n\nsystemctl start "${OPERATIONAL_TIMERS[@]}"', first_sync)
+failure_block = operational[first_sync:failure_end]
+assert 'systemctl start "${OPERATIONAL_TIMERS[@]}" || true' in failure_block
+assert operational.count('systemctl start "${OPERATIONAL_TIMERS[@]}"') >= 2
+assert "xmesh-xray-sync.timer" in operational
+assert "xmesh-node-metrics.timer" in operational
+assert "xmesh-node-control.timer" in operational
 assert "xmesh-node-user-meter.timer" in operational
+assert "systemctl enable --now xmesh-xray-sync.timer" not in operational
 
 # The adapter has no direct HTTP client fallback: it accepts only the fixed
 # operational POST set and delegates every network request to the PQ product client.
@@ -97,4 +110,4 @@ assert "curl --" not in adapter
 assert "http.Client" not in adapter
 
 assert 'choices=["prepare", "offline", "commit", "sample"]' in guard
-print("Fresh v6 strict-PQ fail-closed bootstrap, TLS/router sandbox boundaries, standalone install and verified per-user metering contract: OK")
+print("Fresh v6 strict-PQ fail-closed bootstrap, durable operational timers, TLS/router sandbox boundaries, standalone install and verified per-user metering contract: OK")
