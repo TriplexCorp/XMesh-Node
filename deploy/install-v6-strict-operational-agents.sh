@@ -120,7 +120,11 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=/run /var/lib/xmesh-xray-sync /var/lib/xmesh-node-control -/etc/letsencrypt
+# The reconciler atomically replaces the router's bind-mounted config.json and
+# may force-recreate the router from its reviewed Compose directory. Keep the
+# host filesystem read-only everywhere else; no other operational unit receives
+# write access to the Node checkout.
+ReadWritePaths=/run /var/lib/xmesh-xray-sync /var/lib/xmesh-node-control /opt/xmesh-node -/etc/letsencrypt
 EOF
 cat > /etc/systemd/system/xmesh-xray-sync.timer <<'EOF'
 [Unit]
