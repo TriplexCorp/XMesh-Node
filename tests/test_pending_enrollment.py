@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression contract: connecting an empty-panel node must not require Xray."""
+"""Regression contract: an empty-panel v6 node stays safe while awaiting Xray profile."""
 import json
 import pathlib
 import re
@@ -11,6 +11,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SYNC = (ROOT / "deploy/xmesh-xray-sync.sh").read_text(encoding="utf-8")
 BOOTSTRAP = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
+OPERATIONAL = (ROOT / "deploy/install-v6-strict-operational-agents.sh").read_text(encoding="utf-8")
 
 
 class PendingEnrollmentTest(unittest.TestCase):
@@ -72,40 +73,38 @@ class PendingEnrollmentTest(unittest.TestCase):
         self.assertIn("No previously issued signed offline policy", SYNC)
         self.assertIn('rm -f "$STATE/awaiting-profile"', SYNC)
 
-    def test_managed_bootstrap_does_not_register_duplicate_router_heartbeat(self):
+    def test_v6_bootstrap_uses_only_product_enrollment(self):
         self.assertNotIn('config={"panel_url":', BOOTSTRAP)
         self.assertNotIn('d.update(panel_url=', BOOTSTRAP)
-        self.assertIn('for legacy in ("panel_url", "node_id", "private_key_file"):', BOOTSTRAP)
-        self.assertIn("install-node-metrics-agent.sh", BOOTSTRAP)
+        self.assertNotIn("install-node-metrics-agent.sh", BOOTSTRAP)
+        self.assertNotIn("/api/v1/node/enroll", BOOTSTRAP)
+        self.assertIn("install-xsp-v2-product-client.sh", BOOTSTRAP)
+        self.assertIn('"$PRODUCT" bootstrap --panel "$PANEL" --node-id "$NODE" --token-file "$TOKEN_FILE"', BOOTSTRAP)
+        self.assertIn("install-v6-strict-operational-agents.sh", BOOTSTRAP)
 
-    def test_bootstrap_enrollment_conflict_guidance_is_safe(self):
-        self.assertIn('case "$ENROLL_STATUS" in', BOOTSTRAP)
-        self.assertIn('Node $NODE is already enrolled with a DIFFERENT Ed25519 key', BOOTSTRAP)
-        self.assertIn("explicitly approve re-enrollment", BOOTSTRAP)
-        self.assertIn("the local private key is preserved", BOOTSTRAP)
-        self.assertIn('unset TOKEN JSON PROOF', BOOTSTRAP)
+    def test_bootstrap_token_handling_is_secret_safe(self):
+        self.assertIn("read -r -s TOKEN < /dev/tty", BOOTSTRAP)
+        self.assertIn("chmod 0600 \"$TOKEN_FILE\"", BOOTSTRAP)
+        self.assertIn("unset TOKEN", BOOTSTRAP)
+        self.assertIn("shred -u \"$TOKEN_FILE\"", BOOTSTRAP)
         self.assertNotIn('echo "$TOKEN"', BOOTSTRAP)
-        self.assertNotIn('cat "$ENROLL_REPLY"', BOOTSTRAP)
+        self.assertNotIn('cat "$TOKEN_FILE"', BOOTSTRAP)
 
-    def test_bootstrap_installs_signed_profile_attestation_before_first_sync(self):
-        # The control heartbeat maps a missing attestation helper to
-        # helper_missing even when both Xray and the router are running.
-        self.assertIn("$NODE_RELEASE_SHA/deploy/xmesh-profile-attest.py", BOOTSTRAP)
-        self.assertIn('python3 -m py_compile "$PROFILE_TMP"', BOOTSTRAP)
-        self.assertIn("grep -q 'verify_envelope' \"$PROFILE_TMP\"", BOOTSTRAP)
-        self.assertIn("grep -q 'xmesh-managed-xray' \"$PROFILE_TMP\"", BOOTSTRAP)
-        self.assertIn('/usr/local/libexec/.xmesh-profile-attest.new', BOOTSTRAP)
-        self.assertIn('mv -f /usr/local/libexec/.xmesh-profile-attest.new /usr/local/libexec/xmesh-profile-attest.py', BOOTSTRAP)
-        self.assertLess(BOOTSTRAP.index('mv -f /usr/local/libexec/.xmesh-profile-attest.new'),
-                        BOOTSTRAP.index('systemctl start xmesh-xray-sync.service'))
-        self.assertLess(BOOTSTRAP.index('mv -f /usr/local/libexec/.xmesh-profile-attest.new'),
-                        BOOTSTRAP.index('systemctl start xmesh-node-user-meter.service'))
-        self.assertNotIn('profileCheck": "verified"', BOOTSTRAP)
+    def test_profile_attestation_installed_before_first_sync(self):
+        self.assertIn("xmesh-profile-attest.py", OPERATIONAL)
+        self.assertIn('python3 -m py_compile "$ROOT/deploy/$helper"', OPERATIONAL)
+        install_at = OPERATIONAL.index('install -o root -g root -m 0700 "$ROOT/deploy/$helper"')
+        sync_at = OPERATIONAL.index("systemctl start xmesh-xray-sync.service")
+        self.assertLess(install_at, sync_at)
+        self.assertNotIn('profileCheck\": \"verified\"', BOOTSTRAP)
 
-    def test_bootstrap_reports_pending_as_success(self):
-        self.assertIn("OnUnitInactiveSec=60s", BOOTSTRAP)
-        self.assertIn("No XRAY STUDIO profile assigned yet (normal on a fresh panel)", BOOTSTRAP)
-        self.assertIn("if systemctl start xmesh-xray-sync.service; then", BOOTSTRAP)
+    def test_pending_profile_still_leaves_xray_stopped(self):
+        # Pending is a valid control-plane state after PQ activation, but it is
+        # never permission to fabricate/apply a placeholder Xray config.
+        self.assertIn("No previously issued signed offline policy", SYNC)
+        self.assertIn("docker stop -t 5 xmesh-managed-xray", SYNC)
+        self.assertIn("OnUnitInactiveSec=20s", OPERATIONAL)
+        self.assertIn("systemctl start xmesh-xray-sync.service", OPERATIONAL)
 
 
 if __name__ == "__main__":
