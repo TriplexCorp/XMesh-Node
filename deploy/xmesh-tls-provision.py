@@ -21,6 +21,7 @@ STATE = Path("/var/lib/xmesh-xray-sync")
 DOMAIN = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 EMAIL = re.compile(r"[^\s@]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 COOLDOWN = 1800
+DEPLOY_HOOK = Path("/usr/local/libexec/xmesh-tls-renew-hook")
 
 
 def fail(message):
@@ -78,13 +79,15 @@ def main():
     certbot = shutil.which("certbot")
     if not certbot:
         return fail("certbot missing; rerun the reviewed XMesh Node bootstrap")
+    if not DEPLOY_HOOK.is_file() or not os.access(DEPLOY_HOOK, os.X_OK):
+        return fail("TLS deploy hook missing; rerun the reviewed XMesh Node bootstrap")
     print("XMesh managed TLS: requesting ACME certificate for configured node domain", file=sys.stderr)
     try:
         result = subprocess.run([
             certbot, "certonly", "--standalone", "--preferred-challenges", "http",
             "--non-interactive", "--agree-tos", "--no-eff-email",
             "--email", email, "-d", domain, "--keep-until-expiring",
-            "--deploy-hook", "/usr/local/sbin/xmesh-tls-renew-hook",
+            "--deploy-hook", str(DEPLOY_HOOK),
         ], timeout=240)
     except subprocess.TimeoutExpired:
         return fail("ACME validation timed out; check DNS and external TCP/80")
