@@ -8,7 +8,7 @@ export LC_ALL=C
 
 if [[ $EUID -ne 0 ]]; then
   command -v sudo >/dev/null 2>&1 || { echo "Run as root (sudo is unavailable)." >&2; exit 1; }
-  exec sudo bash "$0" "$@"
+  exec sudo --preserve-env=XMESH_NEXUS_RELEASE_REF bash "$0" "$@"
 fi
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "Usage: bash bootstrap.sh https://panel.example.com NODE_ID [node-port]" >&2
@@ -80,6 +80,7 @@ for unit in \
   xmesh-node-metrics.timer xmesh-node-metrics.service \
   xmesh-node-control.timer xmesh-node-control.service \
   xmesh-xray-sync.timer xmesh-xray-sync.service \
+  xmesh-node-user-meter.timer xmesh-node-user-meter.service \
   xmesh-node-tls-renew.timer xmesh-node-tls-renew.service \
   xmesh-geodata-sync.timer xmesh-geodata-sync.service; do
   systemctl disable --now "$unit" >/dev/null 2>&1 || true
@@ -182,16 +183,26 @@ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-node 2>/dev/null || true)"
   exit 1
 fi
 
-# Keep Xray stopped until the v6 strict-PQ reconciliation agent has fetched and
-# verified a policy over the product tunnel. There is deliberately no legacy
-# direct-HTTPS fallback in this installer.
+# Keep Xray stopped until the first strict-PQ desired-config reconciliation.
 if docker inspect xmesh-managed-xray >/dev/null 2>&1; then
   docker update --restart=no xmesh-managed-xray >/dev/null 2>&1 || true
   docker stop -t 5 xmesh-managed-xray >/dev/null 2>&1 || true
 fi
 
+# Installs metrics/control/Xray reconciliation with a PATH-scoped transport
+# adapter. Their panel POST cannot reach classical HTTPS; the adapter invokes
+# the product client, which re-verifies the durable PQ receipt on every call.
+bash "$INSTALL_DIR/deploy/install-v6-strict-operational-agents.sh" "$PANEL" "$NODE" auto
+
+# Final installation proof is local and cryptographic, not inferred from
+# service names or containers.
+"$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null
+systemctl is-enabled --quiet xmesh-xray-sync.timer
+systemctl is-enabled --quiet xmesh-node-metrics.timer
+systemctl is-enabled --quiet xmesh-node-control.timer
+
 echo
-echo "XMesh Node v6 strict-PQ bootstrap gate complete."
-echo "Router started only after verified PQ activation receipt."
-echo "Managed Xray and operational agents remain fail-closed until strict-PQ reconciliation is installed."
-echo "No classical operational fallback was enabled."
+echo "XMesh Node v6.0.0 POSTQUANTUM installation complete."
+echo "strictPQEnabled=true; automaticClassicalFallback=false."
+echo "Router and operational agents were started only after verified PQ activation."
+echo "Managed Xray is started only by a desired-config reconciliation transported through strict-PQ."
