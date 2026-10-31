@@ -56,8 +56,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
   chmod a+r /etc/apt/keyrings/docker.asc
   arch="$(dpkg --print-architecture)"
   case "$arch" in amd64|arm64|armhf|s390x|ppc64el) ;; *) echo "Unsupported Docker architecture: $arch" >&2; exit 1;; esac
-  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
-    "$arch" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
+  printf 'deb [arch=%s signed-by=%s] https://download.docker.com/linux/ubuntu %s stable\n' \
+    "$arch" /etc/apt/keyrings/docker.asc "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
   apt_get update
   apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
@@ -65,9 +65,13 @@ systemctl enable --now docker
 docker info >/dev/null
 docker compose version >/dev/null
 
+# Runtime source/config lives outside /root because the reconciliation service
+# intentionally uses ProtectHome=true. Reusing a historical /root checkout
+# makes the router bind-mounted config invisible to that sandbox and prevents
+# the first desired-config reconciliation from remounting the router safely.
 INSTALL_DIR=/opt/xmesh-node
-if [[ -d /root/XMesh-Node/.git ]]; then INSTALL_DIR=/root/XMesh-Node; fi
 if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+  rm -rf "$INSTALL_DIR"
   git clone --filter=blob:none --no-checkout https://github.com/TriplexCorp/XMesh-Node.git "$INSTALL_DIR"
 fi
 # A v6 product install never consumes moving main. Fetch and detach at the
