@@ -102,7 +102,7 @@ class PendingEnrollmentTest(unittest.TestCase):
         # Pending is a valid control-plane state after PQ activation, but it is
         # never permission to fabricate/apply a placeholder Xray config.
         self.assertIn("No previously issued signed offline policy", SYNC)
-        self.assertIn("docker stop -t 5 xmesh-managed-xray", SYNC)
+        self.assertIn("docker stop -t 3 xmesh-managed-xray", SYNC)
         self.assertIn("OnUnitInactiveSec=20s", OPERATIONAL)
         self.assertIn("systemctl start xmesh-xray-sync.service", OPERATIONAL)
 
