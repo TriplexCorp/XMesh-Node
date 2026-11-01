@@ -2,8 +2,11 @@
 """Attest a running Xray instance against its signed desired policy.
 
 The local autonomous policy guard may REMOVE clients from the signed base
-configuration. It must never add clients or modify other configuration fields.
-Only the signed base revision is reported to the control plane.
+configuration. It must never add clients or modify transport/routing fields.
+
+For commercial zero-downtime user reconciliation the node may additionally
+enable HandlerService on the already signed loopback-only XMesh API. This is
+the sole local service augmentation accepted by attestation.
 """
 import hashlib
 import importlib.util
@@ -20,8 +23,46 @@ GUARD = pathlib.Path("/usr/local/libexec/xmesh-policy-guard.py")
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                      allow_nan=False).encode("utf-8")
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _normalise_private_api(base_rest, active_rest):
+    """Allow exactly one local HandlerService addition and nothing broader."""
+    base_api = base_rest.get("api")
+    active_api = active_rest.get("api")
+    if not isinstance(base_api, dict) or not isinstance(active_api, dict):
+        return False
+    if base_api.get("tag") != "xmesh_stats_api" or active_api.get("tag") != "xmesh_stats_api":
+        return False
+    base_services = base_api.get("services")
+    active_services = active_api.get("services")
+    if not isinstance(base_services, list) or not isinstance(active_services, list):
+        return False
+    if any(not isinstance(item, str) for item in base_services + active_services):
+        return False
+    if len(base_services) != len(set(base_services)) or len(active_services) != len(set(active_services)):
+        return False
+    if "StatsService" not in base_services:
+        return False
+    if "HandlerService" in base_services:
+        allowed = set(base_services)
+    else:
+        allowed = set(base_services) | {"HandlerService"}
+    if set(active_services) != allowed:
+        return False
+
+    # Normalise only the service-list delta; every other API field must remain
+    # byte-for-byte equivalent after canonical JSON encoding.
+    active_api_copy = dict(active_api)
+    active_api_copy["services"] = list(base_services)
+    active_rest["api"] = active_api_copy
+    return True
 
 
 def is_restricted_copy(base, active):
@@ -31,6 +72,13 @@ def is_restricted_copy(base, active):
     active_rest = dict(active)
     original_inbounds = base_rest.pop("inbounds", None)
     running_inbounds = active_rest.pop("inbounds", None)
+
+    # HandlerService is a node-local operational capability, never a license to
+    # change the signed API tag, listener, routing, or any other application.
+    if base_rest.get("api") != active_rest.get("api"):
+        if not _normalise_private_api(base_rest, active_rest):
+            return False
+
     if canonical(base_rest) != canonical(active_rest):
         return False
     if not isinstance(original_inbounds, list) or not isinstance(running_inbounds, list):
@@ -51,7 +99,7 @@ def is_restricted_copy(base, active):
         old_settings = dict(old_settings)
         new_settings = dict(new_settings)
         # Proxy accounts may be stored in clients (VLESS) or users (Hysteria,
-        # VMess, Trojan, Shadowsocks). Both may only SHRINK after offline
+        # VMess, Trojan, Shadowsocks, MASQUE). Both may only SHRINK after offline
         # enforcement; account additions or edits fail attestation.
         for account_field in ("clients", "users"):
             original_accounts = old_settings.pop(account_field, None)
@@ -85,8 +133,14 @@ def check():
         envelope = json.loads(ENVELOPE.read_text(encoding="utf-8"))
         node_id = envelope["policy"]["nodeId"]
         guard.verify_envelope(envelope, STATE, node_id, first_contact=False)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError,
-            subprocess.SubprocessError):
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        subprocess.SubprocessError,
+    ):
         return None, "policy_invalid"
     revision = envelope["policy"].get("configSha256")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
@@ -102,7 +156,10 @@ def check():
     try:
         proc = subprocess.run(
             ["docker", "inspect", "xmesh-managed-xray"],
-            check=True, capture_output=True, text=True, timeout=5,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         item = json.loads(proc.stdout)[0]
         if item.get("State", {}).get("Running") is not True:
@@ -115,8 +172,14 @@ def check():
             for mount in mounts
         ):
             return None, "mount_mismatch"
-    except (OSError, ValueError, TypeError, KeyError, IndexError,
-            subprocess.SubprocessError):
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        subprocess.SubprocessError,
+    ):
         return None, "container_unavailable"
     return revision, "verified"
 
