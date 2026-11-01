@@ -81,12 +81,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "positional commands are not supported")
 		os.Exit(2)
 	}
-	if !validProductionVersion(version) {
-		fmt.Fprintln(os.Stderr, "activation binary has no approved production version")
-		os.Exit(2)
-	}
 	if !validRevision(sourceRevision) {
 		fmt.Fprintln(os.Stderr, "activation binary has no approved source revision")
+		os.Exit(2)
+	}
+	if !validProductionVersion(version) {
+		fmt.Fprintln(os.Stderr, "activation binary has no approved production version")
 		os.Exit(2)
 	}
 	artifactSHA, err := executableSHA()
