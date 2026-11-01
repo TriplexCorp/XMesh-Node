@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""XMesh v6 policy-guard compatibility layer for independent protocol secrets.
+"""XMesh v6 policy guard compatibility layer for independent protocol secrets.
 
 Nexus signs the complete desired Xray configuration through configSha256, while
 policy users retain the stable VLESS xrayId used for quota/expiry accounting.
@@ -8,6 +8,11 @@ Trojan, Hysteria2, MASQUE and Shadowsocks. This layer keeps the existing policy
 guard and its offline-accounting rules intact while resolving signed accounts
 through their signed xmesh-u<ID>--<tag> identity instead of requiring every
 transport secret to equal the VLESS UUID.
+
+When the optional hot-user helper is present, the effective config is augmented
+with HandlerService only on the existing loopback XMesh API. User-only changes
+are then reconciled in memory. Structural changes and any HandlerService failure
+remain on the existing validated full-redeploy path.
 """
 from __future__ import annotations
 
@@ -35,14 +40,35 @@ spec.loader.exec_module(base)
 # Keep immutable references to the reviewed historical helpers before the base
 # module globals are redirected to the v6 independent-credential semantics.
 _base_configured_accounts = base.configured_accounts
+_base_enforce = base.enforce
 
 # Export the base module API so xmesh-profile-attest.py can import this installed
-# file exactly as it imported the historical guard.
+# file exactly as it imported the historical guard. In particular check_signature
+# remains the reviewed Ed25519 verification primitive used by verify_envelope.
 for _name in dir(base):
     if not _name.startswith("__"):
         globals()[_name] = getattr(base, _name)
 
 HEX_256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _load_hot_helper():
+    candidates = [
+        HERE / "xmesh-hot-user-reconcile.py",
+        Path("/opt/xmesh-node/deploy/xmesh-hot-user-reconcile.py"),
+    ]
+    helper = next((path for path in candidates if path.is_file()), None)
+    if helper is None:
+        return None
+    hot_spec = importlib.util.spec_from_file_location("xmesh_hot_user_reconcile", helper)
+    if hot_spec is None or hot_spec.loader is None:
+        raise SystemExit("XMesh hot-user helper cannot be loaded")
+    module = importlib.util.module_from_spec(hot_spec)
+    hot_spec.loader.exec_module(module)
+    return module
+
+
+hot = _load_hot_helper()
 
 
 def _valid_signed_credential(protocol: str, method: str, credential: str, legacy_xray_id: str) -> bool:
@@ -111,13 +137,29 @@ def account_uuid(entry, credential_key, identities):
     return user
 
 
+def enforce(*args, **kwargs):
+    """Preserve policy enforcement, then optionally take the zero-downtime path."""
+    effective, ledger, denied = _base_enforce(*args, **kwargs)
+    if hot is not None:
+        # augment_config is intentionally fail-closed: HandlerService may only
+        # be exposed on the existing 127.0.0.1:10085 private API. Once the
+        # effective target is safe, hot_reconcile_active itself is best-effort;
+        # returning False leaves ACTIVE unchanged and xmesh-xray-sync performs
+        # its existing validated full redeploy.
+        hot.augment_config(effective)
+        hot.hot_reconcile_active(effective)
+    return effective, ledger, denied
+
+
 # Functions defined in the base module resolve globals from the base module's
-# dictionary. Replace both helpers there before exposing/using verify_envelope
-# or enforce, otherwise the compatibility layer would be cosmetic only.
+# dictionary. Replace the compatibility helpers there before exposing/using
+# verify_envelope or enforce, otherwise this wrapper would be cosmetic only.
 base.configured_accounts = configured_accounts
 base.account_uuid = account_uuid
+base.enforce = enforce
 globals()["configured_accounts"] = configured_accounts
 globals()["account_uuid"] = account_uuid
+globals()["enforce"] = enforce
 
 if __name__ == "__main__":
     try:
