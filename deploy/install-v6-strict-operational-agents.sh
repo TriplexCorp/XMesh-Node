@@ -33,8 +33,10 @@ install -d -o root -g root -m 0755 /usr/local/libexec /usr/local/libexec/xmesh-s
 install -o root -g root -m 0700 "$ROOT/deploy/xmesh-strict-pq-curl.sh" /usr/local/libexec/xmesh-strict-pq-curl
 ln -sfn /usr/local/libexec/xmesh-strict-pq-curl /usr/local/libexec/xmesh-strict-pq-bin/curl
 
-# Helpers are taken from the exact checked-out Node release.
-for helper in xmesh-policy-guard.py xmesh-profile-attest.py xmesh-geodata-sync.py xmesh-tls-provision.py xmesh-tls-status.py; do
+# Helpers are taken from the exact checked-out Node release. The policy wrapper
+# and its reviewed base are installed together so runtime does not depend on
+# the source checkout remaining available after bootstrap.
+for helper in xmesh-policy-guard.py xmesh-policy-guard-base.py xmesh-profile-attest.py xmesh-geodata-sync.py xmesh-tls-provision.py xmesh-tls-status.py; do
   [[ -f "$ROOT/deploy/$helper" && ! -L "$ROOT/deploy/$helper" ]] || { echo "missing Node helper: $helper" >&2; exit 1; }
   python3 -m py_compile "$ROOT/deploy/$helper"
   install -o root -g root -m 0700 "$ROOT/deploy/$helper" "/usr/local/libexec/$helper"
@@ -55,7 +57,7 @@ fetch_install(){
   local remote="$1" target="$2" mode="$3" tmp
   tmp="$(mktemp /tmp/xmesh-v6-agent.XXXXXXXX)"
   trap 'rm -f "$tmp"' RETURN
-  /usr/bin/curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 30 "$RAW/$remote" -o "$tmp"
+  /usr/bin/curl --proto '=https' --tlsv1.3 --tls-max 1.3 --fail --silent --show-error --location --max-time 30 "$RAW/$remote" -o "$tmp"
   case "$remote" in *.sh) bash -n "$tmp";; *.py) python3 -m py_compile "$tmp";; esac
   install -o root -g root -m "$mode" "$tmp" "$target"
   rm -f "$tmp"
