@@ -245,6 +245,21 @@ def hot_reconcile_active(target: dict, active_path: Path = ACTIVE) -> bool:
         if running != "true":
             raise HotUserUnavailable("managed Xray is not running")
 
+        # Preflight the complete desired config with the exact running image,
+        # mounts and assets before mutating HandlerService state. The running
+        # process does not reread its config file; only the short-lived `xray
+        # run -test` child does. Always restore the previous bytes before RPCs.
+        _write_active_in_place(active_path, target)
+        try:
+            _run(
+                [
+                    "docker", "exec", CONTAINER, "xray", "run", "-test",
+                    "-config", "/etc/xray/config.json",
+                ]
+            )
+        finally:
+            _write_active_in_place(active_path, current)
+
         # Remove first so a credential rotation with the same email can be
         # re-added without colliding with the existing user identity.
         for operation in plan["remove"]:
