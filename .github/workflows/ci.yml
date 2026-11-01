@@ -24,7 +24,7 @@ jobs:
           go-version-file: go.mod
       - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
       - run: test "$(cat VERSION)" = "6.0.0"
-      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.4"
+      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.5"
       - run: python3 -m py_compile deploy/xmesh-policy-guard.py deploy/xmesh-policy-guard-base.py deploy/xmesh-profile-attest.py deploy/xmesh-hot-user-reconcile.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
@@ -50,7 +50,7 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: false
-      - name: Build and verify v6 strict-PQ production Agent
+      - name: Build and verify v6 strict-PQ production Agents
         shell: bash
         run: |
           set -euo pipefail
@@ -60,11 +60,27 @@ jobs:
           revision="$(git rev-parse HEAD)"
           cd agent/xspv2
           go test ./... -count=1
+
           go build -trimpath -ldflags "-X main.version=$agent_version -X main.sourceRevision=$revision" \
             -o /tmp/xmesh-agent-xspv2-activate ./cmd/xmesh-agent-xspv2-activate
-          identity="$(/tmp/xmesh-agent-xspv2-activate --identity)"
-          digest="$(sha256sum /tmp/xmesh-agent-xspv2-activate | awk '{print $1}')"
-          python3 - "$identity" "$revision" "$digest" "$agent_version" <<'PY'
+          activation_identity="$(/tmp/xmesh-agent-xspv2-activate --identity)"
+          activation_digest="$(sha256sum /tmp/xmesh-agent-xspv2-activate | awk '{print $1}')"
+          python3 - "$activation_identity" "$revision" "$activation_digest" "$agent_version" <<'PY'
+          import json,sys
+          value=json.loads(sys.argv[1])
+          assert value == {
+              'version':sys.argv[4],
+              'sourceRevision':sys.argv[2],
+              'artifactSha256':sys.argv[3],
+          }, value
+          print(json.dumps(value,separators=(',',':')))
+          PY
+
+          go build -trimpath -ldflags "-X main.version=$agent_version -X main.sourceRevision=$revision" \
+            -o /tmp/xmesh-agent-xspv2-product ./cmd/xmesh-agent-xspv2-product
+          product_identity="$(/tmp/xmesh-agent-xspv2-product --identity)"
+          product_digest="$(sha256sum /tmp/xmesh-agent-xspv2-product | awk '{print $1}')"
+          python3 - "$product_identity" "$revision" "$product_digest" "$agent_version" <<'PY'
           import json,sys
           value=json.loads(sys.argv[1])
           assert value == {
