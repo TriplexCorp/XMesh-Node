@@ -32,7 +32,13 @@ TEMP_ROOT="${TMPDIR:-/tmp}"
   exit 1
 }
 BUILD_DIR="$(mktemp -d "$TEMP_ROOT/xmesh-pq-agent.XXXXXXXX")"
-trap 'rm -rf "$BUILD_DIR"' EXIT
+ACTIVATION_STAGE="/usr/local/bin/.xmesh-agent-xspv2-activate.v6.new"
+PRODUCT_STAGE="/usr/local/bin/.xmesh-agent-xspv2-product.v6.new"
+cleanup() {
+  rm -rf "$BUILD_DIR"
+  rm -f "$ACTIVATION_STAGE" "$PRODUCT_STAGE"
+}
+trap cleanup EXIT
 
 # Go 1.27.3 is the reviewed production toolchain for the v6 strict-PQ runtime.
 docker run --rm \
@@ -53,8 +59,17 @@ ACTIVATION_DIGEST="$(sha256sum "$ACTIVATION_BINARY" | awk '{print $1}')"
 PRODUCT_DIGEST="$(sha256sum "$PRODUCT_BINARY" | awk '{print $1}')"
 [[ "$ACTIVATION_DIGEST" =~ ^[0-9a-f]{64}$ && "$PRODUCT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid PQ Agent digest" >&2; exit 1; }
 
-ACTIVATION_IDENTITY="$(timeout 10 "$ACTIVATION_BINARY" --identity)"
-PRODUCT_IDENTITY="$(timeout 10 "$PRODUCT_BINARY" --identity)"
+# The private build temp root may be mounted noexec by the host. Never weaken
+# that mount: copy exact bytes into root-owned executable staging first, verify
+# their digests again, and only then execute --identity from /usr/local/bin.
+install -d -o root -g root -m 0755 /usr/local/bin
+install -o root -g root -m 0755 "$ACTIVATION_BINARY" "$ACTIVATION_STAGE"
+install -o root -g root -m 0755 "$PRODUCT_BINARY" "$PRODUCT_STAGE"
+[[ "$(sha256sum "$ACTIVATION_STAGE" | awk '{print $1}')" == "$ACTIVATION_DIGEST" ]] || { echo "Staged activation Agent digest mismatch" >&2; exit 1; }
+[[ "$(sha256sum "$PRODUCT_STAGE" | awk '{print $1}')" == "$PRODUCT_DIGEST" ]] || { echo "Staged product Agent digest mismatch" >&2; exit 1; }
+
+ACTIVATION_IDENTITY="$(timeout 10 "$ACTIVATION_STAGE" --identity)"
+PRODUCT_IDENTITY="$(timeout 10 "$PRODUCT_STAGE" --identity)"
 python3 - "$ACTIVATION_IDENTITY" "$PRODUCT_IDENTITY" "$AGENT_VERSION" "$SOURCE_REVISION" "$ACTIVATION_DIGEST" "$PRODUCT_DIGEST" <<'PY'
 import json,sys
 activation=json.loads(sys.argv[1]); product=json.loads(sys.argv[2])
@@ -64,11 +79,8 @@ assert product=={"version":version,"sourceRevision":revision,"artifactSha256":pr
 PY
 
 install -d -o root -g root -m 0700 /var/lib/xmesh-agent /var/lib/xmesh-agent/xsp-v2 /var/lib/xmesh-agent/product
-install -d -o root -g root -m 0755 /usr/local/bin
-install -o root -g root -m 0755 "$ACTIVATION_BINARY" /usr/local/bin/.xmesh-agent-xspv2-activate.v6.new
-install -o root -g root -m 0755 "$PRODUCT_BINARY" /usr/local/bin/.xmesh-agent-xspv2-product.v6.new
-mv -f /usr/local/bin/.xmesh-agent-xspv2-activate.v6.new /usr/local/bin/xmesh-agent-xspv2-activate
-mv -f /usr/local/bin/.xmesh-agent-xspv2-product.v6.new /usr/local/bin/xmesh-agent-xspv2-product
+mv -f "$ACTIVATION_STAGE" /usr/local/bin/xmesh-agent-xspv2-activate
+mv -f "$PRODUCT_STAGE" /usr/local/bin/xmesh-agent-xspv2-product
 
 python3 - /var/lib/xmesh-agent/v6-production-identity.json "$AGENT_VERSION" "$SOURCE_REVISION" "$ACTIVATION_DIGEST" "$PRODUCT_DIGEST" <<'PY'
 import json,os,sys,tempfile
