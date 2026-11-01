@@ -63,9 +63,10 @@ jobs:
         working-directory: agent/xspv2
         env:
           BUILD_VERSION: p0d2-ci
-          ACTIVATION_VERSION: strict-pq-ci
         run: |
           set -euo pipefail
+          export ACTIVATION_VERSION="$(tr -d '\r\n' < ../../AGENT_VERSION)"
+          [[ "$ACTIVATION_VERSION" =~ ^control-v6\.[0-9]+\.[0-9]+$ ]]
           rm -f /tmp/xsp-gofmt.diff
           (gofmt -d . | tee /tmp/xsp-gofmt.diff) || true
 
