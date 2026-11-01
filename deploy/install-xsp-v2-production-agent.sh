@@ -26,7 +26,12 @@ for cmd in docker git python3 sha256sum install mv timeout; do
 done
 docker info >/dev/null 2>&1 || { echo "Docker daemon unavailable" >&2; exit 1; }
 
-BUILD_DIR="$(mktemp -d /tmp/xmesh-pq-agent.XXXXXXXX)"
+TEMP_ROOT="${TMPDIR:-/tmp}"
+[[ "$TEMP_ROOT" == /* && -d "$TEMP_ROOT" && ! -L "$TEMP_ROOT" && -w "$TEMP_ROOT" ]] || {
+  echo "Writable absolute TMPDIR required for PQ Agent build: $TEMP_ROOT" >&2
+  exit 1
+}
+BUILD_DIR="$(mktemp -d "$TEMP_ROOT/xmesh-pq-agent.XXXXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
 # Go 1.27.3 is the reviewed production toolchain for the v6 strict-PQ runtime.
