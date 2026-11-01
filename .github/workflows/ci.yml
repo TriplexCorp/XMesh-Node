@@ -29,7 +29,7 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: docker build --tag xmesh-node:ci .
-      - run: docker run --rm -v "$PWD/config.example.json:/etc/xmesh-node/config.json:ro" xmesh-node:ci -check -config /etc/xmesh-node/config.example.json
+      - run: docker run --rm -v "$PWD/config.example.json:/etc/xmesh-node/config.json:ro" xmesh-node:ci -check -config /etc/xmesh-node/config.json
 
   postquantum-v6:
     runs-on: ubuntu-latest
