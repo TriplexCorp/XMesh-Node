@@ -18,10 +18,12 @@ import sys
 import uuid
 
 HERE = Path(__file__).resolve().parent
-BASE = HERE / "xmesh-policy-guard-base.py"
-if not BASE.is_file():
-    BASE = HERE / "xmesh-policy-guard.py"
-if BASE.resolve() == Path(__file__).resolve() or not BASE.is_file():
+BASE_CANDIDATES = [
+    HERE / "xmesh-policy-guard-base.py",
+    Path("/opt/xmesh-node/deploy/xmesh-policy-guard-base.py"),
+]
+BASE = next((path for path in BASE_CANDIDATES if path.is_file() and path.resolve() != Path(__file__).resolve()), None)
+if BASE is None:
     raise SystemExit("XMesh v6 policy guard base helper is missing")
 
 spec = importlib.util.spec_from_file_location("xmesh_policy_guard_base", BASE)
@@ -52,8 +54,7 @@ def _valid_signed_credential(protocol: str, method: str, credential: str, legacy
         except (ValueError, AttributeError):
             return False
     if protocol == "shadowsocks" and method.startswith("2022-"):
-        # The base guard already binds SS2022 accounts through signed email and
-        # the complete credential bytes are covered by configSha256.
+        # The complete independent PSK is covered by the signed config digest.
         return bool(credential) and len(credential) <= 512
     if protocol in ("trojan", "hysteria", "masque", "shadowsocks"):
         # Nexus currently generates 256-bit hex secrets for these protocols.
