@@ -93,10 +93,35 @@ class HotUserTests(unittest.TestCase):
                 self.assertEqual(json.loads(path.read_text()), new)
         finally:
             hot._run = original
-        actions = ['rmu' if 'rmu' in c[0] else 'adu' if 'adu' in c[0] else 'inspect' for c in calls]
-        self.assertEqual(actions, ['inspect', 'rmu', 'adu'])
-        self.assertEqual(calls[1][2], b'Removed 1 user(s) in total.')
-        self.assertEqual(calls[2][2], b'Added 1 user(s) in total.')
+        actions = ['rmu' if 'rmu' in c[0] else 'adu' if 'adu' in c[0] else 'test' if '-test' in c[0] else 'inspect' for c in calls]
+        self.assertEqual(actions, ['inspect', 'test', 'rmu', 'adu'])
+        self.assertEqual(calls[2][2], b'Removed 1 user(s) in total.')
+        self.assertEqual(calls[3][2], b'Added 1 user(s) in total.')
+
+    def test_preflight_failure_restores_old_config_before_rpc_fallback(self):
+        old = config(); new = config([])
+        hot.augment_config(old); hot.augment_config(new)
+        calls = []
+        original = hot._run
+        def fail_test(args, *, payload=None, expected=None):
+            calls.append(args)
+            if args[:2] == ['docker', 'inspect']:
+                return b'true\n'
+            if '-test' in args:
+                raise hot.HotUserUnavailable('simulated preflight failure')
+            raise AssertionError('user RPC must not run after failed preflight')
+        hot._run = fail_test
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'config.json'
+                path.write_bytes(hot.canonical(old))
+                inode = path.stat().st_ino
+                self.assertFalse(hot.hot_reconcile_active(new, path))
+                self.assertEqual(path.stat().st_ino, inode)
+                self.assertEqual(json.loads(path.read_text()), old)
+        finally:
+            hot._run = original
+        self.assertEqual(len(calls), 2)
 
     def test_rpc_failure_keeps_disk_state_for_full_redeploy_fallback(self):
         old = config(); new = config([])
@@ -105,6 +130,8 @@ class HotUserTests(unittest.TestCase):
         def fail(args, *, payload=None, expected=None):
             if args[:2] == ['docker', 'inspect']:
                 return b'true\n'
+            if '-test' in args:
+                return b''
             raise hot.HotUserUnavailable('simulated rpc failure')
         hot._run = fail
         try:
