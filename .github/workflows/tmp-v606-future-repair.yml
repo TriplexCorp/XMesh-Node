@@ -6,7 +6,6 @@ permissions:
   contents: write
 jobs:
   patch:
-    if: github.event.head_commit.message != 'chore: apply v6.0.6 future repair [codemod]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,18 +30,18 @@ jobs:
           ]
           for name in files:
               p = Path(name)
-              text = p.read_text().replace('control-v6.0.5', 'control-v6.0.6')
-              p.write_text(text)
+              p.write_text(p.read_text().replace('control-v6.0.5', 'control-v6.0.6'))
           PY
           test "$(cat AGENT_VERSION)" = 'control-v6.0.6'
           python3 scripts/check-agent-version-policy.py --base-ref origin/main
           (cd agent/xspv2 && go test ./...)
           git diff --check
-      - name: Commit patch
-        run: |
-          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No codemod changes left.'
+            exit 0
+          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .github/workflows/ci.yml .github/workflows/xsp-p0d-agent.yml AGENT_VERSION agent/xspv2/cmd/xmesh-agent-xspv2-activate/identity_version_test.go agent/xspv2/cmd/xmesh-agent-xspv2-product/identity_version_test.go deploy/install-v6-strict-operational-agents.sh deploy/install-xsp-v2-product-client.sh docs/AGENT_RELEASE_POLICY.md scripts/check-agent-version-policy.py
-          git commit -m 'chore: apply v6.0.6 future repair [codemod]'
+          git commit -m 'chore: apply v6.0.6 future repair'
           git push origin HEAD:fix/agent-v6.0.6-future-repair
