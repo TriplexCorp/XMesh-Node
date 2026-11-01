@@ -11,10 +11,6 @@ import subprocess
 import sys
 
 VERSION_RE = re.compile(r"^control-v([0-9]+)\.([0-9]+)\.([0-9]+)$")
-RUNTIME_PREFIXES = (
-    "agent/",
-    "deploy/",
-)
 RUNTIME_FILES = {
     "bootstrap.sh",
     "install.sh",
@@ -38,6 +34,15 @@ def git(*args: str, check: bool = True) -> str:
     return proc.stdout
 
 
+def is_runtime(path: str) -> bool:
+    if path in RUNTIME_FILES or path.startswith("agent/"):
+        return True
+    if path.startswith("deploy/"):
+        name = path.removeprefix("deploy/")
+        return not (name.startswith("test-") or name.endswith(".md"))
+    return False
+
+
 current_raw = Path("AGENT_VERSION").read_text(encoding="utf-8").strip()
 current = parse_version(current_raw)
 
@@ -52,10 +57,7 @@ if len(sys.argv) > 1:
         for line in git("diff", "--name-only", base, "HEAD").splitlines()
         if line.strip()
     ]
-    runtime_changed = any(
-        path in RUNTIME_FILES or path.startswith(RUNTIME_PREFIXES)
-        for path in changed
-    )
+    runtime_files = [path for path in changed if is_runtime(path)]
     base_raw = git("show", f"{base}:AGENT_VERSION", check=False).strip()
     if base_raw:
         base_version = parse_version(base_raw)
@@ -63,16 +65,13 @@ if len(sys.argv) > 1:
             raise SystemExit(
                 f"Agent version regression: {current_raw} is older than {base_raw}"
             )
-        if runtime_changed and current <= base_version:
-            runtime_list = ", ".join(
-                path for path in changed
-                if path in RUNTIME_FILES or path.startswith(RUNTIME_PREFIXES)
-            )
+        if runtime_files and current <= base_version:
             raise SystemExit(
                 "deployed Agent/runtime changed without an AGENT_VERSION bump: "
-                f"base={base_raw}, current={current_raw}; runtime files: {runtime_list}"
+                f"base={base_raw}, current={current_raw}; runtime files: "
+                + ", ".join(runtime_files)
             )
-    elif runtime_changed:
+    elif runtime_files:
         print("Agent version policy adoption: canonical AGENT_VERSION introduced with runtime changes")
 
 print(f"Agent version policy: {current_raw} OK")
