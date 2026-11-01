@@ -7,6 +7,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Enforce Agent version policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            python3 scripts/check-agent-version-policy.py "origin/${{ github.base_ref }}"
+          else
+            python3 scripts/check-agent-version-policy.py
+          fi
       - name: Verify committed XSP-v2 staging artifact inventory
         run: bash scripts/check-xsp-v2-main-checkpoint.sh
       - uses: actions/setup-go@v5
@@ -14,6 +24,7 @@ jobs:
           go-version-file: go.mod
       - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
       - run: test "$(cat VERSION)" = "6.0.0"
+      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.1"
       - run: python3 -m py_compile deploy/xmesh-policy-guard.py deploy/xmesh-policy-guard-base.py deploy/xmesh-profile-attest.py deploy/xmesh-hot-user-reconcile.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
@@ -44,18 +55,20 @@ jobs:
         run: |
           set -euo pipefail
           test "$(cat VERSION)" = "6.0.0"
+          agent_version="$(tr -d '\r\n' < AGENT_VERSION)"
+          [[ "$agent_version" =~ ^control-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           revision="$(git rev-parse HEAD)"
           cd agent/xspv2
           go test ./... -count=1
-          go build -trimpath -ldflags "-X main.version=control-v6.0.0 -X main.sourceRevision=$revision" \
+          go build -trimpath -ldflags "-X main.version=$agent_version -X main.sourceRevision=$revision" \
             -o /tmp/xmesh-agent-xspv2-activate ./cmd/xmesh-agent-xspv2-activate
           identity="$(/tmp/xmesh-agent-xspv2-activate --identity)"
           digest="$(sha256sum /tmp/xmesh-agent-xspv2-activate | awk '{print $1}')"
-          python3 - "$identity" "$revision" "$digest" <<'PY'
+          python3 - "$identity" "$revision" "$digest" "$agent_version" <<'PY'
           import json,sys
           value=json.loads(sys.argv[1])
           assert value == {
-              'version':'control-v6.0.0',
+              'version':sys.argv[4],
               'sourceRevision':sys.argv[2],
               'artifactSha256':sys.argv[3],
           }, value

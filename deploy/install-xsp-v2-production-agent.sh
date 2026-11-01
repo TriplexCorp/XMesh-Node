@@ -11,7 +11,10 @@ VERSION_FILE="$ROOT/VERSION"
 [[ -f "$VERSION_FILE" && ! -L "$VERSION_FILE" ]] || { echo "VERSION file missing" >&2; exit 1; }
 NODE_VERSION="$(tr -d '\r\n' < "$VERSION_FILE")"
 [[ "$NODE_VERSION" == "6.0.0" ]] || { echo "Unexpected Node release version: $NODE_VERSION" >&2; exit 1; }
-AGENT_VERSION="control-v6.0.0"
+AGENT_VERSION_FILE="$ROOT/AGENT_VERSION"
+[[ -f "$AGENT_VERSION_FILE" && ! -L "$AGENT_VERSION_FILE" ]] || { echo "AGENT_VERSION file missing" >&2; exit 1; }
+AGENT_VERSION="$(tr -d '\r\n' < "$AGENT_VERSION_FILE")"
+[[ "$AGENT_VERSION" =~ ^control-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid Agent release version: $AGENT_VERSION" >&2; exit 1; }
 SOURCE_REVISION="${1:-$(git -C "$ROOT" rev-parse HEAD)}"
 [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid source revision" >&2; exit 2; }
 [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$SOURCE_REVISION" ]] || {
@@ -83,4 +86,4 @@ PY
 chmod 0600 /var/lib/xmesh-agent/v6-production-identity.json
 /usr/local/bin/xmesh-agent-xspv2-activate --identity
 /usr/local/bin/xmesh-agent-xspv2-product --identity
-echo "XMesh Node v${NODE_VERSION}: strict-PQ activation and product runtimes installed."
+echo "XMesh Node v${NODE_VERSION}: Agent ${AGENT_VERSION} strict-PQ activation and product runtimes installed."
