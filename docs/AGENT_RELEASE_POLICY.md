@@ -24,4 +24,4 @@ For a production Agent release, the advertised heartbeat version, Nexus target `
 
 `Node CI` runs `scripts/check-agent-version-policy.py`. On pull requests it compares the runtime diff with the base branch and fails when deployed runtime files changed without a strictly newer `AGENT_VERSION`. It also verifies that the strict-PQ production installer consumes the canonical version file.
 
-Current target: **`control-v6.0.3`**.
+Current target: **`control-v6.0.4`**.
