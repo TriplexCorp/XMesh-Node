@@ -8,6 +8,7 @@ standalone = (root / "install.sh").read_text()
 operational = (root / "deploy/install-v6-strict-operational-agents.sh").read_text()
 adapter = (root / "deploy/xmesh-strict-pq-curl.sh").read_text()
 guard = (root / "deploy/xmesh-policy-guard.py").read_text()
+guard_base = (root / "deploy/xmesh-policy-guard-base.py").read_text()
 tls_provision = (root / "deploy/xmesh-tls-provision.py").read_text()
 
 # Fresh v6 must not use the historical classical enrollment/install path.
@@ -109,5 +110,13 @@ assert "command curl" not in adapter
 assert "curl --" not in adapter
 assert "http.Client" not in adapter
 
-assert 'choices=["prepare", "offline", "commit", "sample"]' in guard
-print("Fresh v6 strict-PQ fail-closed bootstrap, durable operational timers, TLS/router sandbox boundaries, standalone install and verified per-user metering contract: OK")
+# The v6 policy entrypoint intentionally layers independent protocol credentials
+# over the reviewed historical accounting/replay guard. Both files must ship as
+# one runtime unit; the base retains the CLI and the wrapper redirects only the
+# account identity helpers.
+assert 'choices=["prepare", "offline", "commit", "sample"]' in guard_base
+assert 'base.configured_accounts = configured_accounts' in guard
+assert 'base.account_uuid = account_uuid' in guard
+assert 'xmesh-policy-guard-base.py' in operational.split('for helper in ', 1)[1].split('; do', 1)[0]
+assert '--tlsv1.3 --tls-max 1.3' in operational
+print("Fresh v6 strict-PQ fail-closed bootstrap, durable operational timers, layered policy guard, TLS/router sandbox boundaries, standalone install and verified per-user metering contract: OK")
