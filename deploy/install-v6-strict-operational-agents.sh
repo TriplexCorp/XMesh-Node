@@ -18,6 +18,10 @@ INTERFACE="${3:-auto}"
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 [[ "$(tr -d '\r\n' < "$ROOT/VERSION")" == "6.0.0" ]] || { echo "XMesh Node v6.0.0 required" >&2; exit 1; }
+AGENT_VERSION_FILE="$ROOT/AGENT_VERSION"
+[[ -f "$AGENT_VERSION_FILE" && ! -L "$AGENT_VERSION_FILE" ]] || { echo "AGENT_VERSION file missing" >&2; exit 1; }
+AGENT_VERSION="$(tr -d '\r\n' < "$AGENT_VERSION_FILE")"
+[[ "$AGENT_VERSION" =~ ^control-v6\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid Agent release version: $AGENT_VERSION" >&2; exit 1; }
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo "strict-PQ product client missing" >&2; exit 1; }
 "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null || {
@@ -68,7 +72,7 @@ fetch_install node-control-agent.sh /usr/local/sbin/xmesh-node-control 0700
 fetch_install xray-stats-collector.py /usr/local/libexec/xmesh-xray-stats-collector.py 0700
 
 grep -Fq '/api/v1/metrics/ingest' /usr/local/sbin/xmesh-node-metrics || { echo "invalid metrics worker" >&2; exit 1; }
-grep -Fq 'AGENT_VERSION="control-v6.0.0"' /usr/local/sbin/xmesh-node-control || { echo "invalid control worker" >&2; exit 1; }
+grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
 
 install -d -o root -g root -m 0700 /etc/xmesh-node-metrics /var/lib/xmesh-node-metrics /var/lib/xmesh-node-control /var/lib/xmesh-xray-sync
 cat > /etc/xmesh-node-metrics.env <<EOF
