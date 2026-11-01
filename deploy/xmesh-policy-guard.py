@@ -141,13 +141,17 @@ def enforce(*args, **kwargs):
     """Preserve policy enforcement, then optionally take the zero-downtime path."""
     effective, ledger, denied = _base_enforce(*args, **kwargs)
     if hot is not None:
-        # augment_config is intentionally fail-closed: HandlerService may only
-        # be exposed on the existing 127.0.0.1:10085 private API. Once the
-        # effective target is safe, hot_reconcile_active itself is best-effort;
-        # returning False leaves ACTIVE unchanged and xmesh-xray-sync performs
-        # its existing validated full redeploy.
-        hot.augment_config(effective)
-        hot.hot_reconcile_active(effective)
+        # HandlerService may only be exposed on the reviewed loopback API. If a
+        # legacy/minimal config has no such API, hot reconciliation is simply
+        # unavailable and the existing full-redeploy behavior remains intact.
+        try:
+            hot.augment_config(effective)
+        except ValueError:
+            pass
+        else:
+            # hot_reconcile_active is best-effort; returning False leaves ACTIVE
+            # unchanged and xmesh-xray-sync performs its validated full redeploy.
+            hot.hot_reconcile_active(effective)
     return effective, ledger, denied
 
 
