@@ -32,6 +32,10 @@ if spec is None or spec.loader is None:
 base = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(base)
 
+# Keep immutable references to the reviewed historical helpers before the base
+# module globals are redirected to the v6 independent-credential semantics.
+_base_configured_accounts = base.configured_accounts
+
 # Export the base module API so xmesh-profile-attest.py can import this installed
 # file exactly as it imported the historical guard.
 for _name in dir(base):
@@ -63,7 +67,7 @@ def _valid_signed_credential(protocol: str, method: str, credential: str, legacy
 
 
 def configured_accounts(inbound):
-    entries, credential_key = base.configured_accounts(inbound)
+    entries, credential_key = _base_configured_accounts(inbound)
     # A signed config must not assign one transport credential to two panel
     # identities. The email is the stable accounting binding, but authentication
     # at Xray still happens through the transport credential itself.
