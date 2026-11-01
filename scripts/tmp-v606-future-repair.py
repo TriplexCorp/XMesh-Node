@@ -19,6 +19,6 @@ for name in FILES:
 
 if Path('AGENT_VERSION').read_text().strip() != 'control-v6.0.6':
     raise SystemExit('canonical Agent version bump failed')
-subprocess.run(['python3', 'scripts/check-agent-version-policy.py', '--base-ref', 'origin/main'], check=True)
+subprocess.run(['python3', 'scripts/check-agent-version-policy.py', 'origin/main'], check=True)
 subprocess.run(['go', 'test', './...'], cwd='agent/xspv2', check=True)
 subprocess.run(['git', 'diff', '--check'], check=True)
