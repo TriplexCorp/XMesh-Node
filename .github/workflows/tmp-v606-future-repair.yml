@@ -1,0 +1,48 @@
+name: Temporary v6.0.6 future repair
+on:
+  push:
+    branches: [fix/agent-v6.0.6-future-repair]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'chore: apply v6.0.6 future repair [codemod]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-v6.0.6-future-repair
+          fetch-depth: 0
+      - name: Apply canonical Agent version bump
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          files = [
+              '.github/workflows/ci.yml',
+              '.github/workflows/xsp-p0d-agent.yml',
+              'AGENT_VERSION',
+              'agent/xspv2/cmd/xmesh-agent-xspv2-activate/identity_version_test.go',
+              'agent/xspv2/cmd/xmesh-agent-xspv2-product/identity_version_test.go',
+              'deploy/install-v6-strict-operational-agents.sh',
+              'deploy/install-xsp-v2-product-client.sh',
+              'docs/AGENT_RELEASE_POLICY.md',
+              'scripts/check-agent-version-policy.py',
+          ]
+          for name in files:
+              p = Path(name)
+              text = p.read_text().replace('control-v6.0.5', 'control-v6.0.6')
+              p.write_text(text)
+          PY
+          test "$(cat AGENT_VERSION)" = 'control-v6.0.6'
+          python3 scripts/check-agent-version-policy.py --base-ref origin/main
+          (cd agent/xspv2 && go test ./...)
+          git diff --check
+      - name: Commit patch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/ci.yml .github/workflows/xsp-p0d-agent.yml AGENT_VERSION agent/xspv2/cmd/xmesh-agent-xspv2-activate/identity_version_test.go agent/xspv2/cmd/xmesh-agent-xspv2-product/identity_version_test.go deploy/install-v6-strict-operational-agents.sh deploy/install-xsp-v2-product-client.sh docs/AGENT_RELEASE_POLICY.md scripts/check-agent-version-policy.py
+          git commit -m 'chore: apply v6.0.6 future repair [codemod]'
+          git push origin HEAD:fix/agent-v6.0.6-future-repair
