@@ -1,7 +1,8 @@
 name: Temporary v6.0.6 future repair
-on:
+'on':
   push:
-    branches: [fix/agent-v6.0.6-future-repair]
+    branches:
+      - fix/agent-v6.0.6-future-repair
 permissions:
   contents: write
 jobs:
@@ -12,30 +13,14 @@ jobs:
         with:
           ref: fix/agent-v6.0.6-future-repair
           fetch-depth: 0
-      - name: Apply canonical Agent version bump
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Apply patch
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          files = [
-              '.github/workflows/ci.yml',
-              '.github/workflows/xsp-p0d-agent.yml',
-              'AGENT_VERSION',
-              'agent/xspv2/cmd/xmesh-agent-xspv2-activate/identity_version_test.go',
-              'agent/xspv2/cmd/xmesh-agent-xspv2-product/identity_version_test.go',
-              'deploy/install-v6-strict-operational-agents.sh',
-              'deploy/install-xsp-v2-product-client.sh',
-              'docs/AGENT_RELEASE_POLICY.md',
-              'scripts/check-agent-version-policy.py',
-          ]
-          for name in files:
-              p = Path(name)
-              p.write_text(p.read_text().replace('control-v6.0.5', 'control-v6.0.6'))
-          PY
-          test "$(cat AGENT_VERSION)" = 'control-v6.0.6'
-          python3 scripts/check-agent-version-policy.py --base-ref origin/main
-          (cd agent/xspv2 && go test ./...)
-          git diff --check
+          python3 scripts/tmp-v606-future-repair.py
           if git diff --quiet; then
             echo 'No codemod changes left.'
             exit 0
