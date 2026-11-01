@@ -24,7 +24,7 @@ jobs:
           go-version-file: go.mod
       - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
       - run: test "$(cat VERSION)" = "6.0.0"
-      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.5"
+      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.6"
       - run: python3 -m py_compile deploy/xmesh-policy-guard.py deploy/xmesh-policy-guard-base.py deploy/xmesh-profile-attest.py deploy/xmesh-hot-user-reconcile.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
