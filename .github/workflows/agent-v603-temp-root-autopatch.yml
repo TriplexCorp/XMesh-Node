@@ -1,0 +1,63 @@
+name: Agent v6.0.3 private temp-root repair
+
+on:
+  push:
+    branches:
+      - fix/agent-v6.0.3-private-tmp
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/agent-v6.0.3-private-tmp
+          fetch-depth: 0
+      - name: Apply bounded repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, expected=1):
+              p=Path(path)
+              text=p.read_text(encoding='utf-8')
+              count=text.count(old)
+              if count != expected:
+                  raise SystemExit(f'{path}: expected {expected}, found {count}: {old!r}')
+              p.write_text(text.replace(old,new),encoding='utf-8')
+
+          Path('AGENT_VERSION').write_text('control-v6.0.3\n',encoding='utf-8')
+          replace('docs/AGENT_RELEASE_POLICY.md','Current target: **`control-v6.0.2`**.','Current target: **`control-v6.0.3`**.')
+          replace('.github/workflows/ci.yml','test "$(cat AGENT_VERSION)" = "control-v6.0.2"','test "$(cat AGENT_VERSION)" = "control-v6.0.3"')
+          replace(
+              'deploy/install-xsp-v2-production-agent.sh',
+              'BUILD_DIR="$(mktemp -d /tmp/xmesh-pq-agent.XXXXXXXX)"',
+              '''TEMP_ROOT="${TMPDIR:-/tmp}"
+[[ "$TEMP_ROOT" == /* && -d "$TEMP_ROOT" && ! -L "$TEMP_ROOT" && -w "$TEMP_ROOT" ]] || {
+  echo "Writable absolute TMPDIR required for PQ Agent build: $TEMP_ROOT" >&2
+  exit 1
+}
+BUILD_DIR="$(mktemp -d "$TEMP_ROOT/xmesh-pq-agent.XXXXXXXX")"'''
+          )
+          PY
+          bash -n deploy/install-xsp-v2-production-agent.sh
+          grep -Fq 'TEMP_ROOT="${TMPDIR:-/tmp}"' deploy/install-xsp-v2-production-agent.sh
+          grep -Fq 'mktemp -d "$TEMP_ROOT/xmesh-pq-agent.XXXXXXXX"' deploy/install-xsp-v2-production-agent.sh
+          python3 scripts/check-agent-version-policy.py
+          git diff --check
+      - name: Commit bounded repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/agent-v603-temp-root-autopatch.yml
+          git add -A
+          git commit -m 'fix(agent): honor private TMPDIR and release v6.0.3'
+          git push origin HEAD:fix/agent-v6.0.3-private-tmp
