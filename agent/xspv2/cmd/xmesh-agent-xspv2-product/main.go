@@ -194,12 +194,34 @@ func selfDigest() (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+func validProductionVersion(value string) bool {
+	const prefix = "control-v6."
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, prefix), ".")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func identity() (releaseIdentity, error) {
 	digest, err := selfDigest()
 	if err != nil {
 		return releaseIdentity{}, err
 	}
-	if version != "control-v6.0.0" || len(sourceRevision) != 40 || len(digest) != 64 {
+	if !validProductionVersion(version) || len(sourceRevision) != 40 || len(digest) != 64 {
 		return releaseIdentity{}, errors.New("non-production XMesh v6 identity")
 	}
 	if _, err := hex.DecodeString(sourceRevision); err != nil {

@@ -35,6 +35,28 @@ func fileSHA256(path string) (string, error) {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:]), nil
 }
+func validProductionVersion(value string) bool {
+	const prefix = "control-v6."
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, prefix), ".")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func validRevision(value string) bool {
 	if len(value) != 40 || strings.ToLower(value) != value {
 		return false
@@ -57,6 +79,10 @@ func main() {
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "positional commands are not supported")
+		os.Exit(2)
+	}
+	if !validProductionVersion(version) {
+		fmt.Fprintln(os.Stderr, "activation binary has no approved production version")
 		os.Exit(2)
 	}
 	if !validRevision(sourceRevision) {
