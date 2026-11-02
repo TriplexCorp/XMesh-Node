@@ -8,7 +8,7 @@ import (
 func TestIdentityAcceptsCurrentProductionPatch(t *testing.T) {
 	oldVersion, oldRevision := version, sourceRevision
 	defer func() { version, sourceRevision = oldVersion, oldRevision }()
-	version = "control-v6.0.6"
+	version = "control-v6.0.7"
 	sourceRevision = strings.Repeat("a", 40)
 	got, err := identity()
 	if err != nil {
