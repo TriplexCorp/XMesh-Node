@@ -20,8 +20,10 @@ For a production Agent release, the advertised heartbeat version, Nexus target `
 
 `sourceRevision` and `artifactSha256` remain part of the immutable Agent release identity and do not replace the version bump requirement.
 
+The signed control-plane update path must never depend on an updater executable frozen to the node's currently installed Agent release. A release-N node must be able to consume a verified release-N+1 updater/bootstrap whose target is bound to the authenticated update command; otherwise the updater itself becomes a release deadlock.
+
 ## CI enforcement
 
 `Node CI` runs `scripts/check-agent-version-policy.py`. On pull requests it compares the runtime diff with the base branch and fails when deployed runtime files changed without a strictly newer `AGENT_VERSION`. It also verifies that the strict-PQ production installer consumes the canonical version file.
 
-Current target: **`control-v6.0.6`**.
+Current target: **`control-v6.0.7`**.
