@@ -5,7 +5,7 @@ package main
 import "testing"
 
 func TestActivationProductionVersionValidation(t *testing.T) {
-	for _, value := range []string{"control-v6.0.0", "control-v6.0.6", "control-v6.12.3"} {
+	for _, value := range []string{"control-v6.0.0", "control-v6.0.7", "control-v6.12.3"} {
 		if !validProductionVersion(value) {
 			t.Fatalf("rejected production version %q", value)
 		}
