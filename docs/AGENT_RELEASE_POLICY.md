@@ -26,4 +26,4 @@ The signed control-plane update path must never depend on an updater executable 
 
 `Node CI` runs `scripts/check-agent-version-policy.py`. On pull requests it compares the runtime diff with the base branch and fails when deployed runtime files changed without a strictly newer `AGENT_VERSION`. It also verifies that the strict-PQ production installer consumes the canonical version file.
 
-Current target: **`control-v6.0.8`**.
+Current target: **`control-v6.0.10`**.

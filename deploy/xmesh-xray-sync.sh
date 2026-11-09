@@ -259,6 +259,20 @@ if [[ -f "$STATE/pinned-image" ]];then
   exit 1
  }
 fi
+# A successfully updated release is bound to its exact local image ID. Never
+# resolve the mutable registry tag again during later configuration syncs.
+if [[ -f "$STATE/pinned-release.json" ]];then
+ IMAGE="$(python3 - "$STATE/pinned-release.json" <<'PYPIN'
+import json,re,sys
+with open(sys.argv[1],encoding="utf-8") as f:d=json.load(f)
+assert set(d)=={"image","imageId"}
+assert re.fullmatch(r"ghcr\.io/xtls/xray-core:[0-9]+\.[0-9]+\.[0-9]+([._+-][A-Za-z0-9._+-]+)?",d["image"])
+assert re.fullmatch(r"sha256:[0-9a-f]{64}",d["imageId"])
+print(d["imageId"])
+PYPIN
+ )" || { echo "Invalid immutable Xray release pin" >&2;exit 1; }
+ docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "Pinned Xray image missing locally; refusing tag drift" >&2;exit 1; }
+fi
 if [[ "$OFFLINE_POLICY" == true ]];then
  # A disconnected node must never download or switch to a different Xray image.
  # Reconcile cached authorizations using the exact locally installed image.

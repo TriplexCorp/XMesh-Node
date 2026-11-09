@@ -1008,11 +1008,12 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 		return err
 	}
 	allowed := map[string]bool{
-		"/api/v1/metrics/ingest":      true,
-		"/api/v1/node/heartbeat":      true,
-		"/api/v1/node/restart/poll":   true,
-		"/api/v1/node/restart/ack":    true,
-		"/api/v1/node/desired-config": true,
+		"/api/v1/metrics/ingest":        true,
+		"/api/v1/node/heartbeat":        true,
+		"/api/v1/node/restart/poll":     true,
+		"/api/v1/node/restart/ack":      true,
+		"/api/v1/node/restart/progress": true,
+		"/api/v1/node/desired-config":   true,
 	}
 	if !allowed[path] {
 		return errors.New("operation is not registered for strict-PQ tunnel")

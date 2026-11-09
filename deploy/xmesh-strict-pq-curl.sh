@@ -61,7 +61,7 @@ base="${XMESH_API_URL%/}"
 [[ "$url" == "$base"/* ]] || { echo "request destination is not the enrolled XMesh panel" >&2; exit 2; }
 path="${url#"$base"}"
 case "$path" in
-  /api/v1/metrics/ingest|/api/v1/node/heartbeat|/api/v1/node/restart/poll|/api/v1/node/restart/ack|/api/v1/node/desired-config) ;;
+  /api/v1/metrics/ingest|/api/v1/node/heartbeat|/api/v1/node/restart/poll|/api/v1/node/restart/ack|/api/v1/node/restart/progress|/api/v1/node/desired-config) ;;
   *) echo "unregistered strict-PQ operational path" >&2; exit 2;;
 esac
 for header in "${headers[@]}"; do

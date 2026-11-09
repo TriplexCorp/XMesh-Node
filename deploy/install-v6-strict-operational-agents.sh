@@ -40,7 +40,7 @@ ln -sfn /usr/local/libexec/xmesh-strict-pq-curl /usr/local/libexec/xmesh-strict-
 # Helpers are taken from the exact checked-out Node release. The policy wrapper,
 # its reviewed base, profile attester and hot-user reconciler are installed
 # together so runtime does not depend on the source checkout after bootstrap.
-for helper in xmesh-policy-guard.py xmesh-policy-guard-base.py xmesh-profile-attest.py xmesh-hot-user-reconcile.py xmesh-geodata-sync.py xmesh-tls-provision.py xmesh-tls-status.py; do
+for helper in xmesh-policy-guard.py xmesh-policy-guard-base.py xmesh-profile-attest.py xmesh-hot-user-reconcile.py xmesh-geodata-sync.py xmesh-tls-provision.py xmesh-tls-status.py xmesh-xray-update.py; do
   [[ -f "$ROOT/deploy/$helper" && ! -L "$ROOT/deploy/$helper" ]] || { echo "missing Node helper: $helper" >&2; exit 1; }
   python3 -m py_compile "$ROOT/deploy/$helper"
   install -o root -g root -m 0700 "$ROOT/deploy/$helper" "/usr/local/libexec/$helper"
