@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-AGENT_VERSION = "control-v6.0.10"
+AGENT_VERSION = "control-v6.0.11"
 VERSION = re.compile(r"v?([0-9]+\.[0-9]+\.[0-9]+(?:[._+-][A-Za-z0-9._+-]+)?)\Z")
 IDENTITY = re.compile(r"sha256:[0-9a-f]{64}\Z")
 OFFICIAL = "ghcr.io/xtls/xray-core:"

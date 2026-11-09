@@ -1,4 +1,4 @@
-# Managed Xray update transaction (Agent control-v6.0.10)
+# Managed Xray update transaction (Agent control-v6.0.11)
 
 ## Confirmed defect
 
@@ -20,7 +20,7 @@ Docker execution, registry and runtime failures.
 ## Operation
 
 1. The panel verifies the official release and GHCR image before queueing a
-   fixed `{version}` command. Updating Xray requires Agent 6.0.10+; older agents
+   fixed `{version}` command. Updating Xray requires Agent 6.0.11+; older agents
    can still enroll and receive the signed Agent upgrade.
 2. The signed Agent invokes a locally installed, version-matched worker. It
    shares the synchronizer's lock and records a durable per-command journal.
@@ -88,7 +88,7 @@ production credentials.
 
 ## Release / rollout
 
-This is a coordinated Nexus + Node Agent patch to control-v6.0.10. The source
+This is a coordinated Nexus + Node Agent patch to control-v6.0.11. The source
 version, backend target, strict-PQ gateway, bootstrap/updater validators and Node
 product identity checks must agree. Build release identities from the exact
 reviewed Node commit; do not substitute placeholder source revisions/digests or
@@ -97,7 +97,7 @@ reuse a 6.0.9 binary. Existing immutable staged-release verification remains act
 Publish/review the paired Node change and Nexus control-plane change together.
 After their green CI and release publication, update the panel and upgrade Agent
 on one noncritical canary through its existing signed update action. Verify its
-6.0.10 version and strict-PQ release identity before selecting an official Xray
+6.0.11 version and strict-PQ release identity before selecting an official Xray
 version. Then roll out the Agent and Xray update in batches. No production nodes
 are modified by this development task. Do not merge red or conflicted PRs.
 
