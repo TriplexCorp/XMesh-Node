@@ -136,13 +136,21 @@ class Updater:
         mounts, config = [], None
         for item in old['Mounts']:
             source, destination = item['Source'], item['Destination']
-            if (item['Type'] != 'bind' or item.get('RW') or
-                any(c in source + destination for c in ',\n\r:') or
+            if (any(c in destination for c in ',\n\r:') or
                 destination in ('/', '/proc', '/sys', '/dev', '/var/run', '/run') or
-                'docker.sock' in destination or source == '/' or not Path(source).exists()):
-                raise Failure('prepare_failed')
-            mounts += ['--mount', f'type=bind,src={source},dst={destination},readonly']
-            if destination == '/etc/xray/config.json': config = Path(source)
+                'docker.sock' in destination):raise Failure('prepare_failed')
+            if item['Type']=='bind':
+                if item.get('RW') or any(c in source for c in ',\n\r:') or source=='/' or not Path(source).exists():raise Failure('prepare_failed')
+                mounts += ['--mount', f'type=bind,src={source},dst={destination},readonly']
+                if destination=='/etc/xray/config.json':config=Path(source)
+            elif item['Type']=='volume':
+                # Official images declare config/log volumes automatically. Use
+                # their existing names, contents and access mode, not fresh ones.
+                name=item.get('Name','')
+                if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',name):raise Failure('prepare_failed')
+                mode='' if item.get('RW') else ',readonly'
+                mounts += ['--mount', f'type=volume,src={name},dst={destination}{mode}']
+            else:raise Failure('prepare_failed')
         if not config or not config.is_file() or config.stat().st_size > 4*1024*1024: raise Failure('prepare_failed')
         # Confirm the bind source still represents the actual running config.
         snapshot = self.logs / 'active-config.private.json'
@@ -154,6 +162,8 @@ class Updater:
         self.record['configSha256'] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
         for value in old['Config'].get('Env') or []:
             if value.startswith('XRAY_'): mounts += ['--env', value]
+        working=old['Config'].get('WorkingDir')
+        if working:mounts+=['--workdir',working]
         return mounts
 
     def health(self, name, identity):
@@ -330,7 +340,8 @@ class Updater:
         if not new or not IDENTITY.fullmatch(new['Id']): raise Failure('image_identity')
         identity = new['Id']; self.record['newImage'] = identity; self.save()
         rc, out, _ = self.run(['run', '--rm', '--network', 'none', '--entrypoint', 'xray', identity, 'version'], code='image_identity')
-        if not re.search(rb'\b' + re.escape(self.target.encode()) + rb'\b', out.splitlines()[0] if out else b''): raise Failure('image_identity')
+        tokens=out.splitlines()[0].split() if out else []
+        if len(tokens)<2 or tokens[0]!=b'Xray' or tokens[1]!=self.target.encode():raise Failure('image_identity')
         self.progress('validating')
         sandbox = ['--user', '0:0', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--entrypoint', 'xray']
         validation = self.next + '.validate'

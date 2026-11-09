@@ -42,7 +42,9 @@ Docker execution, registry and runtime failures.
    redelivery; exact completed command/ACK retries do not perform another update.
 
 Only the specifically owned staged/validation containers can be cleaned up.
-Unsupported writable or non-bind resources fail preflight without touching Xray.
+Existing Docker volumes (including the official image's automatically declared
+config/log volumes), their access modes and the working directory are preserved.
+Writable bind mounts and unsupported resource types fail preflight without touching Xray.
 Concurrent manual Docker edits outside the managed services are unsupported.
 
 ## Diagnostics and privacy
