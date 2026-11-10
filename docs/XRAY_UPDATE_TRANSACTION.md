@@ -20,7 +20,7 @@ Docker execution, registry and runtime failures.
 ## Operation
 
 1. The panel verifies the official release and GHCR image before queueing a
-   fixed `{version}` command. Updating Xray requires Agent 6.0.11+; older agents
+   fixed `{version}` command. Updating Xray requires Agent 6.0.10+; older agents
    can still enroll and receive the signed Agent upgrade.
 2. The signed Agent invokes a locally installed, version-matched worker. It
    shares the synchronizer's lock and records a durable per-command journal.
