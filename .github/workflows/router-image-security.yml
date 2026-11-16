@@ -1,0 +1,83 @@
+name: Router image vulnerability scan
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'go.mod'
+      - '*.go'
+      - '.github/workflows/router-image-security.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  router-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out without persistent credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build real router runtime image
+        run: docker build --pull -t xmesh-node:security .
+      - name: Download exact checksum-verified Trivy scanner
+        shell: bash
+        env:
+          TRIVY_URL: https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz
+          TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, io, os, pathlib, tarfile, urllib.request
+          url=os.environ["TRIVY_URL"]
+          if url != "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz":
+              raise SystemExit("Unexpected Trivy release asset")
+          with urllib.request.urlopen(url,timeout=60) as reply:
+              archive=reply.read(100*1024*1024+1)
+          if len(archive)>100*1024*1024 or hashlib.sha256(archive).hexdigest()!=os.environ["TRIVY_SHA256"]:
+              raise SystemExit("Trivy download checksum or size mismatch")
+          with tarfile.open(fileobj=io.BytesIO(archive),mode="r:gz") as tar:
+              member=tar.getmember("trivy")
+              if not member.isfile() or member.size > 256*1024*1024:
+                  raise SystemExit("Invalid scanner executable entry")
+              reader=tar.extractfile(member)
+              if reader is None:
+                  raise SystemExit("No scanner executable")
+              target=pathlib.Path(os.environ["RUNNER_TEMP"])/"trivy"
+              target.write_bytes(reader.read(256*1024*1024+1))
+              target.chmod(0o700)
+          print("Verified Trivy v0.76.2 from immutable SHA-256")
+          PY
+      - name: Generate audit report for the actual new runtime image
+        env:
+          TRIVY_DISABLE_VEX_NOTICE: "true"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$RUNNER_TEMP/trivy" image --scanners vuln --severity HIGH,CRITICAL \
+            --format json --output "$RUNNER_TEMP/router-trivy.json" \
+            --no-progress xmesh-node:security
+      - name: Preserve exact findings for reviewer triage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xmesh-node-router-image-trivy
+          path: ${{ runner.temp }}/router-trivy.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Fail closed on unresolved High or Critical image advisories
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os
+          report=json.load(open(os.path.join(os.environ["RUNNER_TEMP"],"router-trivy.json"),encoding="utf-8"))
+          findings=[(section.get("Target"),v.get("VulnerabilityID"),v.get("PkgName"),v.get("Severity"))
+            for section in report.get("Results",[]) for v in section.get("Vulnerabilities",[])
+            if v.get("Severity") in ("HIGH","CRITICAL")]
+          for finding in findings:
+              print("Unresolved image advisory:",*finding)
+          if findings:
+              raise SystemExit(f"Router image has {len(findings)} High/Critical advisories: triage before merge")
+          print("No High/Critical findings in this pinned Trivy scan; this is not a full security certification")
+          PY
