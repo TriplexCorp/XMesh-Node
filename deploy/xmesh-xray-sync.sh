@@ -13,7 +13,43 @@ STATE=/var/lib/xmesh-xray-sync
 mkdir -p "$STATE"; chmod 700 "$STATE"
 exec 9>"$STATE/lock"
 flock -n 9 || exit 0
-REQUEST="$(printf '{"node_id":%s}' "$XMESH_NODE_ID")"
+# The signed desired-config request carries the authoritative local guard
+# journal. Only the root-owned, already-persisted totals may become quota-v2
+# acknowledgements; an absent ledger is valid only for first enrollment.
+REQUEST="$(python3 - "$STATE/policy-usage.json" "$XMESH_NODE_ID" <<'PY'
+import json,sys
+from pathlib import Path
+path=Path(sys.argv[1])
+if path.exists():
+    with path.open(encoding="utf-8") as f: ledger=json.load(f)
+    if not isinstance(ledger,dict): raise SystemExit("Invalid durable quota journal")
+    users=ledger.get("users",{})
+    if not isinstance(users,dict): raise SystemExit("Invalid durable quota users")
+else:
+    users={}
+if len(users)>2048: raise SystemExit("Too many durable quota users")
+rows=[]
+for key,entry in users.items():
+    if not isinstance(key,str) or not key.isdecimal() or not isinstance(entry,dict):
+        raise SystemExit("Invalid durable quota entry")
+    uid=int(key)
+    total=entry.get("total",0)
+    if uid<=0 or type(total) is not int or not 0<=total<2**63:
+        raise SystemExit("Invalid durable quota counter")
+    row={"userId":uid,"usedBytes":total}
+    lease=entry.get("quotaReservation")
+    if lease is not None:
+        if not isinstance(lease,dict): raise SystemExit("Invalid durable lease")
+        for field in ("epoch","meterEpoch","reservationId"):
+            value=lease.get(field)
+            if not isinstance(value,str): raise SystemExit("Missing durable lease identity")
+            row[field]=value
+    rows.append(row)
+rows.sort(key=lambda row:row["userId"])
+print(json.dumps({"node_id":int(sys.argv[2]),"quotaProtocolVersion":2,
+                  "quotaLocalCounters":rows},separators=(",",":")))
+PY
+)"
 PATH_API=/api/v1/node/desired-config
 STAMP="$(date +%s)"
 NONCE="$(openssl rand -hex 16)"
@@ -35,6 +71,46 @@ HTTP_STATUS="$(curl --proto '=https' --tlsv1.2 -sS --max-time 20 -X POST "$XMESH
  -H "Content-Type: application/json" -H "X-XMesh-Timestamp: $STAMP" \
  -H "X-XMesh-Nonce: $NONCE" -H "X-XMesh-Signature: $SIG" \
  --data-binary "$REQUEST" -o "$RESP_FILE" -w '%{http_code}')" || HTTP_STATUS=000
+# Rolling upgrade: Node v6.0.14 may be installed before Nexus understands
+# quotaProtocolVersion. Retry the legacy request ONLY for the old control
+# plane's exact unknown-request rejection, and only before any signed quota-v2
+# policy/lease has ever been committed locally. Once v2 is active, fail closed.
+if [[ "$HTTP_STATUS" == 400 ]] && python3 - "$RESP_FILE" "$STATE/policy-envelope.json" "$STATE/policy-usage.json" <<'PY'
+import json,sys
+from pathlib import Path
+try:
+    error_path,policy_path,ledger_path=map(Path,sys.argv[1:])
+    response=json.loads(error_path.read_text(encoding="utf-8"))
+    if not isinstance(response,dict) or response.get("error")!="Invalid node configuration request.":
+        raise ValueError("Not the legacy request schema rejection")
+    if policy_path.exists():
+        if policy_path.is_symlink() or not policy_path.is_file():
+            raise ValueError("Invalid committed policy")
+        version=json.loads(policy_path.read_text(encoding="utf-8")).get("policy",{}).get("version")
+        if version!=1: raise ValueError("Quota v2 downgrade rejected")
+    if ledger_path.exists():
+        if ledger_path.is_symlink() or not ledger_path.is_file():
+            raise ValueError("Invalid durable quota journal")
+        users=json.loads(ledger_path.read_text(encoding="utf-8")).get("users",{})
+        if not isinstance(users,dict) or any(
+                isinstance(row,dict) and "quotaReservation" in row for row in users.values()):
+            raise ValueError("Committed v2 lease prevents downgrade")
+except (OSError,ValueError,TypeError,AttributeError):
+    sys.exit(1)
+PY
+then
+  echo "Legacy Nexus schema detected before v2 cutover; using signed v1 request." >&2
+  REQUEST="$(printf '{"node_id":%s}' "$XMESH_NODE_ID")"
+  STAMP="$(date +%s)"
+  NONCE="$(openssl rand -hex 16)"
+  HASH="$(printf %s "$REQUEST" | openssl dgst -sha256 -r | awk '{print $1}')"
+  printf 'XMESH1\nPOST\n%s\n%s\n%s\n%s\n%s\n' "$PATH_API" "$XMESH_NODE_ID" "$STAMP" "$NONCE" "$HASH" > "$SIGN_FILE"
+  SIG="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$SIGN_FILE" | od -An -tx1 -v | tr -d ' \n')"
+  HTTP_STATUS="$(curl --proto '=https' --tlsv1.2 -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
+    -H "Content-Type: application/json" -H "X-XMesh-Timestamp: $STAMP" \
+    -H "X-XMesh-Nonce: $NONCE" -H "X-XMesh-Signature: $SIG" \
+    --data-binary "$REQUEST" -o "$RESP_FILE" -w '%{http_code}')" || HTTP_STATUS=000
+fi
 if [[ "$HTTP_STATUS" == 000 ]];then
  echo "Panel unavailable; preserving current Xray and checking cached offline policy." >&2
  OFFLINE_POLICY=true

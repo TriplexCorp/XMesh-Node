@@ -130,7 +130,7 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
         raise ValueError("Policy envelope is not an object")
     policy = document.get("policy")
     key = document.get("policyPublicKey")
-    if not isinstance(policy, dict) or policy.get("version") != 1:
+    if not isinstance(policy, dict) or policy.get("version") not in (1, 2):
         raise ValueError("Unknown policy version")
     if type(policy.get("nodeId")) is not int or policy["nodeId"] != node_id:
         raise ValueError("Policy node identity mismatch")
@@ -155,6 +155,8 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
         if committed.exists():
             previous = load_json(committed)
             old_policy = previous.get("policy", {})
+            if old_policy.get("version") == 2 and policy.get("version") != 2:
+                raise ValueError("Quota protocol downgrade rejected")
             old_issued = old_policy.get("issuedAtMs")
             if type(old_issued) is not int:
                 raise ValueError("Stored policy revision is invalid")
@@ -190,6 +192,8 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
             raise ValueError("Invalid signed subscription traffic limit")
         if budget is not None and (type(budget) is not int or not 0 <= budget <= 64 * 1024 * 1024):
             raise ValueError("Invalid offline budget")
+        if policy["version"] == 2 and limit > 0 and not isinstance(user.get("quotaReservation"), dict):
+            raise ValueError("Limited v2 user requires a signed quota reservation")
         if user_id in seen_id or uid in seen_uuid:
             raise ValueError("Duplicate user policy")
         seen_id.add(user_id)
@@ -364,6 +368,47 @@ def committed_snapshot_scope(state_dir, node_id):
     return verified_snapshot_scope(load_json(committed), state_dir, node_id)
 
 
+def applied_revocation_proofs(policy, effective, ledger):
+    """Mark lease-bound stop after the caller has verified Xray deployment.
+
+    This is NOT a refundable final meter. The new Xray process must be
+    running with the user's credential absent; outstanding offline budget
+    remains held centrally even after this acknowledgement.
+    """
+    if not isinstance(effective, dict) or not isinstance(effective.get("inbounds"), list):
+        raise ValueError("Missing applied Xray config for revocation proof")
+    records = ledger.get("users", {})
+    if not isinstance(records, dict):
+        raise ValueError("Invalid durable Node journal")
+    identities = {u["userId"]: u["xrayId"] for u in policy["users"]}
+    for user in policy["users"]:
+        revoke = user.get("quotaRevocation")
+        if revoke is None:
+            continue
+        record = records.get(str(user["userId"]))
+        if not isinstance(record, dict) or record.get("quotaRevocation") != revoke:
+            raise ValueError("Uncommitted signed revocation cannot be acknowledged")
+        for inbound in effective["inbounds"]:
+            if inbound.get("tag") == "xmesh_stats_in":
+                continue
+            accounts, credential_key = configured_accounts(inbound)
+            scoped = dict(identities)
+            scoped["_protocol"] = inbound["protocol"]
+            scoped["_method"] = inbound["settings"].get("method", "")
+            if any(account_uuid(entry, credential_key, scoped) == user["xrayId"]
+                   for entry in accounts):
+                raise ValueError("Revoked Xray credential is still provisioned")
+        used = record.get("total")
+        if type(used) is not int or not 0 <= used < (1 << 63):
+            raise ValueError("Invalid durable stopped-user counter")
+        record["quotaRevocationApplied"] = {
+            **revoke,
+            "revision": user["quotaReservation"]["revision"],
+            "usedBytes": used,
+        }
+    return ledger
+
+
 def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
     """Expose only currently signed accounts/inbounds, retaining ALL ledger history.
 
@@ -405,8 +450,35 @@ def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
     if any(not 0 <= value < (1 << 63) for row in user_rows
            for field, value in row.items() if field != "userId"):
         raise ValueError("Aggregated durable traffic counter overflow")
+    # Receipts are derived from the same durable root-owned ledger as the
+    # admission decision, not from the untrusted telemetry uploader. Only
+    # currently signed, assigned identities can be exported.
+    receipts = []
+    for user_id in sorted(totals):
+        record = ledger.get("users", {}).get(str(user_id), {})
+        if not isinstance(record, dict):
+            continue
+        lease = record.get("quotaReservation")
+        if not isinstance(lease, dict):
+            continue
+        used = record.get("total")
+        if type(used) is not int or not 0 <= used < (1 << 63):
+            raise ValueError("Invalid durable quota usage")
+        receipts.append({"userId": user_id, "epoch": lease["epoch"],
+                         "meterEpoch": lease["meterEpoch"],
+                         "reservationId": lease["reservationId"],
+                         "usedBytes": used})
+    stop_receipts = []
+    for user_id in sorted(totals):
+        record = ledger.get("users", {}).get(str(user_id), {})
+        proof = record.get("quotaRevocationApplied")
+        if proof is not None:
+            if not isinstance(proof, dict) or type(proof.get("usedBytes")) is not int:
+                raise ValueError("Invalid durable revocation proof")
+            stop_receipts.append({"userId": user_id, **proof})
     payload = {"nodeId": node_id, "sampledAtMs": now_ms,
-               "userInboundTraffic": rows, "userTraffic": user_rows}
+               "userInboundTraffic": rows, "userTraffic": user_rows,
+               "quotaReceipts": receipts, "quotaStopReceipts": stop_receipts}
     snapshot = Path("/run/xmesh-node-user-metrics.json")
     if not snapshot.parent.is_dir():
         return
@@ -460,6 +532,74 @@ def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=No
     return ledger
 
 
+def enforce_quota_reservation(user, record, total, now_ms):
+    """Consume only a node-bound absolute ceiling from a verified v2 policy.
+
+    This function is called only after envelope signature/node verification.
+    Aggregate panelUsedBytes is deliberately not an acknowledgement.
+    """
+    lease = user.get("quotaReservation")
+    if not isinstance(lease, dict):
+        raise ValueError("Missing signed quota reservation")
+    required = ("epoch", "meterEpoch", "reservationId", "revision",
+                "acknowledgedBytes", "ceilingBytes", "validUntilMs")
+    if set(lease) != set(required):
+        raise ValueError("Invalid signed quota reservation fields")
+    for field in ("epoch", "meterEpoch", "reservationId"):
+        if not isinstance(lease[field], str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", lease[field]):
+            raise ValueError("Invalid quota reservation identity")
+    for field in ("revision", "acknowledgedBytes", "ceilingBytes", "validUntilMs"):
+        if type(lease[field]) is not int or not 0 <= lease[field] < (1 << 63):
+            raise ValueError("Invalid quota reservation counter")
+    if lease["ceilingBytes"] < lease["acknowledgedBytes"]:
+        raise ValueError("Quota acknowledgement exceeds signed ceiling")
+    if lease["acknowledgedBytes"] > total:
+        raise ValueError("Acknowledgement is ahead of durable local usage")
+    old = record.get("quotaReservation")
+    revoke = user.get("quotaRevocation")
+    if revoke is not None:
+        fields = ("requestId", "epoch", "meterEpoch", "reservationId")
+        if not isinstance(revoke, dict) or set(revoke) != set(fields):
+            raise ValueError("Malformed signed quota revocation")
+        if not isinstance(revoke["requestId"], str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                revoke["requestId"]):
+            raise ValueError("Malformed signed quota revocation identity")
+        if any(revoke[field] != lease[field]
+               for field in ("epoch", "meterEpoch", "reservationId")):
+            raise ValueError("Quota revocation not bound to signed node lease")
+    previous_revoke = record.get("quotaRevocation")
+    if isinstance(previous_revoke, dict) and previous_revoke.get("epoch") == lease["epoch"]:
+        if revoke != previous_revoke:
+            # A newer signed policy can renew a lease, but cannot cancel a
+            # previously committed revocation for the same account epoch.
+            raise ValueError("Signed quota revocation rollback")
+    if revoke is not None:
+        record["quotaRevocation"] = dict(revoke)
+    elif isinstance(previous_revoke, dict) and previous_revoke.get("epoch") != lease["epoch"]:
+        record.pop("quotaRevocation", None)
+    if old is not None:
+        if old["meterEpoch"] != lease["meterEpoch"]:
+            raise ValueError("Meter incarnation changed without reconciliation")
+        if lease["acknowledgedBytes"] < old["acknowledgedBytes"]:
+            raise ValueError("Quota acknowledgement rollback")
+        if old["epoch"] == lease["epoch"] and (
+                lease["revision"] < old["revision"] or
+                lease["reservationId"] != old["reservationId"]):
+            raise ValueError("Quota reservation rollback")
+        if old["epoch"] == lease["epoch"] and lease["revision"] == old["revision"] and lease != old:
+            raise ValueError("Conflicting quota reservation revision")
+    record["quotaReservation"] = dict(lease)
+    if revoke is not None:
+        return "quota-revocation-pending"
+    if now_ms >= lease["validUntilMs"]:
+        return "quota-reservation-expired"
+    if total >= lease["ceilingBytes"]:
+        return "quota"
+    return None
+
+
 def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbound_counters=None):
     """Pure admission decision; caller persists the ledger before applying JSON."""
     if not isinstance(ledger, dict):
@@ -484,31 +624,45 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         # poll never refills a depleted local allowance.
         newly_authorized = (
             fresh and (
-                user["panelUsedBytes"] != previous or
+                (user["panelUsedBytes"] != previous and (policy.get("version") != 2 or limit > 0)) or
                 limit > int(record.get("limitBytes", 0)) or
                 expires > int(record.get("expireAtMs", 0)) or
                 record.get("revokedReason") == "policy-expired"
             )
         )
-        if "anchor" not in record or newly_authorized:
-            record["anchor"] = total
-            record["budget"] = budget
-            record["panelUsedBytes"] = user["panelUsedBytes"]
-            record["revoked"] = False
-            record.pop("revokedReason", None)
+        reservation_reason = None
+        if policy.get("version") == 2 and limit > 0:
+            reservation_reason = enforce_quota_reservation(user, record, total, now_ms)
+            if reservation_reason is None:
+                record["revoked"] = False
+                record.pop("revokedReason", None)
         else:
-            if budget is None:
-                record["budget"] = None
-            elif record.get("budget") is not None:
-                record["budget"] = min(int(record["budget"]), budget)
-        if not offline:
-            record["authorizedAtMs"] = max(int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
-            record["limitBytes"] = limit
-            record["expireAtMs"] = expires
-        reason = None
+            if "anchor" not in record or newly_authorized:
+                record["anchor"] = total
+                record["budget"] = budget
+                record["panelUsedBytes"] = user["panelUsedBytes"]
+                record["revoked"] = False
+                record.pop("revokedReason", None)
+            else:
+                if budget is None:
+                    record["budget"] = None
+                elif record.get("budget") is not None:
+                    record["budget"] = min(int(record["budget"]), budget)
+            if not offline:
+                record["authorizedAtMs"] = max(int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
+                record["limitBytes"] = limit
+                record["expireAtMs"] = expires
+        reason = reservation_reason
         if user["expireAtMs"] and now_ms >= user["expireAtMs"]:
             reason = "expired"
-        elif offline and budget is not None:
+        elif offline and policy.get("version") == 2 and user.get("onHold") is True:
+            # A waiting subscription may bootstrap its *first* connection only
+            # while Nexus can verify and activate it. Cached v2 policy cannot
+            # activate trials after central contact is lost.
+            reason = "subscription-awaiting-first-connection"
+        elif offline and policy.get("version") == 2 and limit > 0 and counters is None:
+            reason = "unverified-traffic-counter"
+        elif offline and budget is not None and not (policy.get("version") == 2 and limit > 0):
             if counters is None:
                 reason = "unverified-traffic-counter"
             elif total - int(record.get("anchor", 0)) >= int(record.get("budget") or 0):
@@ -594,6 +748,17 @@ def main():
         pending = state / "policy-envelope.json.pending"
         if not pending.exists():
             raise ValueError("Missing validated pending policy snapshot")
+        # The shell calls commit only after the validated managed Xray
+        # config is active and its router has reconciled successfully.
+        # A signed deny without that deployment is NOT a stop receipt.
+        pending_doc = load_json(pending)
+        pending_policy = verify_envelope(pending_doc, state, args.node_id)
+        if any(user.get("quotaRevocation") is not None for user in pending_policy["users"]):
+            active_config = load_json(state / "config.json")
+            ledger_file = state / "policy-usage.json"
+            ledger = load_json(ledger_file)
+            ledger = applied_revocation_proofs(pending_policy, active_config, ledger)
+            write_atomic(ledger_file, canonical(ledger))
         # A single atomic rename keeps config and policy bound together.
         os.replace(pending, state / "policy-envelope.json")
         # Immediately republish filtered counters after assignment changes.
