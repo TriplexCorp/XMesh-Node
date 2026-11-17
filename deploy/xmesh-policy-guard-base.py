@@ -551,7 +551,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         # poll never refills a depleted local allowance.
         newly_authorized = (
             fresh and (
-                (user["panelUsedBytes"] != previous and limit > 0) or
+                (user["panelUsedBytes"] != previous and (policy.get("version") != 2 or limit > 0)) or
                 limit > int(record.get("limitBytes", 0)) or
                 expires > int(record.get("expireAtMs", 0)) or
                 record.get("revokedReason") == "policy-expired"
