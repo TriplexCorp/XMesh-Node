@@ -114,7 +114,7 @@ assert "http.Client" not in adapter
 # over the reviewed historical accounting/replay guard. Both files must ship as
 # one runtime unit; the base retains the CLI and the wrapper redirects only the
 # account identity helpers.
-assert 'choices=["prepare", "offline", "commit", "sample"]' in guard_base
+assert 'choices=["prepare", "offline", "commit", "sample", "prestop-sample"]' in guard_base
 assert 'base.configured_accounts = configured_accounts' in guard
 assert 'base.account_uuid = account_uuid' in guard
 assert 'xmesh-policy-guard-base.py' in operational.split('for helper in ', 1)[1].split('; do', 1)[0]
