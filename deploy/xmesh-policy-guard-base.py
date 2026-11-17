@@ -368,6 +368,47 @@ def committed_snapshot_scope(state_dir, node_id):
     return verified_snapshot_scope(load_json(committed), state_dir, node_id)
 
 
+def applied_revocation_proofs(policy, effective, ledger):
+    """Mark lease-bound stop after the caller has verified Xray deployment.
+
+    This is NOT a refundable final meter. The new Xray process must be
+    running with the user's credential absent; outstanding offline budget
+    remains held centrally even after this acknowledgement.
+    """
+    if not isinstance(effective, dict) or not isinstance(effective.get("inbounds"), list):
+        raise ValueError("Missing applied Xray config for revocation proof")
+    records = ledger.get("users", {})
+    if not isinstance(records, dict):
+        raise ValueError("Invalid durable Node journal")
+    identities = {u["userId"]: u["xrayId"] for u in policy["users"]}
+    for user in policy["users"]:
+        revoke = user.get("quotaRevocation")
+        if revoke is None:
+            continue
+        record = records.get(str(user["userId"]))
+        if not isinstance(record, dict) or record.get("quotaRevocation") != revoke:
+            raise ValueError("Uncommitted signed revocation cannot be acknowledged")
+        for inbound in effective["inbounds"]:
+            if inbound.get("tag") == "xmesh_stats_in":
+                continue
+            accounts, credential_key = configured_accounts(inbound)
+            scoped = dict(identities)
+            scoped["_protocol"] = inbound["protocol"]
+            scoped["_method"] = inbound["settings"].get("method", "")
+            if any(account_uuid(entry, credential_key, scoped) == user["xrayId"]
+                   for entry in accounts):
+                raise ValueError("Revoked Xray credential is still provisioned")
+        used = record.get("total")
+        if type(used) is not int or not 0 <= used < (1 << 63):
+            raise ValueError("Invalid durable stopped-user counter")
+        record["quotaRevocationApplied"] = {
+            **revoke,
+            "revision": user["quotaReservation"]["revision"],
+            "usedBytes": used,
+        }
+    return ledger
+
+
 def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
     """Expose only currently signed accounts/inbounds, retaining ALL ledger history.
 
@@ -427,9 +468,17 @@ def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
                          "meterEpoch": lease["meterEpoch"],
                          "reservationId": lease["reservationId"],
                          "usedBytes": used})
+    stop_receipts = []
+    for user_id in sorted(totals):
+        record = ledger.get("users", {}).get(str(user_id), {})
+        proof = record.get("quotaRevocationApplied")
+        if proof is not None:
+            if not isinstance(proof, dict) or type(proof.get("usedBytes")) is not int:
+                raise ValueError("Invalid durable revocation proof")
+            stop_receipts.append({"userId": user_id, **proof})
     payload = {"nodeId": node_id, "sampledAtMs": now_ms,
                "userInboundTraffic": rows, "userTraffic": user_rows,
-               "quotaReceipts": receipts}
+               "quotaReceipts": receipts, "quotaStopReceipts": stop_receipts}
     snapshot = Path("/run/xmesh-node-user-metrics.json")
     if not snapshot.parent.is_dir():
         return
@@ -699,6 +748,17 @@ def main():
         pending = state / "policy-envelope.json.pending"
         if not pending.exists():
             raise ValueError("Missing validated pending policy snapshot")
+        # The shell calls commit only after the validated managed Xray
+        # config is active and its router has reconciled successfully.
+        # A signed deny without that deployment is NOT a stop receipt.
+        pending_doc = load_json(pending)
+        pending_policy = verify_envelope(pending_doc, state, args.node_id)
+        if any(user.get("quotaRevocation") is not None for user in pending_policy["users"]):
+            active_config = load_json(state / "config.json")
+            ledger_file = state / "policy-usage.json"
+            ledger = load_json(ledger_file)
+            ledger = applied_revocation_proofs(pending_policy, active_config, ledger)
+            write_atomic(ledger_file, canonical(ledger))
         # A single atomic rename keeps config and policy bound together.
         os.replace(pending, state / "policy-envelope.json")
         # Immediately republish filtered counters after assignment changes.
