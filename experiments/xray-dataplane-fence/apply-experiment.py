@@ -53,7 +53,7 @@ def run(root: Path):
     // Experimental: register each authenticated TCP session before any link
     // is returned to the inbound. Registration is atomic with fence.
     if subject := session.InboundFromContext(ctx); subject != nil &&
-        subject.User != nil && subject.User.Email != "" {
+        subject.User != nil && subject.Tag == "vless-share" {
         stopStream := func() {
             if subject.Conn != nil { _ = subject.Conn.Close() }
             common.Close(inbound.Writer)
@@ -76,7 +76,7 @@ def run(root: Path):
     // Experimental link dispatch path (including non-TCP transports):
     // a failed admission never proceeds to a live outbound route.
     if subject := session.InboundFromContext(ctx); subject != nil &&
-        subject.User != nil && subject.User.Email != "" {
+        subject.User != nil && subject.Tag == "vless-share" {
         stopStream := func() {
             if subject.Conn != nil { _ = subject.Conn.Close() }
             common.Close(outbound.Writer)
@@ -88,6 +88,13 @@ def run(root: Path):
         }
     }
     sniffingRequest := content.SniffingRequest''',
+    )
+    source = replace_once(
+        source,
+        'func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {\n',
+        'func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {\n'
+        '    // A returned inbound Process is not necessarily a finished route.\n'
+        '    defer xmeshdrain.RouteFinish(ctx)\n',
     )
     dispatcher_file.write_text(source, encoding="utf-8")
 
