@@ -492,6 +492,15 @@ def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
         pass
 
 
+def pending_revocation_present(state_dir, node_id):
+    """Only an independently verified signed pending policy may arm stop fencing."""
+    pending = state_dir / "policy-envelope.json.pending"
+    if not pending.is_file():
+        raise ValueError("Missing signed pending revocation policy")
+    policy = verify_envelope(load_json(pending), state_dir, node_id)
+    return any(user.get("quotaRevocation") is not None for user in policy["users"])
+
+
 def sample_before_xray_replace(state_dir, node_id, now_ms=None):
     """Capture one extra durable sample from the OLD running Xray instance.
 
@@ -752,7 +761,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["prepare", "offline", "commit", "sample", "prestop-sample"])
+    parser.add_argument("action", choices=["prepare", "offline", "commit", "sample", "prestop-sample", "pending-revocation"])
     parser.add_argument("--state", required=True)
     parser.add_argument("--node-id", type=int, required=True)
     parser.add_argument("--response")
@@ -762,6 +771,11 @@ def main():
     args = parser.parse_args()
     state = Path(args.state)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.action == "pending-revocation":
+        # The shell needs a trusted binary choice to fence legacy rollback.
+        # Verification failure is not "false": fail the whole reconciliation.
+        print("true" if pending_revocation_present(state, args.node_id) else "false")
+        return
     if args.action == "prestop-sample":
         # This action is ONLY called by the root shell reconciler that has
         # already acquired the same state lock. Never attempt re-locking.
