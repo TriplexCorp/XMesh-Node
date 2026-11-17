@@ -136,3 +136,39 @@ func TestManyConcurrentRegistrationsCannotCrossFence(t *testing.T) {
         t.Fatalf("concurrent re-entry: %v",err)
     }
 }
+
+func TestMissingAuthenticatedEmailFailsClosed(t *testing.T) {
+    resetGate()
+    s := ctx(18)
+    if err := Register(s,"",func(){}); !errors.Is(err,errNoUserID) {
+        t.Fatalf("blank authenticated identity was not rejected: %v",err)
+    }
+    gate.Lock()
+    remaining := len(gate.sessions)
+    gate.Unlock()
+    if remaining != 0 {
+        t.Fatalf("unattributed session registered: %d",remaining)
+    }
+}
+
+func TestDuplicateLiveSessionIDCannotFakeDrain(t *testing.T) {
+    resetGate()
+    s := ctx(19)
+    if err := Register(s,"owner",func(){}); err != nil { t.Fatal(err) }
+    if err := Register(s,"owner",func(){Finish(s)}); !errors.Is(err,errDuplicateSession) {
+        t.Fatalf("second live stream silently shared completion token: %v",err)
+    }
+    short,cancel := context.WithTimeout(context.Background(),20*time.Millisecond)
+    defer cancel()
+    snapshot,err := fence(short,"owner")
+    if !errors.Is(err,context.DeadlineExceeded) || snapshot.Refundable {
+        t.Fatalf("duplicate produced false terminal proof: %+v %v",snapshot,err)
+    }
+    Finish(s)
+    recovered,err := fence(context.Background(),"owner")
+    if err!=nil || !recovered.Drained || recovered.FinalMeterVerified ||
+        recovered.Refundable { t.Fatalf("invalid finality: %+v %v",recovered,err) }
+    if err := Register(s,"owner",func(){}); !errors.Is(err,errFenced) {
+        t.Fatalf("fence allowed reentry: %v",err)
+    }
+}
