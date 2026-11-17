@@ -33,6 +33,7 @@ jobs:
       - run: python3 deploy/test-xmesh-policy-independent-credentials.py
       - run: python3 tests/test_hot_user_reconcile.py
       - run: python3 tests/test_user_meter.py
+      - run: python3 tests/test_meter_snapshot_scope_review.py
       - run: python3 tests/test_bootstrap_meter.py
       - run: python3 tests/test_pending_enrollment.py
       - run: python3 tests/test_strict_pq_release_pin.py
