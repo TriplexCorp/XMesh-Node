@@ -50,7 +50,7 @@ class UpgradeContinuity(unittest.TestCase):
         ).strip()
         assert actual_sha == OLD_SHA, (actual_sha, OLD_SHA)
         assert (OLD / "AGENT_VERSION").read_text().strip() == "control-v6.0.11"
-        assert (CURRENT / "AGENT_VERSION").read_text().strip() == "control-v6.0.14"
+        assert (CURRENT / "AGENT_VERSION").read_text().strip() == "control-v6.0.15"
         cls.previous = load_guard(OLD, "old_v6_0_11_guard")
         cls.current = load_guard(CURRENT, "current_v6_0_12_guard")
 
