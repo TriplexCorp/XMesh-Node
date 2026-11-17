@@ -86,9 +86,9 @@ def run(root: Path):
         source,
         '\toutbound = WrapLink(ctx, d.policy, d.stats, outbound)\n'
         '\tsniffingRequest := content.SniffingRequest',
-        '''\toutbound = WrapLink(ctx, d.policy, d.stats, outbound)
-    // Experimental link dispatch path (including non-TCP transports):
-    // a failed admission never proceeds to a live outbound route.
+        '''// Experimental link dispatch path: admission must be confirmed
+    // BEFORE installing user stats wrappers. Otherwise a late UDP/XUDP
+    // packet can increment the counter even when Register rejects it.
     if subject := session.InboundFromContext(ctx); subject != nil &&
         subject.User != nil && subject.Tag == "vless-share" {
         stopStream := func() {
@@ -101,6 +101,7 @@ def run(root: Path):
             return err
         }
     }
+    outbound = WrapLink(ctx, d.policy, d.stats, outbound)
     sniffingRequest := content.SniffingRequest''',
     )
     source = replace_once(
