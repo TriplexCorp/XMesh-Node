@@ -192,7 +192,7 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
             raise ValueError("Invalid signed subscription traffic limit")
         if budget is not None and (type(budget) is not int or not 0 <= budget <= 64 * 1024 * 1024):
             raise ValueError("Invalid offline budget")
-        if policy["version"] == 2 and (limit > 0 or budget is not None) and not isinstance(user.get("quotaReservation"), dict):
+        if policy["version"] == 2 and limit > 0 and not isinstance(user.get("quotaReservation"), dict):
             raise ValueError("Limited v2 user requires a signed quota reservation")
         if user_id in seen_id or uid in seen_uuid:
             raise ValueError("Duplicate user policy")
@@ -551,14 +551,14 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         # poll never refills a depleted local allowance.
         newly_authorized = (
             fresh and (
-                user["panelUsedBytes"] != previous or
+                (user["panelUsedBytes"] != previous and limit > 0) or
                 limit > int(record.get("limitBytes", 0)) or
                 expires > int(record.get("expireAtMs", 0)) or
                 record.get("revokedReason") == "policy-expired"
             )
         )
         reservation_reason = None
-        if policy.get("version") == 2 and (limit > 0 or budget is not None):
+        if policy.get("version") == 2 and limit > 0:
             reservation_reason = enforce_quota_reservation(user, record, total, now_ms)
             if reservation_reason is None:
                 record["revoked"] = False
@@ -582,7 +582,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         reason = reservation_reason
         if user["expireAtMs"] and now_ms >= user["expireAtMs"]:
             reason = "expired"
-        elif offline and policy.get("version") == 2 and (limit > 0 or budget is not None) and counters is None:
+        elif offline and policy.get("version") == 2 and limit > 0 and counters is None:
             reason = "unverified-traffic-counter"
         elif offline and budget is not None and policy.get("version") != 2:
             if counters is None:
