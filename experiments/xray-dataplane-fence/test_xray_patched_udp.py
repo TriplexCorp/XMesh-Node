@@ -227,10 +227,21 @@ def run(xray, xudp):
             assert observation["uplinkBytes"] + observation["downlinkBytes"] >= before_a
             assert checkpoint.is_file()
             assert json.loads(checkpoint.read_text()) == observation
+            snapshot_total = observation["uplinkBytes"] + observation["downlinkBytes"]
+            immediately_after_fence = query_counter(xray, api_port, EMAIL_A)
             exchange_udp(a, echo_port, False, f"{mode}-A-existing")
+            after_old_association = query_counter(xray, api_port, EMAIL_A)
             fresh_a = socks_udp_associate(socks_a)
             associations.append(fresh_a)
             exchange_udp(fresh_a, echo_port, False, f"{mode}-A-new")
+            after_new_association = query_counter(xray, api_port, EMAIL_A)
+            print("UDP METER LIFECYCLE DIAGNOSTIC "+json.dumps({
+                "transport": mode,
+                "fsyncedSnapshot": snapshot_total,
+                "immediatelyAfterFence": immediately_after_fence,
+                "afterRejectedOldAssociation": after_old_association,
+                "afterRejectedNewAssociation": after_new_association,
+            },sort_keys=True),flush=True)
             assert exchange_udp(b, echo_port, True, f"{mode}-B-continues")
             fresh_b = socks_udp_associate(socks_b)
             associations.append(fresh_b)
@@ -249,11 +260,13 @@ def run(xray, xudp):
                 assert b"existing checkpoint mismatch or late counter update" in body
             late_total = query_counter(xray, api_port, EMAIL_A)
             original_total = observation["uplinkBytes"] + observation["downlinkBytes"]
-            if late_total > original_total:
-                second_status, second_body = inspect_fence_replay(
-                    control_socket, EMAIL_A, revocation_id)
-                assert second_status == 409, (late_total, original_total, second_body)
-                assert b"late counter update" in second_body
+            # No data may enter either stats wrapper after admission is
+            # closed. The prior real UDP/XUDP test observed +1232 bytes in
+            # this exact phase; preserve that as a hard regression.
+            assert late_total == original_total, (
+                f"{mode}: post-fence user meter changed by "
+                f"{late_total-original_total} bytes")
+            assert status == 200, (mode, status, body)
             assert json.loads(checkpoint.read_text()) == observation
             assert server.poll() is None
             server.terminate()

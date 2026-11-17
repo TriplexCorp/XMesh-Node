@@ -121,7 +121,7 @@ func persistObservedCheckpoint(email,revocationID string) (observedCheckpoint,er
     // post-drain state, but never interpret it as final byte accounting.
     gate.Lock()
     u:=gate.users[email]
-    drained:=u!=nil && u.fenced && u.closed && len(u.active)==0
+    drained:=u!=nil && u.fenced && u.closed && len(u.active)==0 && u.writes==0
     gate.Unlock()
     if !drained { return empty,errors.New("cannot sample undrained user") }
 

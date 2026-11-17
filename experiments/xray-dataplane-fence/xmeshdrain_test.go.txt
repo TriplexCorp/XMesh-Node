@@ -202,3 +202,44 @@ func TestWorkerExitCannotHideRunningRoute(t *testing.T) {
     if err != nil || !recovered.Drained || recovered.FinalMeterVerified ||
         recovered.Refundable { t.Fatalf("false finality: %+v %v",recovered,err) }
 }
+
+func TestMeterWriteBarrierPreventsLateWrites(t *testing.T) {
+    resetGate()
+    s:=ctx(201)
+    stopped:=make(chan struct{})
+    if err:=Register(s,"metered",func(){close(stopped)});err!=nil{t.Fatal(err)}
+    if err:=BeginMeterWrite("metered");err!=nil{t.Fatal(err)}
+    outcome:=make(chan struct{
+        info result
+        err error
+    },1)
+    go func(){
+        ctx,cancel:=context.WithTimeout(context.Background(),time.Second)
+        defer cancel()
+        info,err:=fence(ctx,"metered")
+        outcome<-struct{info result;err error}{info,err}
+    }()
+    <-stopped
+    Finish(s)
+    RouteFinish(s)
+    if err:=BeginMeterWrite("metered");!errors.Is(err,errFenced) {
+        t.Fatalf("fence allowed new meter operation: %v",err)
+    }
+    select {
+    case got:=<-outcome:
+        t.Fatalf("drained with outstanding meter write: %+v",got)
+    case <-time.After(40*time.Millisecond):
+    }
+    EndMeterWrite("metered")
+    select {
+    case got:=<-outcome:
+        if got.err!=nil||!got.info.Drained||got.info.FinalMeterVerified||got.info.Refundable {
+            t.Fatalf("invalid complete gate: %+v",got)
+        }
+    case <-time.After(2*time.Second):
+        t.Fatal("fence did not resolve after write completed")
+    }
+    if err:=BeginMeterWrite("metered");!errors.Is(err,errFenced) {
+        t.Fatalf("new metered write accepted after completion: %v",err)
+    }
+}

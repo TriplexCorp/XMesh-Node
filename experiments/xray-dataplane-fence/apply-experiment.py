@@ -60,35 +60,55 @@ def run(root: Path):
         '\td.stats = sm\n\treturn nil\n}',
         '\td.stats = sm\n    xmeshdrain.BindStatsManager(sm)\n\treturn nil\n}',
     )
+    # The Dispatch() fast path is also metered by getLink(). Move admission
+    # into getLink, after raw pipes exist but before user stat wrappers are
+    # installed. Denied old UDP-association packets cannot then enter the
+    # user counters via a second dispatch path.
+    source = replace_once(
+        source,
+        'func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link) {',
+        'func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, error) {',
+    )
+    source = replace_once(
+        source,
+        '\tif user != nil && len(user.Email) > 0 {\n\t\tp := d.policy.ForLevel(user.Level)',
+        '''    // Account-bearing VLESS user admission precedes ALL counter wrapping.
+    if sessionInbound != nil && sessionInbound.User != nil &&
+        sessionInbound.Tag == "vless-share" {
+        stopStream := func() {
+            if sessionInbound.Conn != nil { _ = sessionInbound.Conn.Close() }
+            common.Close(inboundLink.Writer)
+            common.Interrupt(inboundLink.Reader)
+            common.Close(outboundLink.Writer)
+            common.Interrupt(outboundLink.Reader)
+        }
+        if err := xmeshdrain.Register(ctx, sessionInbound.User.Email, stopStream); err != nil {
+            stopStream()
+            return nil, nil, err
+        }
+    }
+    if user != nil && len(user.Email) > 0 {
+        p := d.policy.ForLevel(user.Level)''',
+    )
+    source = replace_once(
+        source,
+        '\treturn inboundLink, outboundLink\n}',
+        '\treturn inboundLink, outboundLink, nil\n}',
+    )
     source = replace_once(
         source,
         '\tinbound, outbound := d.getLink(ctx)\n\tif !sniffingRequest.Enabled {',
-        '''\tinbound, outbound := d.getLink(ctx)
-    // Experimental: register each authenticated TCP session before any link
-    // is returned to the inbound. Registration is atomic with fence.
-    if subject := session.InboundFromContext(ctx); subject != nil &&
-        subject.User != nil && subject.Tag == "vless-share" {
-        stopStream := func() {
-            if subject.Conn != nil { _ = subject.Conn.Close() }
-            common.Close(inbound.Writer)
-            common.Interrupt(inbound.Reader)
-            common.Close(outbound.Writer)
-            common.Interrupt(outbound.Reader)
-        }
-        if err := xmeshdrain.Register(ctx, subject.User.Email, stopStream); err != nil {
-            stopStream()
-            return nil, err
-        }
-    }
+        '''\tinbound, outbound, err := d.getLink(ctx)
+    if err != nil { return nil, err }
     if !sniffingRequest.Enabled {''',
     )
     source = replace_once(
         source,
         '\toutbound = WrapLink(ctx, d.policy, d.stats, outbound)\n'
         '\tsniffingRequest := content.SniffingRequest',
-        '''\toutbound = WrapLink(ctx, d.policy, d.stats, outbound)
-    // Experimental link dispatch path (including non-TCP transports):
-    // a failed admission never proceeds to a live outbound route.
+        '''// Experimental link dispatch path: admission must be confirmed
+    // BEFORE installing user stats wrappers. Otherwise a late UDP/XUDP
+    // packet can increment the counter even when Register rejects it.
     if subject := session.InboundFromContext(ctx); subject != nil &&
         subject.User != nil && subject.Tag == "vless-share" {
         stopStream := func() {
@@ -101,6 +121,7 @@ def run(root: Path):
             return err
         }
     }
+    outbound = WrapLink(ctx, d.policy, d.stats, outbound)
     sniffingRequest := content.SniffingRequest''',
     )
     source = replace_once(
@@ -110,6 +131,15 @@ def run(root: Path):
         '    // A returned inbound Process is not necessarily a finished route.\n'
         '    defer xmeshdrain.RouteFinish(ctx)\n',
     )
+    # Install the counted-write gate on all three user statistics writer paths
+    # (getLink uplink/downlink and DispatchLink downlink).
+    for writer_path in ("inboundLink.Writer", "outboundLink.Writer", "link.Writer"):
+        source = replace_once(
+            source,
+            "\t\t\t\t\tWriter:  " + writer_path + ",\n",
+            "\t\t\t\t\tWriter:  " + writer_path + ",\n"
+            "\t\t\t\t\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\n",
+        )
     dispatcher_file.write_text(source, encoding="utf-8")
 
     worker_file = root / "app/proxyman/inbound/worker.go"
@@ -191,11 +221,43 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
         '    ctx = c.ContextWithID(ctx, session.NewID())\n',
     )
     mux_file.write_text(mux, encoding="utf-8")
+    # Experimental post-meter writer barrier. Scoped writers cannot write or
+    # count any bytes after the user's admission fence. Already started writes
+    # remain tracked until their downstream WriteMultiBuffer returns.
+    meter_writer_file = root / "app/dispatcher/stats.go"
+    meter_source = meter_writer_file.read_text(encoding="utf-8")
+    meter_source = replace_once(
+        meter_source,
+        '"github.com/xtls/xray-core/common"\n',
+        '"github.com/xtls/xray-core/app/xmeshdrain"\n'
+        '\t"github.com/xtls/xray-core/common"\n',
+    )
+    meter_source = replace_once(
+        meter_source,
+        '\tWriter  buf.Writer\n',
+        '\tWriter  buf.Writer\n\tExperimentalEmail string\n',
+    )
+    meter_source = replace_once(
+        meter_source,
+        '\tw.Counter.Add(int64(mb.Len()))\n\treturn w.Writer.WriteMultiBuffer(mb)',
+        '''    if w.ExperimentalEmail != "" {
+        if err := xmeshdrain.BeginMeterWrite(w.ExperimentalEmail); err != nil {
+            buf.ReleaseMulti(mb)
+            return err
+        }
+        defer xmeshdrain.EndMeterWrite(w.ExperimentalEmail)
+    }
+    w.Counter.Add(int64(mb.Len()))
+    return w.Writer.WriteMultiBuffer(mb)''',
+    )
+    meter_writer_file.write_text(meter_source, encoding="utf-8")
+
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
          str(shared / "observed_checkpoint.go"),
          str(shared / "observed_checkpoint_test.go"),
-         str(dispatcher_file), str(worker_file), str(mux_file)],
+         str(dispatcher_file), str(worker_file), str(mux_file),
+         str(meter_writer_file)],
         check=True,
         cwd=root,
     )

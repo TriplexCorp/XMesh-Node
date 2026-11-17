@@ -16,6 +16,7 @@ import (
     "time"
 
     c "github.com/xtls/xray-core/common/ctx"
+    "github.com/xtls/xray-core/common/session"
 )
 
 var errFenced = errors.New("experimental xmesh drain: user is fenced")
@@ -35,6 +36,9 @@ type trackedSession struct {
 type userState struct {
     fenced bool
     active map[uint64]func()
+    // Count all in-flight per-user metered writes. New writes are rejected
+    // atomically once the admission fence is active.
+    writes int
     done chan struct{}
     closed bool
 }
@@ -91,6 +95,51 @@ func Register(ctx context.Context, email string, stop func()) error {
     return nil
 }
 
+// ScopedEmail returns a billable identity only for the explicitly targeted
+// disposable VLESS inbound. Never gate Xray management or unrelated inbounds.
+func ScopedEmail(ctx context.Context) string {
+    if !enabled { return "" }
+    subject:=session.InboundFromContext(ctx)
+    if subject==nil || subject.User==nil || subject.Tag!="vless-share" {
+        return ""
+    }
+    return subject.User.Email
+}
+
+// BeginMeterWrite starts one tracked, billable writer operation. It must
+// wrap the entire SizeStatWriter.WriteMultiBuffer call. If already fenced,
+// the caller MUST discard the buffer and prevent downstream transmission.
+func BeginMeterWrite(email string) error {
+    if !enabled || email == "" { return nil }
+    gate.Lock()
+    defer gate.Unlock()
+    u := ensureUser(email)
+    if u.fenced { return errFenced }
+    u.writes++
+    return nil
+}
+
+func EndMeterWrite(email string) {
+    if !enabled || email == "" { return }
+    gate.Lock()
+    defer gate.Unlock()
+    u := ensureUser(email)
+    if u.writes <= 0 {
+        panic("experimental xmesh drain: unbalanced tracked meter writes")
+    }
+    u.writes--
+    completeUserIfIdleLocked(u)
+}
+
+// Caller must hold gate.Mutex; neither active logical sessions nor
+// in-flight counted writes may remain before a fence is marked drained.
+func completeUserIfIdleLocked(u *userState) {
+    if u.fenced && len(u.active) == 0 && u.writes == 0 && !u.closed {
+        close(u.done)
+        u.closed = true
+    }
+}
+
 // Finish is run by the inbound worker AFTER the authenticated proxy's
 // Process returned and the transport has been closed. This is a best-effort
 // experimental boundary, NOT a verified byte-accounting flush.
@@ -131,10 +180,7 @@ func completeIfFinishedLocked(id uint64,session *trackedSession) {
     delete(gate.sessions,id)
     u := gate.users[session.email]
     delete(u.active,id)
-    if u.fenced && len(u.active) == 0 && !u.closed {
-        close(u.done)
-        u.closed = true
-    }
+    completeUserIfIdleLocked(u)
 }
 
 type result struct {
@@ -151,7 +197,7 @@ type result struct {
 func state(email string, u *userState) result {
     return result{
         Email: email, Fenced: u.fenced, Active: len(u.active),
-        Drained: u.closed && len(u.active) == 0,
+        Drained: u.closed && len(u.active) == 0 && u.writes == 0,
         FinalMeterVerified: false, Refundable: false,
     }
 }
@@ -165,10 +211,7 @@ func fence(ctx context.Context, email string) (result, error) {
         for _, closeConn := range u.active {
             cancels = append(cancels, closeConn)
         }
-        if len(u.active) == 0 && !u.closed {
-            close(u.done)
-            u.closed = true
-        }
+        completeUserIfIdleLocked(u)
     }
     done := u.done
     gate.Unlock()
