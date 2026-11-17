@@ -134,6 +134,29 @@ class SignedPolicyTests(unittest.TestCase):
         self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
         self.write_envelope()
 
+    def test_signed_committed_meter_scope_rejects_tampering_and_pending_rights(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "xmesh_scope_guard", GUARD)
+        guarded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guarded)
+        self.configure_dual_profile()
+        # The prepared policy is validly signed but NOT YET committed.
+        self.run_guard("prepare")
+        self.assertIsNone(guarded.committed_snapshot_scope(self.state, 12))
+        self.run_guard("commit")
+        self.assertEqual(guarded.committed_snapshot_scope(self.state, 12), {
+            1: {"vless-main", "hysteria-main"},
+        })
+        committed = self.state / "policy-envelope.json"
+        saved = committed.read_text()
+        tampered = json.loads(saved)
+        tampered["policy"]["users"][0]["userId"] = 991
+        committed.write_text(json.dumps(tampered))
+        with self.assertRaisesRegex(ValueError, "signature"):
+            guarded.committed_snapshot_scope(self.state, 12)
+        committed.write_text(saved)
+
     def test_dual_signed_policy_authorizes_and_revokes_both_transports(self):
         self.configure_dual_profile()
         self.run_guard("prepare")
