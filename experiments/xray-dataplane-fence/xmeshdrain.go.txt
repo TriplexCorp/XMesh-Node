@@ -16,6 +16,7 @@ import (
     "time"
 
     c "github.com/xtls/xray-core/common/ctx"
+    "github.com/xtls/xray-core/common/session"
 )
 
 var errFenced = errors.New("experimental xmesh drain: user is fenced")
@@ -92,6 +93,17 @@ func Register(ctx context.Context, email string, stop func()) error {
     u.active[id] = stop
     gate.sessions[id] = &trackedSession{email: email, stop: stop}
     return nil
+}
+
+// ScopedEmail returns a billable identity only for the explicitly targeted
+// disposable VLESS inbound. Never gate Xray management or unrelated inbounds.
+func ScopedEmail(ctx context.Context) string {
+    if !enabled { return "" }
+    subject:=session.InboundFromContext(ctx)
+    if subject==nil || subject.User==nil || subject.Tag!="vless-share" {
+        return ""
+    }
+    return subject.User.Email
 }
 
 // BeginMeterWrite starts one tracked, billable writer operation. It must
