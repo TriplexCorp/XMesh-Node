@@ -582,6 +582,11 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         reason = reservation_reason
         if user["expireAtMs"] and now_ms >= user["expireAtMs"]:
             reason = "expired"
+        elif offline and policy.get("version") == 2 and user.get("onHold") is True:
+            # A waiting subscription may bootstrap its *first* connection only
+            # while Nexus can verify and activate it. Cached v2 policy cannot
+            # activate trials after central contact is lost.
+            reason = "subscription-awaiting-first-connection"
         elif offline and policy.get("version") == 2 and limit > 0 and counters is None:
             reason = "unverified-traffic-counter"
         elif offline and budget is not None and policy.get("version") != 2:
