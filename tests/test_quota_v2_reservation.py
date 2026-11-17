@@ -86,6 +86,28 @@ class ReservationGuardTests(unittest.TestCase):
             policy, copy.deepcopy(config), ledger, {"1":1}, "xray-a", False, 3000)
         self.assertNotIn(uid, denied, denied)
 
+    def test_v2_unlimited_global_still_enforces_node_offline_limit(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds":[{"tag":"NODE-LTE","protocol":"vless",
+                   "settings":{"clients":[{"id":uid}]}}]}
+        user = {"userId":1,"xrayId":uid,"expireAtMs":90000,
+                "panelUsedBytes":0,"limitBytes":0,
+                "offlineBudgetBytes":5}
+        policy = {"version":2,"nodeId":1,"issuedAtMs":1000,
+                  "validUntilMs":100000,"users":[user]}
+        _, ledger, denied = guard.enforce(
+            policy, copy.deepcopy(config), {}, {"1":0}, "xray-a", False, 1000)
+        self.assertNotIn(uid, denied)
+        _, ledger, denied = guard.enforce(
+            policy, copy.deepcopy(config), ledger, {"1":5}, "xray-a", True, 2000)
+        self.assertEqual(denied.get(uid), "quota")
+        # Another node's aggregate traffic must not renew this node's allowance.
+        user["panelUsedBytes"] = 1000
+        policy["issuedAtMs"] = 3000
+        _, _, denied = guard.enforce(
+            policy, copy.deepcopy(config), ledger, {"1":5}, "xray-a", False, 3000)
+        self.assertEqual(denied.get(uid), "quota")
+
     def test_signed_ceiling_cannot_be_less_than_acknowledged_usage(self):
         invalid=lease(ceiling=40,ack=41)
         with self.assertRaises(ValueError):
