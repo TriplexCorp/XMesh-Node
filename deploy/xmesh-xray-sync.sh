@@ -602,6 +602,18 @@ if ! docker inspect xmesh-managed-xray >/dev/null 2>&1; then
   fi
  done
 fi
+# Optional staged quota-v2 preservation of the OLD Xray process's last
+# available user counters. The reconciler holds the state flock already.
+# Do not call after docker rm/stop: the old in-memory counters are gone.
+# THIS DOES NOT MAKE THE READINGS FINAL OR RELEASE ANY HELD QUOTA.
+if [[ "${XMESH_QUOTA_V2_PRESTOP_SAMPLE:-0}" == 1 &&
+      "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]] &&
+   [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray 2>/dev/null || true)" == true ]];then
+  python3 "$POLICY_GUARD" prestop-sample --state "$STATE" --node-id "$XMESH_NODE_ID" || {
+    echo "Old Xray revocation meter capture failed; refusing replacement." >&2
+    exit 1
+  }
+fi
 if [[ -f "$ACTIVE" ]];then cp "$ACTIVE" "$PREVIOUS";fi
 install -m 0600 "$CONFIG_FILE" "$ACTIVE"
 docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
