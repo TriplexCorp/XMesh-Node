@@ -249,12 +249,12 @@ def run(xray):
                                       expected_status=409)
             assert b"checkpoint" in conflicting,conflicting
             assert json.loads(journal_file.read_text())==observation
+            assert server.poll() is None,"Xray server exited during selective fence"
             # Data remains after shutting down the Xray process: this
             # verifies persistence, not a terminal-byte correctness barrier.
             server.terminate()
             server.wait(timeout=5)
             assert json.loads(journal_file.read_text())==observation
-            assert server.poll() is None,"Xray server exited during selective fence"
             report={
                 "patchedXray":"a4a3dff5b20c2faae567b742c172c7b95e75c083",
                 "userAFenced":True,"existingUserAStreamEnded":True,
