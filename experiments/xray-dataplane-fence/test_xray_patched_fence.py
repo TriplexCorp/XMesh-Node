@@ -28,7 +28,8 @@ from test_quota_v2_xray_user_inbound_drain import (  # noqa: E402
 EMAIL_A = "xmesh-experiment-a"
 EMAIL_B = "xmesh-experiment-b"
 # Run a real patched-Xray process per transport. Production remains untouched.
-TRANSPORTS = ("tcp", "ws", "xhttp", "mux-tcp")
+TRANSPORTS = ("tcp", "ws", "xhttp", "xhttp-stream-up",
+              "xhttp-stream-one", "mux-tcp")
 
 
 def make_stream_settings(transport):
@@ -37,9 +38,19 @@ def make_stream_settings(transport):
     settings = {"network": wire_transport, "security": "none"}
     if transport == "ws":
         settings["wsSettings"] = {"path": "/xmesh-ci-ws"}
-    elif transport == "xhttp":
-        # Explicit mode keeps a deterministic HTTP/1.1 local test transport.
-        settings["xhttpSettings"] = {"path": "/xmesh-ci-xhttp/", "mode": "packet-up"}
+    elif transport in ("xhttp", "xhttp-stream-up", "xhttp-stream-one"):
+        # Exercise each upstream XHTTP upload mode in an independent real
+        # process. The mode is not just a label: the Xray dialer opens
+        # different HTTP request/response lifetimes for these variants.
+        mode = {
+            "xhttp": "packet-up",
+            "xhttp-stream-up": "stream-up",
+            "xhttp-stream-one": "stream-one",
+        }[transport]
+        settings["network"] = "xhttp"
+        settings["xhttpSettings"] = {
+            "path": "/xmesh-ci-xhttp/", "mode": mode,
+        }
     elif transport not in ("tcp", "mux-tcp"):
         raise AssertionError(f"Unsupported test transport: {transport}")
     return settings
