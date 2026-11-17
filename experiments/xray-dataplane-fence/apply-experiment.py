@@ -60,26 +60,45 @@ def run(root: Path):
         '\td.stats = sm\n\treturn nil\n}',
         '\td.stats = sm\n    xmeshdrain.BindStatsManager(sm)\n\treturn nil\n}',
     )
+    # The Dispatch() fast path is also metered by getLink(). Move admission
+    # into getLink, after raw pipes exist but before user stat wrappers are
+    # installed. Denied old UDP-association packets cannot then enter the
+    # user counters via a second dispatch path.
+    source = replace_once(
+        source,
+        'func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link) {',
+        'func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, error) {',
+    )
+    source = replace_once(
+        source,
+        '\tif user != nil && len(user.Email) > 0 {',
+        '''    // Account-bearing VLESS user admission precedes ALL counter wrapping.
+    if sessionInbound != nil && sessionInbound.User != nil &&
+        sessionInbound.Tag == "vless-share" {
+        stopStream := func() {
+            if sessionInbound.Conn != nil { _ = sessionInbound.Conn.Close() }
+            common.Close(inboundLink.Writer)
+            common.Interrupt(inboundLink.Reader)
+            common.Close(outboundLink.Writer)
+            common.Interrupt(outboundLink.Reader)
+        }
+        if err := xmeshdrain.Register(ctx, sessionInbound.User.Email, stopStream); err != nil {
+            stopStream()
+            return nil, nil, err
+        }
+    }
+    if user != nil && len(user.Email) > 0 {''',
+    )
+    source = replace_once(
+        source,
+        '\treturn inboundLink, outboundLink\n}',
+        '\treturn inboundLink, outboundLink, nil\n}',
+    )
     source = replace_once(
         source,
         '\tinbound, outbound := d.getLink(ctx)\n\tif !sniffingRequest.Enabled {',
-        '''\tinbound, outbound := d.getLink(ctx)
-    // Experimental: register each authenticated TCP session before any link
-    // is returned to the inbound. Registration is atomic with fence.
-    if subject := session.InboundFromContext(ctx); subject != nil &&
-        subject.User != nil && subject.Tag == "vless-share" {
-        stopStream := func() {
-            if subject.Conn != nil { _ = subject.Conn.Close() }
-            common.Close(inbound.Writer)
-            common.Interrupt(inbound.Reader)
-            common.Close(outbound.Writer)
-            common.Interrupt(outbound.Reader)
-        }
-        if err := xmeshdrain.Register(ctx, subject.User.Email, stopStream); err != nil {
-            stopStream()
-            return nil, err
-        }
-    }
+        '''\tinbound, outbound, err := d.getLink(ctx)
+    if err != nil { return nil, err }
     if !sniffingRequest.Enabled {''',
     )
     source = replace_once(
