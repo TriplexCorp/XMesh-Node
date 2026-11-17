@@ -484,6 +484,8 @@ def enforce_quota_reservation(user, record, total, now_ms):
     for field in ("revision", "acknowledgedBytes", "ceilingBytes", "validUntilMs"):
         if type(lease[field]) is not int or not 0 <= lease[field] < (1 << 63):
             raise ValueError("Invalid quota reservation counter")
+    if lease["ceilingBytes"] < lease["acknowledgedBytes"]:
+        raise ValueError("Quota acknowledgement exceeds signed ceiling")
     if lease["acknowledgedBytes"] > total:
         raise ValueError("Acknowledgement is ahead of durable local usage")
     old = record.get("quotaReservation")
@@ -537,7 +539,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
             )
         )
         reservation_reason = None
-        if policy.get("version") == 2 and budget is not None:
+        if policy.get("version") == 2 and (limit > 0 or budget is not None):
             reservation_reason = enforce_quota_reservation(user, record, total, now_ms)
             if reservation_reason is None:
                 record["revoked"] = False
@@ -561,6 +563,8 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         reason = reservation_reason
         if user["expireAtMs"] and now_ms >= user["expireAtMs"]:
             reason = "expired"
+        elif offline and policy.get("version") == 2 and (limit > 0 or budget is not None) and counters is None:
+            reason = "unverified-traffic-counter"
         elif offline and budget is not None and policy.get("version") != 2:
             if counters is None:
                 reason = "unverified-traffic-counter"
