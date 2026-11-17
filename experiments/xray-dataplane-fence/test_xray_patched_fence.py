@@ -103,10 +103,12 @@ def run(xray):
         socket_file = root / "drain.sock"
         echo = EchoServer(("127.0.0.1",0),EchoHandler)
         threading.Thread(target=echo.serve_forever,daemon=True).start()
-        api_port, vless_port, socks_a, socks_b = (
-            reserve_port(),reserve_port(),reserve_port(),reserve_port()
+        api_port, vless_port, socks_a, socks_b, socks_blank = (
+            reserve_port(),reserve_port(),reserve_port(),reserve_port(),reserve_port()
         )
-        identity_a, identity_b = str(uuid.uuid4()), str(uuid.uuid4())
+        identity_a, identity_b, identity_blank = (
+            str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        )
         server_config = {
             "log":{"loglevel":"warning"},
             "api":{"tag":"xmesh_stats_api","services":["StatsService"]},
@@ -119,7 +121,8 @@ def run(xray):
                  "protocol":"vless",
                  "settings":{"decryption":"none","clients":[
                      {"id":identity_a,"email":EMAIL_A,"level":0},
-                     {"id":identity_b,"email":EMAIL_B,"level":0}]},
+                     {"id":identity_b,"email":EMAIL_B,"level":0},
+                     {"id":identity_blank,"level":0}]},
                  "streamSettings":{"network":"tcp","security":"none"}},
                 {"tag":"xmesh_stats_in","listen":"127.0.0.1","port":api_port,
                  "protocol":"dokodemo-door","settings":{
@@ -144,11 +147,16 @@ def run(xray):
                 {"tag":"socks-a","listen":"127.0.0.1","port":socks_a,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
                 {"tag":"socks-b","listen":"127.0.0.1","port":socks_b,
+                 "protocol":"socks","settings":{"auth":"noauth","udp":False}},
+                {"tag":"socks-blank","listen":"127.0.0.1","port":socks_blank,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}}
             ],
-            "outbounds":[outbound("user-a",identity_a),outbound("user-b",identity_b)],
+            "outbounds":[outbound("user-a",identity_a),outbound("user-b",identity_b),
+                         outbound("user-blank",identity_blank)],
             "routing":{"rules":[{"type":"field","inboundTag":["socks-b"],
-                                  "outboundTag":"user-b"}]}
+                                  "outboundTag":"user-b"},
+                                {"type":"field","inboundTag":["socks-blank"],
+                                 "outboundTag":"user-blank"}]}
         }
         server_json=root/"server.json"
         client_json=root/"client.json"
@@ -193,6 +201,14 @@ def run(xray):
                 assert not probe_echo(denied),"Fenced user opened new authenticated stream"
             finally:
                 denied.close()
+            # Authenticated but unnamed users must never bypass the gate.
+            # Old code skipped Register() for empty emails, allowing traffic
+            # outside the per-user drain accounting set.
+            unnamed=connect_socks(socks_blank,echo.server_address[1],"127.0.0.1")
+            try:
+                assert not probe_echo(unnamed),"Blank authenticated email bypassed the drain gate"
+            finally:
+                unnamed.close()
             assert probe_echo(b),"Fence for user A killed user B on shared inbound"
             fresh_b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             try:
@@ -209,6 +225,7 @@ def run(xray):
                 "patchedXray":"a4a3dff5b20c2faae567b742c172c7b95e75c083",
                 "userAFenced":True,"existingUserAStreamEnded":True,
                 "newUserAStreamsRejected":True,
+                "blankAuthenticatedUserRejected":True,
                 "existingUserBStreamSurvived":True,"newUserBStreamsAccepted":True,
                 "statsServiceStillAvailable":True,
                 "userABeforeFenceBytes":before_a,"userAAfterFenceBytes":after_a,
