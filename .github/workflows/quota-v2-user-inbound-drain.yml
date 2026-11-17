@@ -1,0 +1,30 @@
+name: Quota v2 Xray HandlerService admission/drain experiment (disposable)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tests/test_quota_v2_xray_user_inbound_drain.py'
+      - '.github/workflows/quota-v2-user-inbound-drain.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tests/test_quota_v2_xray_user_inbound_drain.py'
+      - '.github/workflows/quota-v2-user-inbound-drain.yml'
+permissions:
+  contents: read
+jobs:
+  handler-drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compile disposable Xray drain fixture
+        run: python3 -m py_compile tests/test_quota_v2_xray_user_inbound_drain.py
+      - name: Pull pinned official Xray
+        run: docker pull ghcr.io/xtls/xray-core:26.10.31
+      - name: Measure real Xray user removal, inbound removal and live stats
+        env:
+          XMESH_DISPOSABLE_XRAY_DRAIN_EXPERIMENT: "1"
+        run: python3 tests/test_quota_v2_xray_user_inbound_drain.py
