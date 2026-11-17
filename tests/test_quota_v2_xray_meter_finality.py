@@ -133,6 +133,7 @@ def run():
     server_config = {
         "log":{"loglevel":"debug"},
         "api":{"tag":"xmesh_stats_api","services":["StatsService"]},
+        "stats":{},  # Enables counter registration in Xray's stats manager
         "policy":{"levels":{"0":{"statsUserUplink":True,"statsUserDownlink":True,
                                    "statsUserOnline":True}}},
         "inbounds":[
