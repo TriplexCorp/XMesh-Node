@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -99,6 +100,70 @@ class PreStopCaptureTests(unittest.TestCase):
         (self.state / "policy-envelope.json.pending").unlink()
         with self.assertRaisesRegex(ValueError, "Missing signed pending policy"):
             guard.sample_before_xray_replace(self.state, 7)
+
+    def test_revocation_marker_requires_a_valid_signed_policy(self):
+        with patch.object(guard, "verify_envelope", return_value=self.policy):
+            self.assertTrue(guard.pending_revocation_present(self.state, 7))
+        with patch.object(guard, "verify_envelope",
+                          side_effect=ValueError("Policy signature verification failed")):
+            with self.assertRaisesRegex(ValueError, "signature"):
+                guard.pending_revocation_present(self.state, 7)
+        self.assertTrue((self.state / "policy-envelope.json.pending").exists())
+        (self.state / "policy-envelope.json.pending").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing signed pending"):
+            guard.pending_revocation_present(self.state, 7)
+
+    def test_failed_signed_revocation_never_restores_old_xray_policy(self):
+        shell = (ROOT / "deploy/xmesh-xray-sync.sh").read_text(encoding="utf-8")
+        marker = '"$REVOCATION_MARKER"'
+        self.assertIn('REVOCATION_MARKER="$STATE/quota-revocation-deny-pending"', shell)
+        self.assertIn('PENDING_REVOCATION="$(python3 "$POLICY_GUARD" pending-revocation', shell)
+        self.assertIn('REVOCATION_FAIL_CLOSED=true', shell)
+        self.assertIn('stop_managed_xray_for_revocation || exit 1', shell)
+        self.assertIn('Signed quota revocation pending: cached/offline policy cannot re-enable old Xray.', shell)
+        self.assertIn('Signed quota revocation pending but policy guard unavailable', shell)
+        self.assertEqual(shell.count('if [[ "$REVOCATION_FAIL_CLOSED" != true && -f "$PREVIOUS" ]];then'), 3)
+        self.assertEqual(shell.count('rm -f "$REVOCATION_MARKER"'), 2)
+        self.assertIn('if [[ -f "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation', shell)
+        self.assertLess(shell.index('PENDING_REVOCATION="$(python3'), shell.index('# An active signed GeoData manifest'))
+        self.assertLess(shell.index('printf \'signed-v2-deny'), shell.index('docker rm -f xmesh-managed-xray'))
+        # Non-revocation deployments retain the existing rollback path.
+        self.assertIn('cp "$PREVIOUS" "$ACTIVE"', shell)
+        self.assertIn(marker, shell)
+
+    def test_revoked_xray_stop_uses_restart_disable_and_verifies_termination(self):
+        shell = (ROOT / "deploy/xmesh-xray-sync.sh").read_text(encoding="utf-8")
+        start = shell.index('stop_managed_xray_for_revocation() {')
+        end = shell.index('\n}\nif [[ -e "$REVOCATION_MARKER"', start) + 2
+        helper = shell[start:end]
+        program = """
+set -Eeuo pipefail
+""" + helper + """
+RUNNING=true
+docker() {
+ case "$1" in
+  info) return 0;;
+  inspect) if [[ "$2" == "-f" ]]; then echo "$RUNNING"; else return 0; fi;;
+  update) [[ "$2" == "--restart=no" ]] || return 1; echo restart-disabled;;
+  stop) RUNNING=false; echo stopped;;
+  kill) RUNNING=false; echo killed;;
+  *) return 1;;
+ esac
+}
+stop_managed_xray_for_revocation
+[[ "$RUNNING" == false ]]
+"""
+        good = subprocess.run(["bash", "-c", program], capture_output=True,
+                              text=True, timeout=5)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn("restart-disabled", good.stdout)
+        self.assertIn("stopped", good.stdout)
+        broken = subprocess.run(["bash", "-c",
+            "set -Eeuo pipefail\n" + helper +
+            "\ndocker() { return 1; }\nstop_managed_xray_for_revocation"],
+            capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(broken.returncode, 0)
+        self.assertIn("Docker unavailable", broken.stderr)
 
     def test_shell_hook_is_opt_in_and_precedes_process_replacement(self):
         shell = (ROOT / "deploy/xmesh-xray-sync.sh").read_text(encoding="utf-8")
