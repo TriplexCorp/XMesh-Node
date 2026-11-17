@@ -249,11 +249,13 @@ def run(xray, xudp):
                 assert b"existing checkpoint mismatch or late counter update" in body
             late_total = query_counter(xray, api_port, EMAIL_A)
             original_total = observation["uplinkBytes"] + observation["downlinkBytes"]
-            if late_total > original_total:
-                second_status, second_body = inspect_fence_replay(
-                    control_socket, EMAIL_A, revocation_id)
-                assert second_status == 409, (late_total, original_total, second_body)
-                assert b"late counter update" in second_body
+            # No data may enter either stats wrapper after admission is
+            # closed. The prior real UDP/XUDP test observed +1232 bytes in
+            # this exact phase; preserve that as a hard regression.
+            assert late_total == original_total, (
+                f"{mode}: post-fence user meter changed by "
+                f"{late_total-original_total} bytes")
+            assert status == 200, (mode, status, body)
             assert json.loads(checkpoint.read_text()) == observation
             assert server.poll() is None
             server.terminate()
