@@ -28,17 +28,19 @@ from test_quota_v2_xray_user_inbound_drain import (  # noqa: E402
 EMAIL_A = "xmesh-experiment-a"
 EMAIL_B = "xmesh-experiment-b"
 # Run a real patched-Xray process per transport. Production remains untouched.
-TRANSPORTS = ("tcp", "ws", "xhttp")
+TRANSPORTS = ("tcp", "ws", "xhttp", "mux-tcp")
 
 
 def make_stream_settings(transport):
-    settings = {"network": transport, "security": "none"}
+    # MUX is an application-level multiplexing layer over VLESS/TCP.
+    wire_transport = "tcp" if transport == "mux-tcp" else transport
+    settings = {"network": wire_transport, "security": "none"}
     if transport == "ws":
         settings["wsSettings"] = {"path": "/xmesh-ci-ws"}
     elif transport == "xhttp":
         # Explicit mode keeps a deterministic HTTP/1.1 local test transport.
         settings["xhttpSettings"] = {"path": "/xmesh-ci-xhttp/", "mode": "packet-up"}
-    elif transport != "tcp":
+    elif transport not in ("tcp", "mux-tcp"):
         raise AssertionError(f"Unsupported test transport: {transport}")
     return settings
 
@@ -163,10 +165,15 @@ def run(xray, transport):
                                   "outboundTag":"xmesh_stats_api"}]}
         }
         def outbound(tag, identity):
-            return {"tag":tag,"protocol":"vless","settings":{"vnext":[{
+            config = {"tag":tag,"protocol":"vless","settings":{"vnext":[{
                 "address":"127.0.0.1","port":vless_port,
                 "users":[{"id":identity,"encryption":"none"}]}]},
                 "streamSettings":make_stream_settings(transport)}
+            # Exercise two simultaneous logical streams A on one physical MUX
+            # transport, while user B uses a separate physical connection.
+            if transport == "mux-tcp" and tag == "user-a":
+                config["mux"] = {"enabled": True, "concurrency": 8}
+            return config
         client_config={
             "log":{"loglevel":"warning"},
             "inbounds":[
@@ -195,6 +202,7 @@ def run(xray, transport):
         server=None
         client=None
         a=None
+        a2=None
         b=None
         try:
             env=os.environ.copy()
@@ -215,6 +223,13 @@ def run(xray, transport):
             a=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
             b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             echo_bytes(a,8192)
+            if transport == "mux-tcp":
+                # Both A streams coexist before revocation. Reusing the
+                # parent's session ID would reject the second registration.
+                a2=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
+                echo_bytes(a2,8192)
+                assert probe_echo(a),"First MUX child was evicted by second"
+                assert probe_echo(a2),"Second MUX child did not persist"
             echo_bytes(b,8192)
             before_a=wait_counter(xray,api_port,EMAIL_A)
             before_b=wait_counter(xray,api_port,EMAIL_B)
@@ -235,6 +250,8 @@ def run(xray, transport):
             observed_disk=json.loads(journal_file.read_text())
             assert observed_disk==observation,(observed_disk,observation)
             assert not probe_echo(a),"Old VLESS-A socket survived fenced process-close"
+            if a2 is not None:
+                assert not probe_echo(a2),"Second MUX child survived user fence"
             denied=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
             try:
                 assert not probe_echo(denied),"Fenced user opened new authenticated stream"
@@ -273,6 +290,7 @@ def run(xray, transport):
             report={
                 "patchedXray":"a4a3dff5b20c2faae567b742c172c7b95e75c083",
                 "testedTransport":transport,
+                "simultaneousMuxChildrenStopped":transport == "mux-tcp",
                 "userAFenced":True,"existingUserAStreamEnded":True,
                 "newUserAStreamsRejected":True,
                 "blankVlessEmailRejected":True,
@@ -296,7 +314,7 @@ def run(xray, transport):
                       flush=True)
             raise
         finally:
-            for conn in (a,b):
+            for conn in (a,a2,b):
                 if conn is not None:
                     conn.close()
             for proc in (client,server):

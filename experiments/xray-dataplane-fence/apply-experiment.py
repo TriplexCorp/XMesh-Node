@@ -161,11 +161,41 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
 func (w *dsWorker) Proxy() proxy.Inbound {''',
     )
     worker_file.write_text(worker, encoding="utf-8")
+
+    # MUX child streams inherit their physical parent's context ID by default.
+    # Assign each authenticated logical stream its own runtime ID before
+    # Dispatch(), and finish its gate only after the MUX output pump ended.
+    # These changes are exercised only by the disposable, exact-pinned Xray.
+    mux_file = root / "common/mux/server.go"
+    mux = mux_file.read_text(encoding="utf-8")
+    mux = replace_once(
+        mux,
+        '"github.com/xtls/xray-core/common/buf"\n',
+        '"github.com/xtls/xray-core/app/xmeshdrain"\n'
+        '\t"github.com/xtls/xray-core/common/buf"\n'
+        '\tc "github.com/xtls/xray-core/common/ctx"\n',
+    )
+    mux = replace_once(
+        mux,
+        'func handle(ctx context.Context, s *Session, output buf.Writer) {\n',
+        'func handle(ctx context.Context, s *Session, output buf.Writer) {\n'
+        '    // The logical MUX stream owns its own lifecycle completion.\n'
+        '    defer xmeshdrain.Finish(ctx)\n',
+    )
+    mux = replace_once(
+        mux,
+        '\tctx = session.SubContextFromMuxInbound(ctx)\n',
+        '\tctx = session.SubContextFromMuxInbound(ctx)\n'
+        '    // Parent Xray connection ID is shared by all MUX children.\n'
+        '    // A unique child ID prevents false duplicate registration.\n'
+        '    ctx = c.ContextWithID(ctx, session.NewID())\n',
+    )
+    mux_file.write_text(mux, encoding="utf-8")
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
          str(shared / "observed_checkpoint.go"),
          str(shared / "observed_checkpoint_test.go"),
-         str(dispatcher_file), str(worker_file)],
+         str(dispatcher_file), str(worker_file), str(mux_file)],
         check=True,
         cwd=root,
     )
