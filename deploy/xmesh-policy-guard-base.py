@@ -519,6 +519,17 @@ def sample_before_xray_replace(state_dir, node_id, now_ms=None):
     counters, runtime_id, inbound_counters = get_counters()
     if counters is None or inbound_counters is None or not runtime_id:
         raise ValueError("Old Xray StatsService unavailable; revocation sample not captured")
+    # Only committed, signed user+inbound scope may advance durable counters.
+    # Unexpected legacy entries from the old process must NOT be charged or
+    # smuggled into a scoped telemetry snapshot by this new sampling path.
+    for key in counters:
+        if not isinstance(key, str) or not key.isdecimal() or not scope.get(int(key)):
+            raise ValueError("Old Xray sample includes user outside committed signed scope")
+    for identity in inbound_counters:
+        if (not isinstance(identity, tuple) or len(identity) != 2 or
+                not isinstance(identity[0], str) or not identity[0].isdecimal() or
+                identity[1] not in scope.get(int(identity[0]), set())):
+            raise ValueError("Old Xray sample includes inbound outside committed signed scope")
     ledger = load_json(ledger_file)
     timestamp = int(time.time() * 1000) if now_ms is None else now_ms
     ledger = integrate_counters(ledger, counters, runtime_id, timestamp, inbound_counters)
