@@ -89,6 +89,22 @@ class PreStopCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing signed pending policy"):
             guard.sample_before_xray_replace(self.state, 7)
 
+    def test_shell_hook_is_opt_in_and_precedes_process_replacement(self):
+        shell = (ROOT / "deploy/xmesh-xray-sync.sh").read_text(encoding="utf-8")
+        guard_hook = 'python3 "$POLICY_GUARD" prestop-sample'
+        old_process_removal = 'docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true'
+        self.assertEqual(shell.count(guard_hook), 1)
+        hook_pos = shell.index(guard_hook)
+        self.assertIn('XMESH_QUOTA_V2_PRESTOP_SAMPLE:-0', shell[:hook_pos])
+        self.assertIn('"$POLICY_ENABLED" == true', shell[:hook_pos])
+        self.assertIn('"$OFFLINE_POLICY" == false', shell[:hook_pos])
+        self.assertIn('Old Xray revocation meter capture failed; refusing replacement.',
+                      shell[hook_pos:hook_pos + 300])
+        self.assertLess(hook_pos, shell.index(old_process_removal, hook_pos))
+        # No "final meter" or refund response field is emitted by this hook.
+        self.assertNotIn("quotaFinalMeter", shell)
+        self.assertNotIn("quotaFinalReceipts", shell)
+
 
 if __name__ == "__main__":
     unittest.main()
