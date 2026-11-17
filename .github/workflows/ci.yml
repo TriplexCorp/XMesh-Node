@@ -34,6 +34,19 @@ jobs:
       - run: python3 tests/test_hot_user_reconcile.py
       - run: python3 tests/test_user_meter.py
       - run: python3 tests/test_meter_scope_publish.py
+      - name: Check out immutable previous production v6.0.11 meter source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: TriplexCorp/XMesh-Node
+          ref: 647adcf7af326b205fce12545fb5d75a20bb8191
+          path: .ci-previous-node
+          persist-credentials: false
+      - name: Prove old ledger survives 6.0.11 to 6.0.12 upgrade, outage and restart
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile tests/test_meter_upgrade_continuity.py
+          XMESH_PREVIOUS_NODE_DIR=.ci-previous-node python3 tests/test_meter_upgrade_continuity.py
       - run: python3 tests/test_bootstrap_meter.py
       - run: python3 tests/test_pending_enrollment.py
       - run: python3 tests/test_strict_pq_release_pin.py
