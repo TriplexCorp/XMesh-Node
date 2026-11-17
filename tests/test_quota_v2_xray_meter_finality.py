@@ -2,9 +2,8 @@
 """Disposable real-Xray experiment: a live statsquery is NOT terminal evidence.
 
 No signed final-use proof is emitted and no quota refund is ever attempted.
-All traffic stays on the disposable runner: local Xray and RFC1918 echo.
+All traffic stays on 127.0.0.1; finalRules allowlists exactly the test port.
 """
-import ipaddress
 import json
 import os
 from pathlib import Path
@@ -46,21 +45,6 @@ def reserve_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def local_runner_ip():
-    # Xray 26.x deliberately blackholes 127.0.0.1 freedom destinations.
-    # Route lookup on a UDP socket sends NO packets; the test targets only
-    # this disposable runner's RFC1918 interface, never an external service.
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.connect(("192.0.2.1", 9))
-        address = s.getsockname()[0]
-    ip = ipaddress.ip_address(address)
-    assert ip.version == 4 and (
-        address.startswith("10.") or address.startswith("192.168.")
-        or (address.startswith("172.") and 16 <= int(address.split(".")[1]) <= 31)
-    ), f"Runner has no isolated RFC1918 interface: {address}"
-    return address
 
 
 def recv_exact(sock, n):
@@ -138,7 +122,10 @@ def run():
         assert docker("inspect", name, check=False).returncode != 0, (
             f"Refusing to touch existing container: {name}"
         )
-    host_ip = local_runner_ip()
+    # Xray Freedom 26.x blocks private destinations unless explicit
+    # finalRules allowlists them. The exception below is TCP + EXACT port
+    # + 127.0.0.1/32 in this disposable fixture, never production config.
+    host_ip = "127.0.0.1"
     echo = EchoServer((host_ip,0),EchoHandler)
     threading.Thread(target=echo.serve_forever,daemon=True).start()
     api_port, vless_port, socks_port = reserve_port(),reserve_port(),reserve_port()
@@ -157,7 +144,10 @@ def run():
              "protocol":"dokodemo-door","settings":{"address":"127.0.0.1",
                                                         "port":api_port,"network":"tcp"}},
         ],
-        "outbounds":[{"tag":"direct","protocol":"freedom"}],
+        "outbounds":[{"tag":"direct","protocol":"freedom","settings":{
+            "finalRules":[{"action":"allow","network":"tcp",
+                "ip":["127.0.0.1/32"],"port":str(echo.server_address[1])}]
+        }}],
         "routing":{"rules":[{"type":"field","inboundTag":["xmesh_stats_in"],
                               "outboundTag":"xmesh_stats_api"}]},
     }
