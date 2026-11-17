@@ -130,7 +130,7 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
         raise ValueError("Policy envelope is not an object")
     policy = document.get("policy")
     key = document.get("policyPublicKey")
-    if not isinstance(policy, dict) or policy.get("version") != 1:
+    if not isinstance(policy, dict) or policy.get("version") not in (1, 2):
         raise ValueError("Unknown policy version")
     if type(policy.get("nodeId")) is not int or policy["nodeId"] != node_id:
         raise ValueError("Policy node identity mismatch")
@@ -155,6 +155,8 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
         if committed.exists():
             previous = load_json(committed)
             old_policy = previous.get("policy", {})
+            if old_policy.get("version") == 2 and policy.get("version") != 2:
+                raise ValueError("Quota protocol downgrade rejected")
             old_issued = old_policy.get("issuedAtMs")
             if type(old_issued) is not int:
                 raise ValueError("Stored policy revision is invalid")
@@ -190,6 +192,8 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
             raise ValueError("Invalid signed subscription traffic limit")
         if budget is not None and (type(budget) is not int or not 0 <= budget <= 64 * 1024 * 1024):
             raise ValueError("Invalid offline budget")
+        if policy["version"] == 2 and (limit > 0 or budget is not None) and not isinstance(user.get("quotaReservation"), dict):
+            raise ValueError("Limited v2 user requires a signed quota reservation")
         if user_id in seen_id or uid in seen_uuid:
             raise ValueError("Duplicate user policy")
         seen_id.add(user_id)
@@ -460,6 +464,48 @@ def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=No
     return ledger
 
 
+def enforce_quota_reservation(user, record, total, now_ms):
+    """Consume only a node-bound absolute ceiling from a verified v2 policy.
+
+    This function is called only after envelope signature/node verification.
+    Aggregate panelUsedBytes is deliberately not an acknowledgement.
+    """
+    lease = user.get("quotaReservation")
+    if not isinstance(lease, dict):
+        raise ValueError("Missing signed quota reservation")
+    required = ("epoch", "meterEpoch", "reservationId", "revision",
+                "acknowledgedBytes", "ceilingBytes", "validUntilMs")
+    if set(lease) != set(required):
+        raise ValueError("Invalid signed quota reservation fields")
+    for field in ("epoch", "meterEpoch", "reservationId"):
+        if not isinstance(lease[field], str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", lease[field]):
+            raise ValueError("Invalid quota reservation identity")
+    for field in ("revision", "acknowledgedBytes", "ceilingBytes", "validUntilMs"):
+        if type(lease[field]) is not int or not 0 <= lease[field] < (1 << 63):
+            raise ValueError("Invalid quota reservation counter")
+    if lease["acknowledgedBytes"] > total:
+        raise ValueError("Acknowledgement is ahead of durable local usage")
+    old = record.get("quotaReservation")
+    if old is not None:
+        if old["meterEpoch"] != lease["meterEpoch"]:
+            raise ValueError("Meter incarnation changed without reconciliation")
+        if lease["acknowledgedBytes"] < old["acknowledgedBytes"]:
+            raise ValueError("Quota acknowledgement rollback")
+        if old["epoch"] == lease["epoch"] and (
+                lease["revision"] < old["revision"] or
+                lease["reservationId"] != old["reservationId"]):
+            raise ValueError("Quota reservation rollback")
+        if old["epoch"] == lease["epoch"] and lease["revision"] == old["revision"] and lease != old:
+            raise ValueError("Conflicting quota reservation revision")
+    record["quotaReservation"] = dict(lease)
+    if now_ms >= lease["validUntilMs"]:
+        return "quota-reservation-expired"
+    if total >= lease["ceilingBytes"]:
+        return "quota"
+    return None
+
+
 def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbound_counters=None):
     """Pure admission decision; caller persists the ledger before applying JSON."""
     if not isinstance(ledger, dict):
@@ -490,25 +536,32 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
                 record.get("revokedReason") == "policy-expired"
             )
         )
-        if "anchor" not in record or newly_authorized:
-            record["anchor"] = total
-            record["budget"] = budget
-            record["panelUsedBytes"] = user["panelUsedBytes"]
-            record["revoked"] = False
-            record.pop("revokedReason", None)
+        reservation_reason = None
+        if policy.get("version") == 2 and budget is not None:
+            reservation_reason = enforce_quota_reservation(user, record, total, now_ms)
+            if reservation_reason is None:
+                record["revoked"] = False
+                record.pop("revokedReason", None)
         else:
-            if budget is None:
-                record["budget"] = None
-            elif record.get("budget") is not None:
-                record["budget"] = min(int(record["budget"]), budget)
-        if not offline:
-            record["authorizedAtMs"] = max(int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
-            record["limitBytes"] = limit
-            record["expireAtMs"] = expires
-        reason = None
+            if "anchor" not in record or newly_authorized:
+                record["anchor"] = total
+                record["budget"] = budget
+                record["panelUsedBytes"] = user["panelUsedBytes"]
+                record["revoked"] = False
+                record.pop("revokedReason", None)
+            else:
+                if budget is None:
+                    record["budget"] = None
+                elif record.get("budget") is not None:
+                    record["budget"] = min(int(record["budget"]), budget)
+            if not offline:
+                record["authorizedAtMs"] = max(int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
+                record["limitBytes"] = limit
+                record["expireAtMs"] = expires
+        reason = reservation_reason
         if user["expireAtMs"] and now_ms >= user["expireAtMs"]:
             reason = "expired"
-        elif offline and budget is not None:
+        elif offline and budget is not None and policy.get("version") != 2:
             if counters is None:
                 reason = "unverified-traffic-counter"
             elif total - int(record.get("anchor", 0)) >= int(record.get("budget") or 0):
