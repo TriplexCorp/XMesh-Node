@@ -33,6 +33,10 @@ def run(root: Path):
         NODE_ROOT / "experiments/xray-dataplane-fence/xmeshdrain.go.txt",
         shared / "xmeshdrain.go",
     )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/xmeshdrain_test.go.txt",
+        shared / "xmeshdrain_test.go",
+    )
 
     dispatcher_file = root / "app/dispatcher/default.go"
     source = dispatcher_file.read_text(encoding="utf-8")
