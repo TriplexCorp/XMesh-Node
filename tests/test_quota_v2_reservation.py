@@ -64,6 +64,28 @@ class ReservationGuardTests(unittest.TestCase):
                                     None, "xray-a", True, 3000)
         self.assertEqual(denied.get(uid), "unverified-traffic-counter")
 
+    def test_waiting_subscription_can_bootstrap_online_only(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds":[{"tag":"MAIN","protocol":"vless",
+                   "settings":{"clients":[{"id":uid}]}}]}
+        user = {"userId":1,"xrayId":uid,"expireAtMs":0,
+                "panelUsedBytes":0,"limitBytes":1000000,
+                "offlineBudgetBytes":0,"onHold":True,
+                "quotaReservation":lease(ceiling=1000)}
+        policy = {"version":2,"nodeId":1,"issuedAtMs":1000,
+                  "validUntilMs":100000,"users":[user]}
+        _, ledger, denied = guard.enforce(
+            policy, copy.deepcopy(config), {}, {"1":0}, "xray-a", False, 1000)
+        self.assertNotIn(uid, denied, denied)
+        _, _, denied = guard.enforce(
+            policy, copy.deepcopy(config), ledger, {"1":0}, "xray-a", True, 2000)
+        self.assertEqual(denied.get(uid), "subscription-awaiting-first-connection")
+        user["onHold"] = False
+        policy["issuedAtMs"] = 3000
+        _, _, denied = guard.enforce(
+            policy, copy.deepcopy(config), ledger, {"1":1}, "xray-a", False, 3000)
+        self.assertNotIn(uid, denied, denied)
+
     def test_signed_ceiling_cannot_be_less_than_acknowledged_usage(self):
         invalid=lease(ceiling=40,ack=41)
         with self.assertRaises(ValueError):
