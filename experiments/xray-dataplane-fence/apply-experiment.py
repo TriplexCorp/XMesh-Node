@@ -252,33 +252,12 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     )
     meter_writer_file.write_text(meter_source, encoding="utf-8")
 
-    # CI-ONLY diagnostic: capture the exact origin of late UDP user meter
-    # increments. Remove this probe before any production consideration.
-    stats_counter_file = root / "app/stats/counter.go"
-    counter_source = stats_counter_file.read_text(encoding="utf-8")
-    counter_source = replace_once(
-        counter_source,
-        'import "sync/atomic"',
-        'import (\n "sync/atomic"\n "os"\n "fmt"\n "runtime/debug"\n)',
-    )
-    counter_source = replace_once(
-        counter_source,
-        '\treturn atomic.AddInt64(&c.value, delta)',
-        '''    if delta == 1232 &&
-        os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1" {
-        fmt.Fprintf(os.Stderr,
-            "XRAY EXPERIMENTAL UDP COUNTER ADD delta=%d stack=\\n%s\\n",
-            delta, debug.Stack())
-    }
-    return atomic.AddInt64(&c.value, delta)''',
-    )
-    stats_counter_file.write_text(counter_source, encoding="utf-8")
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
          str(shared / "observed_checkpoint.go"),
          str(shared / "observed_checkpoint_test.go"),
          str(dispatcher_file), str(worker_file), str(mux_file),
-         str(stats_counter_file), str(meter_writer_file)],
+         str(meter_writer_file)],
         check=True,
         cwd=root,
     )
