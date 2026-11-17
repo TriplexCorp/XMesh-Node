@@ -43,6 +43,32 @@ class ReservationGuardTests(unittest.TestCase):
         self.assertIsNone(guard.enforce_quota_reservation(user,record,89,2000))
         self.assertEqual(guard.enforce_quota_reservation(user,record,90,2000),"quota")
 
+    def test_limited_without_offline_budget_enforces_v2_ceiling(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds":[{"tag":"MAIN","protocol":"vless",
+                   "settings":{"clients":[{"id":uid}]}}]}
+        user = {"userId":1,"xrayId":uid,"expireAtMs":90000,
+                "panelUsedBytes":0,"limitBytes":100,
+                "offlineBudgetBytes":None,"quotaReservation":lease()}
+        policy = {"version":2,"nodeId":1,"issuedAtMs":1000,
+                  "validUntilMs":100000,"users":[user]}
+        _, ledger, denied = guard.enforce(policy, copy.deepcopy(config), {},
+                                          {"1":49}, "xray-a", False, 1000)
+        self.assertNotIn(uid, denied)
+        user["panelUsedBytes"] = 10
+        policy["issuedAtMs"] = 2000
+        _, ledger, denied = guard.enforce(policy, copy.deepcopy(config), ledger,
+                                          {"1":50}, "xray-a", False, 2000)
+        self.assertEqual(denied.get(uid), "quota")
+        _, _, denied = guard.enforce(policy, copy.deepcopy(config), ledger,
+                                    None, "xray-a", True, 3000)
+        self.assertEqual(denied.get(uid), "unverified-traffic-counter")
+
+    def test_signed_ceiling_cannot_be_less_than_acknowledged_usage(self):
+        invalid=lease(ceiling=40,ack=41)
+        with self.assertRaises(ValueError):
+            guard.enforce_quota_reservation({"quotaReservation":invalid},{},41,1000)
+
     def test_identity_revision_ack_and_lifetime_validation(self):
         for field,value in [("meterEpoch","bad"),("revision",True),
                             ("acknowledgedBytes",100),("ceilingBytes",-1)]:
