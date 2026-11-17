@@ -2,8 +2,9 @@
 """Disposable real-Xray experiment: a live statsquery is NOT terminal evidence.
 
 No signed final-use proof is emitted and no quota refund is ever attempted.
-All traffic stays on localhost inside an isolated GitHub Actions worker.
+All traffic stays on the disposable runner: local Xray and RFC1918 echo.
 """
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -47,6 +48,21 @@ def reserve_port():
         return s.getsockname()[1]
 
 
+def local_runner_ip():
+    # Xray 26.x deliberately blackholes 127.0.0.1 freedom destinations.
+    # Route lookup on a UDP socket sends NO packets; the test targets only
+    # this disposable runner's RFC1918 interface, never an external service.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("192.0.2.1", 9))
+        address = s.getsockname()[0]
+    ip = ipaddress.ip_address(address)
+    assert ip.version == 4 and (
+        address.startswith("10.") or address.startswith("192.168.")
+        or (address.startswith("172.") and 16 <= int(address.split(".")[1]) <= 31)
+    ), f"Runner has no isolated RFC1918 interface: {address}"
+    return address
+
+
 def recv_exact(sock, n):
     result = bytearray()
     while len(result) < n:
@@ -57,7 +73,7 @@ def recv_exact(sock, n):
     return bytes(result)
 
 
-def connect_socks(port, target):
+def connect_socks(port, target, target_host):
     deadline = time.monotonic()+18
     while True:
         try:
@@ -66,7 +82,7 @@ def connect_socks(port, target):
             sock.sendall(b"\x05\x01\x00")
             assert recv_exact(sock, 2) == b"\x05\x00"
             sock.sendall(b"\x05\x01\x00\x01" +
-                         socket.inet_aton("127.0.0.1") + struct.pack(">H", target))
+                         socket.inet_aton(target_host) + struct.pack(">H", target))
             header = recv_exact(sock, 4)
             assert header[:2] == b"\x05\x00", f"SOCKS5 refused route: {header!r}"
             addr_len = {1: 4, 4: 16}.get(header[3])
@@ -122,7 +138,8 @@ def run():
         assert docker("inspect", name, check=False).returncode != 0, (
             f"Refusing to touch existing container: {name}"
         )
-    echo = EchoServer(("127.0.0.1",0),EchoHandler)
+    host_ip = local_runner_ip()
+    echo = EchoServer((host_ip,0),EchoHandler)
     threading.Thread(target=echo.serve_forever,daemon=True).start()
     api_port, vless_port, socks_port = reserve_port(),reserve_port(),reserve_port()
     user = str(uuid.uuid4())
@@ -173,7 +190,7 @@ def run():
                        "-v",f"{file}:/etc/xray/config.json:ro",
                        IMAGE,"run","-config","/etc/xray/config.json")
                 started.append(name)
-            sock=connect_socks(socks_port,echo.server_address[1])
+            sock=connect_socks(socks_port,echo.server_address[1],host_ip)
             echo_bytes(sock,8192)
             first=await_counter(api_port,1)
             echo_bytes(sock,32768)
