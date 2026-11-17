@@ -69,6 +69,17 @@ class PreStopCaptureTests(unittest.TestCase):
             self.capture((None, None, None))
         self.assertEqual(self.journal.read_bytes(), old_bytes)
 
+    def test_out_of_scope_user_and_inbound_cannot_poison_journal(self):
+        old_bytes = self.journal.read_bytes()
+        with self.assertRaisesRegex(ValueError, "user outside committed"):
+            self.capture(({"1": 15, "99": 3}, "old-xray",
+                          {("1", "MAIN"): {"uplink": 15, "downlink": 0}}))
+        self.assertEqual(self.journal.read_bytes(), old_bytes)
+        with self.assertRaisesRegex(ValueError, "inbound outside committed"):
+            self.capture(({"1": 15}, "old-xray",
+                          {("1", "OTHER"): {"uplink": 15, "downlink": 0}}))
+        self.assertEqual(self.journal.read_bytes(), old_bytes)
+
     def test_fails_closed_without_committed_signed_scope(self):
         old_bytes = self.journal.read_bytes()
         with self.assertRaisesRegex(ValueError, "committed signed scope"):
