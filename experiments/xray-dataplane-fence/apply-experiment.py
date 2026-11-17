@@ -53,7 +53,7 @@ def run(root: Path):
     // Experimental: register each authenticated TCP session before any link
     // is returned to the inbound. Registration is atomic with fence.
     if subject := session.InboundFromContext(ctx); subject != nil &&
-        subject.User != nil {
+        subject.User != nil && subject.Tag == "vless-share" {
         stopStream := func() {
             if subject.Conn != nil { _ = subject.Conn.Close() }
             common.Close(inbound.Writer)
@@ -76,7 +76,7 @@ def run(root: Path):
     // Experimental link dispatch path (including non-TCP transports):
     // a failed admission never proceeds to a live outbound route.
     if subject := session.InboundFromContext(ctx); subject != nil &&
-        subject.User != nil {
+        subject.User != nil && subject.Tag == "vless-share" {
         stopStream := func() {
             if subject.Conn != nil { _ = subject.Conn.Close() }
             common.Close(outbound.Writer)
