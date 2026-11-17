@@ -158,8 +158,7 @@ func persistObservedCheckpoint(email,revocationID string) (observedCheckpoint,er
     if err!=nil{return empty,err}
     tempName:=temporary.Name()
     defer os.Remove(tempName)
-    if _,err=temporary.Write(append(data,'
-'));err!=nil{
+    if _,err=temporary.Write(append(data,byte(10)));err!=nil{
         temporary.Close()
         return empty,err
     }
