@@ -1,0 +1,48 @@
+name: Xray 26.10.31 patched per-user session fence (disposable)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'experiments/xray-dataplane-fence/**'
+      - '.github/workflows/xray-dataplane-fence-experiment.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'experiments/xray-dataplane-fence/**'
+      - '.github/workflows/xray-dataplane-fence-experiment.yml'
+permissions:
+  contents: read
+jobs:
+  patched-real-xray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Validate experimental fixture syntax
+        run: |
+          python3 -m py_compile experiments/xray-dataplane-fence/apply-experiment.py
+          python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_fence.py
+      - name: Checkout EXACT official Xray v26.10.31 commit
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/XTLS/Xray-core.git .experimental-xray
+          git -C .experimental-xray fetch --no-tags --depth=1 origin a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C .experimental-xray checkout --detach a4a3dff5b20c2faae567b742c172c7b95e75c083
+          test "$(git -C .experimental-xray rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+      - name: Patch disposable Xray dispatcher and inbound lifecycle
+        run: python3 experiments/xray-dataplane-fence/apply-experiment.py .experimental-xray
+      - name: Race-test injected Xray module and build real Xray binary
+        run: |
+          cd .experimental-xray
+          go test -race ./app/xmeshdrain
+          go build -o /tmp/xmesh-xray-fence-experiment ./main
+          /tmp/xmesh-xray-fence-experiment version
+      - name: Verify selective active VLESS stream termination while other users continue
+        env:
+          XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: "1"
+        run: python3 experiments/xray-dataplane-fence/test_xray_patched_fence.py /tmp/xmesh-xray-fence-experiment

@@ -1,0 +1,138 @@
+package xmeshdrain
+
+import (
+    "context"
+    "errors"
+    "os"
+    "sync"
+    "testing"
+    "time"
+
+    c "github.com/xtls/xray-core/common/ctx"
+)
+
+func TestMain(m *testing.M) {
+    // Unit tests exercise only the in-memory gate. Never start the privileged
+    // Unix control endpoint from these tests.
+    enabled = true
+    os.Exit(m.Run())
+}
+
+func resetGate() {
+    gate.Lock()
+    defer gate.Unlock()
+    gate.users = map[string]*userState{}
+    gate.sessions = map[uint64]*trackedSession{}
+}
+
+func ctx(id uint32) context.Context {
+    return c.ContextWithID(context.Background(),c.ID(id))
+}
+
+func TestSelectiveFenceAndRepeatNeverRefund(t *testing.T) {
+    resetGate()
+    first, second := ctx(11), ctx(12)
+    stopped := make(chan struct{})
+    if err := Register(first, "user-a", func() {
+        Finish(first)
+        close(stopped)
+    }); err != nil { t.Fatal(err) }
+    if err := Register(second, "user-b", func() {}); err != nil { t.Fatal(err) }
+    deadline,cancel := context.WithTimeout(context.Background(),2*time.Second)
+    defer cancel()
+    info,err := fence(deadline,"user-a")
+    if err != nil { t.Fatal(err) }
+    <-stopped
+    if !info.Fenced || !info.Drained || info.Active != 0 ||
+        info.FinalMeterVerified || info.Refundable {
+        t.Fatalf("fake final meter: %+v",info)
+    }
+    if err := Register(ctx(13),"user-a",func(){}); !errors.Is(err,errFenced) {
+        t.Fatalf("reopened user after fence: %v",err)
+    }
+    if err := Register(ctx(14),"user-b",func(){}); err != nil {
+        t.Fatalf("unrelated user was blocked: %v",err)
+    }
+    again,err := fence(deadline,"user-a")
+    if err != nil || again != info { t.Fatalf("non-idempotent: %+v %v",again,err) }
+    Finish(second)
+    Finish(ctx(14))
+}
+
+func TestFenceTimeoutKeepsAdmissionClosed(t *testing.T) {
+    resetGate()
+    s := ctx(15)
+    if err:=Register(s,"stuck",func(){}); err!=nil { t.Fatal(err) }
+    deadline,cancel:=context.WithTimeout(context.Background(),20*time.Millisecond)
+    defer cancel()
+    info,err:=fence(deadline,"stuck")
+    if !errors.Is(err,context.DeadlineExceeded) || info.Refundable {
+        t.Fatalf("timeout did not fail closed: %+v %v",info,err)
+    }
+    if err:=Register(ctx(16),"stuck",func(){}); !errors.Is(err,errFenced) {
+        t.Fatalf("timeout resurrected admission: %v",err)
+    }
+    Finish(s)
+    recovered,err:=fence(context.Background(),"stuck")
+    if err!=nil || recovered.FinalMeterVerified || recovered.Refundable ||
+        !recovered.Drained {
+        t.Fatalf("failed late completion: %+v %v",recovered,err)
+    }
+}
+
+func TestSessionIdentityCannotSwitchUsers(t *testing.T) {
+    resetGate()
+    s:=ctx(17)
+    if err:=Register(s,"owner",func(){}); err!=nil { t.Fatal(err) }
+    if err:=Register(s,"attacker",func(){}); err==nil {
+        t.Fatal("same physical connection changed attributed user")
+    }
+    if err:=Register(context.Background(),"owner",func(){}); !errors.Is(err,errNoSessionID) {
+        t.Fatalf("missing runtime session allowed: %v",err)
+    }
+    Finish(s)
+    Finish(s)
+}
+
+func TestManyConcurrentRegistrationsCannotCrossFence(t *testing.T) {
+    resetGate()
+    const count=180
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    ids:=make([]uint32,0,count)
+    for i:=0;i<count;i++ {
+        wg.Add(1)
+        go func(i int) {
+            defer wg.Done()
+            id:=uint32(i+100)
+            c:=ctx(id)
+            if err:=Register(c,"crowd",func(){Finish(c)}); err==nil {
+                mu.Lock()
+                ids=append(ids,id)
+                mu.Unlock()
+            } else if !errors.Is(err,errFenced) {
+                t.Errorf("invalid admission failure: %v",err)
+            }
+        }(i)
+    }
+    stopper := make(chan struct{})
+    go func() {
+        deadline,cancel:=context.WithTimeout(context.Background(),3*time.Second)
+        defer cancel()
+        info,err:=fence(deadline,"crowd")
+        if err!=nil || !info.Fenced || !info.Drained || info.Active!=0 ||
+            info.Refundable || info.FinalMeterVerified {
+            t.Errorf("incorrect concurrent fence result: %+v %v",info,err)
+        }
+        close(stopper)
+    }()
+    wg.Wait()
+    <-stopper
+    mu.Lock()
+    admitted:=len(ids)
+    mu.Unlock()
+    if admitted>count { t.Fatalf("admission count exceeded: %d",admitted) }
+    if err:=Register(ctx(300),"crowd",func(){}); !errors.Is(err,errFenced) {
+        t.Fatalf("concurrent re-entry: %v",err)
+    }
+}
