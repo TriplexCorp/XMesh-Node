@@ -148,8 +148,10 @@ def run():
                 session.sendall(b"still-alive?")
                 received = session.recv(128)
                 assert not received, "Existing Xray stream survived physical revocation"
-            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
                 pass
+            except socket.timeout as exc:
+                raise AssertionError("Revoked Xray left old connection open and stalled") from exc
             # No fresh sessions should connect once Docker reports stopped.
             with contextlib.suppress(OSError):
                 with socket.create_connection(("127.0.0.1", port), timeout=1):
