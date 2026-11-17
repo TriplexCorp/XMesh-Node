@@ -206,7 +206,7 @@ def run():
             removed=docker("exec",SERVER,"xray","api","rmu",
                            f"--server=127.0.0.1:{api_port}",
                            "-tag=vless-meter-fixture",EMAIL)
-            assert b"Removed 1 user(s) in total." in removed.stdout, removed.stdout
+            assert "Removed 1 user(s) in total." in removed.stdout, removed.stdout
             existing_after_rmu=probe_echo(sock)
             # A SOCKS5 handshake alone does NOT authenticate VLESS; send
             # echo traffic to check if the new VLESS credential was accepted.
@@ -225,11 +225,11 @@ def run():
             removed_inbound=docker("exec",SERVER,"xray","api","rmi",
                                    f"--server=127.0.0.1:{api_port}",
                                    "vless-meter-fixture")
-            assert b"removing:" in removed_inbound.stdout,removed_inbound.stdout
+            assert "removing:" in removed_inbound.stdout,removed_inbound.stdout
             api_still_alive=docker("exec",SERVER,"xray","api","lsi",
                                    f"--server=127.0.0.1:{api_port}",
                                    "--isOnlyTags=true")
-            assert b"vless-meter-fixture" not in api_still_alive.stdout,api_still_alive.stdout
+            assert "vless-meter-fixture" not in api_still_alive.stdout,api_still_alive.stdout
             existing_after_rmi=probe_echo(sock) if existing_after_rmu else False
             after_rmi=stats_query(api_port)
             assert after_rmi>=after_rmu,(after_rmu,after_rmi)
