@@ -1,0 +1,182 @@
+// CI-ONLY Xray observed-meter checkpoint. Not a terminal byte proof.
+// This file is injected exclusively into a disposable pinned Xray checkout.
+// A process can finish a routed task while outbound goroutines still write:
+// the observed counters must NEVER authorize quota refunds.
+package xmeshdrain
+
+import (
+    "crypto/rand"
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "os"
+    "path/filepath"
+    "sync"
+
+    "github.com/xtls/xray-core/features/stats"
+)
+
+type observedCheckpoint struct {
+    SchemaVersion int    `json:"schemaVersion"`
+    Email string         `json:"email"`
+    RevocationID string  `json:"revocationId"`
+    RuntimeID string     `json:"runtimeId"`
+    UplinkBytes uint64   `json:"uplinkBytes"`
+    DownlinkBytes uint64 `json:"downlinkBytes"`
+    Drained bool         `json:"drained"`
+    FinalMeterVerified bool `json:"finalMeterVerified"`
+    RefundableBytes uint64 `json:"refundableBytes"`
+}
+
+var observed = struct {
+    sync.Mutex
+    manager stats.Manager
+    directory string
+    runtimeID string
+}{}
+
+// configureObservedCheckpoint generates a new runtime identity and requires
+// a private, pre-existing directory. The real CI process calls this at start.
+// Never infer a trusted runtime from a previous disk file.
+func configureObservedCheckpoint(directory string) error {
+    if directory == "" || !filepath.IsAbs(directory) {
+        return errors.New("observed checkpoint directory must be absolute")
+    }
+    info,err := os.Lstat(directory)
+    if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+        return errors.New("observed checkpoint directory must exist and be private")
+    }
+    var bytes [32]byte
+    if _,err := rand.Read(bytes[:]); err != nil { return err }
+    observed.Lock()
+    defer observed.Unlock()
+    observed.directory = directory
+    observed.runtimeID = hex.EncodeToString(bytes[:])
+    return nil
+}
+
+func BindStatsManager(manager stats.Manager) {
+    if !enabled { return }
+    observed.Lock()
+    defer observed.Unlock()
+    observed.manager = manager
+}
+
+func validateRevocationID(id string) bool {
+    if len(id)!=36 { return false }
+    for i,c := range id {
+        if i==8 || i==13 || i==18 || i==23 {
+            if c!='-' { return false }
+        } else if !((c>='0'&&c<='9')||(c>='a'&&c<='f')) {
+            return false
+        }
+    }
+    return true
+}
+
+func checkpointPath(directory,email string) string {
+    digest := sha256.Sum256([]byte(email))
+    return filepath.Join(directory,"observed-"+hex.EncodeToString(digest[:])+".json")
+}
+
+func loadCheckpoint(path string) (observedCheckpoint,error) {
+    var existing observedCheckpoint
+    info,err := os.Lstat(path)
+    if err != nil { return existing,err }
+    if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 ||
+        info.Size() <= 0 || info.Size() > 4096 {
+        return existing,errors.New("unsafe existing checkpoint file")
+    }
+    b,err := os.ReadFile(path)
+    if err != nil { return existing,err }
+    if err = json.Unmarshal(b,&existing); err != nil { return existing,err }
+    if existing.SchemaVersion != 1 || !existing.Drained ||
+        existing.FinalMeterVerified || existing.RefundableBytes != 0 {
+        return existing,errors.New("unsupported or refundable existing checkpoint")
+    }
+    return existing,nil
+}
+
+// persistObservedCheckpoint is called ONLY after fence() has stopped new
+// admission and seen both worker and routedDispatch return. It samples the
+// original Xray StatsService counters while Xray is still running. Such a
+// sample remains nonterminal because not all writers have proven completion.
+//
+// A repeated request must have the identical (email, runtime, revocation,
+// counters) tuple. A changed meter or process incarnation invalidates the
+// old snapshot rather than silently overwriting/refunding it.
+func persistObservedCheckpoint(email,revocationID string) (observedCheckpoint,error) {
+    var empty observedCheckpoint
+    if email=="" || len(email)>128 || !validateRevocationID(revocationID) {
+        return empty,errors.New("invalid observed checkpoint identity")
+    }
+    observed.Lock()
+    defer observed.Unlock()
+    if observed.directory=="" || observed.runtimeID=="" || observed.manager==nil {
+        return empty,errors.New("observed checkpoint not configured")
+    }
+    // The fencing gate is independent of this manager lock. Recheck the
+    // post-drain state, but never interpret it as final byte accounting.
+    gate.Lock()
+    u:=gate.users[email]
+    drained:=u!=nil && u.fenced && u.closed && len(u.active)==0
+    gate.Unlock()
+    if !drained { return empty,errors.New("cannot sample undrained user") }
+
+    read := func(direction string)(uint64,error) {
+        counter:=observed.manager.GetCounter("user>>>"+email+">>>traffic>>>"+direction)
+        if counter==nil { return 0,fmt.Errorf("missing %s counter",direction) }
+        n:=counter.Value()
+        if n<0 { return 0,fmt.Errorf("negative %s counter",direction) }
+        return uint64(n),nil
+    }
+    uplink,err:=read("uplink")
+    if err!=nil{return empty,err}
+    downlink,err:=read("downlink")
+    if err!=nil{return empty,err}
+    record:=observedCheckpoint{
+        SchemaVersion:1,Email:email,RevocationID:revocationID,
+        RuntimeID:observed.runtimeID,UplinkBytes:uplink,
+        DownlinkBytes:downlink,Drained:true,
+        FinalMeterVerified:false,RefundableBytes:0,
+    }
+    path:=checkpointPath(observed.directory,email)
+    if old,err:=loadCheckpoint(path);err==nil{
+        if old!=record {
+            return empty,errors.New("existing checkpoint mismatch or late counter update")
+        }
+        return old,nil
+    }else if !os.IsNotExist(err){
+        return empty,fmt.Errorf("unsafe checkpoint: %w",err)
+    }
+
+    data,err:=json.Marshal(record)
+    if err!=nil{return empty,err}
+    temporary,err:=os.CreateTemp(observed.directory,".observed-pending-")
+    if err!=nil{return empty,err}
+    tempName:=temporary.Name()
+    defer os.Remove(tempName)
+    if _,err=temporary.Write(append(data,byte(10)));err!=nil{
+        temporary.Close()
+        return empty,err
+    }
+    if err=temporary.Sync();err!=nil{
+        temporary.Close()
+        return empty,err
+    }
+    if err=temporary.Close();err!=nil{return empty,err}
+    // Link makes creation exclusive: never replace an earlier runtime's
+    // observation or follow an attacker-supplied destination symlink.
+    if err=os.Link(tempName,path);err!=nil{
+        return empty,fmt.Errorf("checkpoint already present or unsafe: %w",err)
+    }
+    directory,err:=os.Open(observed.directory)
+    if err!=nil{return empty,err}
+    syncErr:=directory.Sync()
+    closeErr:=directory.Close()
+    if syncErr!=nil{return empty,syncErr}
+    if closeErr!=nil{return empty,closeErr}
+    return record,nil
+}
