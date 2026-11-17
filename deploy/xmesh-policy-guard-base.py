@@ -335,6 +335,12 @@ def verified_snapshot_scope(document, state_dir, node_id):
         tag = inbound.get("tag")
         # An empty or absent tag can never be authorized by Nexus's
         # inbound-tag verifier: do not try to publish its traffic.
+        if tag is None:
+            # Older valid single-inbound profiles have no explicit tag.
+            # They may still be admitted by Xray, but Nexus cannot authorize
+            # a per-inbound counter without an actual tag. Withhold those
+            # user samples rather than breaking policy commit or guessing.
+            continue
         if not isinstance(tag, str) or not tag or len(tag.encode("utf-8")) > 128:
             raise ValueError("Signed proxy inbound cannot be metered without a valid tag")
         accounts, credential_key = configured_accounts(inbound)
