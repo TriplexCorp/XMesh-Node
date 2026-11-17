@@ -193,6 +193,12 @@ def run():
                     "postStopStatsServiceAvailable":False,
                     "finalMeterVerified":False,"refundableBytes":0}
             print("REAL XRAY NONTERMINAL COUNTER EVIDENCE "+json.dumps(report,sort_keys=True),flush=True)
+    except Exception:
+        # Capture fixture diagnostics before ephemeral containers are removed.
+        for name in started:
+            log = docker("logs","--tail","60",name,check=False)
+            print("DISPOSABLE XRAY "+name+" STDERR:\\n"+log.stderr[-8000:],flush=True)
+        raise
     finally:
         if sock is not None:
             sock.close()
