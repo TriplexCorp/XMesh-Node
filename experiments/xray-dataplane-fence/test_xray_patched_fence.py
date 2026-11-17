@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
 from test_quota_v2_xray_user_inbound_drain import (  # noqa: E402
     EchoHandler, EchoServer, reserve_port, connect_socks, echo_bytes,
