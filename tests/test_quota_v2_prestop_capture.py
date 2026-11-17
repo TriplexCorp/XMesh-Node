@@ -139,19 +139,22 @@ class PreStopCaptureTests(unittest.TestCase):
         program = """
 set -Eeuo pipefail
 """ + helper + """
+CALL_LOG="$(mktemp)"
 RUNNING=true
 docker() {
  case "$1" in
   info) return 0;;
   inspect) if [[ "$2" == "-f" ]]; then echo "$RUNNING"; else return 0; fi;;
-  update) [[ "$2" == "--restart=no" ]] || return 1; echo restart-disabled;;
-  stop) RUNNING=false; echo stopped;;
-  kill) RUNNING=false; echo killed;;
+  update) [[ "$2" == "--restart=no" ]] || return 1; echo restart-disabled >> "$CALL_LOG";;
+  stop) RUNNING=false; echo stopped >> "$CALL_LOG";;
+  kill) RUNNING=false; echo killed >> "$CALL_LOG";;
   *) return 1;;
  esac
 }
 stop_managed_xray_for_revocation
 [[ "$RUNNING" == false ]]
+cat "$CALL_LOG"
+rm -f "$CALL_LOG"
 """
         good = subprocess.run(["bash", "-c", program], capture_output=True,
                               text=True, timeout=5)
