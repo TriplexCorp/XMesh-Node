@@ -492,6 +492,62 @@ def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
         pass
 
 
+def pending_revocation_present(state_dir, node_id):
+    """Only an independently verified signed pending policy may arm stop fencing."""
+    pending = state_dir / "policy-envelope.json.pending"
+    if not pending.is_file():
+        raise ValueError("Missing signed pending revocation policy")
+    policy = verify_envelope(load_json(pending), state_dir, node_id)
+    return any(user.get("quotaRevocation") is not None for user in policy["users"])
+
+
+def sample_before_xray_replace(state_dir, node_id, now_ms=None):
+    """Capture one extra durable sample from the OLD running Xray instance.
+
+    Caller MUST hold the xmesh-xray-sync shell lock, and MUST call before
+    deleting/restarting the old container. This only narrows the reporting
+    gap: existing sessions can still transfer bytes after this sample.
+    It is NEVER terminal-meter evidence and NEVER authorizes quota refund.
+    """
+    pending = state_dir / "policy-envelope.json.pending"
+    if not pending.is_file():
+        raise ValueError("Missing signed pending policy before Xray replacement")
+    policy = verify_envelope(load_json(pending), state_dir, node_id)
+    if not any(user.get("quotaRevocation") for user in policy["users"]):
+        return False
+    # Only already COMMITTED signed scope can publish the old process's
+    # counters. A pending, uncommitted policy cannot grant telemetry scope.
+    scope = committed_snapshot_scope(state_dir, node_id)
+    revoked_ids = {user["userId"] for user in policy["users"]
+                   if user.get("quotaRevocation") is not None}
+    if not isinstance(scope, dict) or any(not scope.get(uid) for uid in revoked_ids):
+        raise ValueError("Missing committed signed scope for old Xray sample")
+    ledger_file = state_dir / "policy-usage.json"
+    if not ledger_file.is_file():
+        raise ValueError("Missing durable journal before Xray replacement")
+    counters, runtime_id, inbound_counters = get_counters()
+    if counters is None or inbound_counters is None or not runtime_id:
+        raise ValueError("Old Xray StatsService unavailable; revocation sample not captured")
+    # Only committed, signed user+inbound scope may advance durable counters.
+    # Unexpected legacy entries from the old process must NOT be charged or
+    # smuggled into a scoped telemetry snapshot by this new sampling path.
+    for key in counters:
+        if not isinstance(key, str) or not key.isdecimal() or not scope.get(int(key)):
+            raise ValueError("Old Xray sample includes user outside committed signed scope")
+    for identity in inbound_counters:
+        if (not isinstance(identity, tuple) or len(identity) != 2 or
+                not isinstance(identity[0], str) or not identity[0].isdecimal() or
+                identity[1] not in scope.get(int(identity[0]), set())):
+            raise ValueError("Old Xray sample includes inbound outside committed signed scope")
+    ledger = load_json(ledger_file)
+    timestamp = int(time.time() * 1000) if now_ms is None else now_ms
+    ledger = integrate_counters(ledger, counters, runtime_id, timestamp, inbound_counters)
+    # Persist exact monotonic old-runtime readings BEFORE replacing Xray.
+    write_atomic(ledger_file, canonical(ledger))
+    store_metrics_snapshot(ledger, node_id, timestamp, scope)
+    return True
+
+
 def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=None):
     """Accumulate durable per-user bytes without changing admission policy."""
     if not isinstance(ledger, dict):
@@ -705,7 +761,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["prepare", "offline", "commit", "sample"])
+    parser.add_argument("action", choices=["prepare", "offline", "commit", "sample", "prestop-sample", "pending-revocation"])
     parser.add_argument("--state", required=True)
     parser.add_argument("--node-id", type=int, required=True)
     parser.add_argument("--response")
@@ -715,6 +771,20 @@ def main():
     args = parser.parse_args()
     state = Path(args.state)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.action == "pending-revocation":
+        # The shell needs a trusted binary choice to fence legacy rollback.
+        # Verification failure is not "false": fail the whole reconciliation.
+        print("true" if pending_revocation_present(state, args.node_id) else "false")
+        return
+    if args.action == "prestop-sample":
+        # This action is ONLY called by the root shell reconciler that has
+        # already acquired the same state lock. Never attempt re-locking.
+        # It fails closed if signed scope or live stats cannot be verified.
+        captured = sample_before_xray_replace(state, args.node_id, args.now_ms)
+        print("XMesh old-runtime pre-stop sample: " +
+              ("persisted (NOT final)" if captured else "no revocation"),
+              file=sys.stderr)
+        return
     if args.action == "sample":
         # Share the synchronizer's lock: both jobs mutate the SAME ledger.
         # Sample-only polling must never rewrite policy, authorization or Xray config.
