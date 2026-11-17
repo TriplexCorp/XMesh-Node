@@ -127,7 +127,7 @@ def run():
     api_port, vless_port, socks_port = reserve_port(),reserve_port(),reserve_port()
     user = str(uuid.uuid4())
     server_config = {
-        "log":{"loglevel":"warning"},
+        "log":{"loglevel":"debug"},
         "api":{"tag":"xmesh_stats_api","services":["StatsService"]},
         "policy":{"levels":{"0":{"statsUserUplink":True,"statsUserDownlink":True,
                                    "statsUserOnline":True}}},
@@ -145,7 +145,7 @@ def run():
                               "outboundTag":"xmesh_stats_api"}]},
     }
     client_config = {
-        "log":{"loglevel":"warning"},
+        "log":{"loglevel":"debug"},
         "inbounds":[{"tag":"socks5","listen":"127.0.0.1","port":socks_port,
                      "protocol":"socks","settings":{"auth":"noauth","udp":False}}],
         "outbounds":[{"protocol":"vless","settings":{"vnext":[{
@@ -197,7 +197,7 @@ def run():
         # Capture fixture diagnostics before ephemeral containers are removed.
         for name in started:
             log = docker("logs","--tail","60",name,check=False)
-            print("DISPOSABLE XRAY "+name+" STDERR:\\n"+log.stderr[-8000:],flush=True)
+            print("DISPOSABLE XRAY "+name+" OUTPUT:\n"+(log.stdout+log.stderr)[-10000:],flush=True)
         raise
     finally:
         if sock is not None:
