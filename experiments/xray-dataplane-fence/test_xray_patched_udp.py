@@ -227,10 +227,21 @@ def run(xray, xudp):
             assert observation["uplinkBytes"] + observation["downlinkBytes"] >= before_a
             assert checkpoint.is_file()
             assert json.loads(checkpoint.read_text()) == observation
+            snapshot_total = observation["uplinkBytes"] + observation["downlinkBytes"]
+            immediately_after_fence = query_counter(xray, api_port, EMAIL_A)
             exchange_udp(a, echo_port, False, f"{mode}-A-existing")
+            after_old_association = query_counter(xray, api_port, EMAIL_A)
             fresh_a = socks_udp_associate(socks_a)
             associations.append(fresh_a)
             exchange_udp(fresh_a, echo_port, False, f"{mode}-A-new")
+            after_new_association = query_counter(xray, api_port, EMAIL_A)
+            print("UDP METER LIFECYCLE DIAGNOSTIC "+json.dumps({
+                "transport": mode,
+                "fsyncedSnapshot": snapshot_total,
+                "immediatelyAfterFence": immediately_after_fence,
+                "afterRejectedOldAssociation": after_old_association,
+                "afterRejectedNewAssociation": after_new_association,
+            },sort_keys=True),flush=True)
             assert exchange_udp(b, echo_port, True, f"{mode}-B-continues")
             fresh_b = socks_udp_associate(socks_b)
             associations.append(fresh_b)
