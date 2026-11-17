@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_quota_v2_xray_user_inbound_drain import recv_exact, reserve_port  # noqa: E402
 from test_xray_patched_fence import (  # noqa: E402
-    command, await_socket, request_fence, wait_counter, EMAIL_A, EMAIL_B,
+    command, await_socket, request_fence, wait_counter, query_counter, EMAIL_A, EMAIL_B,
 )
 
 
@@ -105,6 +105,28 @@ def exchange_udp(association, echo_port, expect_reply, tag):
         assert response == token, f"{tag}: corrupted routed UDP payload"
         return True
     raise AssertionError(f"{tag}: revoked user received UDP after fence")
+
+
+def inspect_fence_replay(path, email, revocation_id):
+    """Return status and raw bytes. Late UDP/XUDP traffic must yield 409."""
+    payload = json.dumps({"email": email, "revocationId": revocation_id}).encode()
+    request = (b"POST /v1/fence HTTP/1.1\r\nHost: localhost\r\n"
+               b"Connection: close\r\nContent-Type: application/json\r\n"
+               + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+    with socket.socket(socket.AF_UNIX) as control:
+        control.settimeout(9)
+        control.connect(str(path))
+        control.sendall(request)
+        response = bytearray()
+        while True:
+            chunk = control.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+    headers, body = bytes(response).split(b"\r\n\r\n", 1)
+    status = int(headers.split(b"\r\n", 1)[0].split()[1])
+    assert status in (200, 409), response[-2000:]
+    return status, body
 
 
 def run(xray, xudp):
@@ -215,8 +237,24 @@ def run(xray, xudp):
             assert exchange_udp(fresh_b, echo_port, True, f"{mode}-B-new")
             after_a = wait_counter(xray, api_port, EMAIL_A, before_a)
             after_b = wait_counter(xray, api_port, EMAIL_B, before_b + 1)
-            repeat = request_fence(control_socket, EMAIL_A, revocation_id)
-            assert repeat["observedCheckpoint"] == observation
+            # Asynchronous UDP writes may arrive after the first fsync.
+            # Once the sampled meter grows, the old proof MUST reject replay
+            # and NEVER authorize a refund or overwrite its old contents.
+            status, body = inspect_fence_replay(control_socket, EMAIL_A, revocation_id)
+            if status == 200:
+                repeat = json.loads(body)
+                assert repeat["observedCheckpoint"] == observation
+                assert not repeat["finalMeterVerified"] and not repeat["refundable"]
+            else:
+                assert b"existing checkpoint mismatch or late counter update" in body
+            late_total = query_counter(xray, api_port, EMAIL_A)
+            original_total = observation["uplinkBytes"] + observation["downlinkBytes"]
+            if late_total > original_total:
+                second_status, second_body = inspect_fence_replay(
+                    control_socket, EMAIL_A, revocation_id)
+                assert second_status == 409, (late_total, original_total, second_body)
+                assert b"late counter update" in second_body
+            assert json.loads(checkpoint.read_text()) == observation
             assert server.poll() is None
             server.terminate()
             server.wait(timeout=5)
@@ -224,6 +262,8 @@ def run(xray, xudp):
             report = {"testedTransport": mode, "userAUDPRevoked": True,
                       "userBUDPContinues": True, "newUserAUDPRejected": True,
                       "newUserBUDPAllowed": True, "journalFsynced": True,
+                      "replayStatus": status,
+                      "lateMeterGrowth": late_total - original_total,
                       "userABeforeFenceBytes": before_a,
                       "userAAfterFenceBytes": after_a,
                       "userBAfterFenceBytes": after_b,
