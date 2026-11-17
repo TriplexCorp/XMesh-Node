@@ -409,8 +409,27 @@ def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
     if any(not 0 <= value < (1 << 63) for row in user_rows
            for field, value in row.items() if field != "userId"):
         raise ValueError("Aggregated durable traffic counter overflow")
+    # Receipts are derived from the same durable root-owned ledger as the
+    # admission decision, not from the untrusted telemetry uploader. Only
+    # currently signed, assigned identities can be exported.
+    receipts = []
+    for user_id in sorted(totals):
+        record = ledger.get("users", {}).get(str(user_id), {})
+        if not isinstance(record, dict):
+            continue
+        lease = record.get("quotaReservation")
+        if not isinstance(lease, dict):
+            continue
+        used = record.get("total")
+        if type(used) is not int or not 0 <= used < (1 << 63):
+            raise ValueError("Invalid durable quota usage")
+        receipts.append({"userId": user_id, "epoch": lease["epoch"],
+                         "meterEpoch": lease["meterEpoch"],
+                         "reservationId": lease["reservationId"],
+                         "usedBytes": used})
     payload = {"nodeId": node_id, "sampledAtMs": now_ms,
-               "userInboundTraffic": rows, "userTraffic": user_rows}
+               "userInboundTraffic": rows, "userTraffic": user_rows,
+               "quotaReceipts": receipts}
     snapshot = Path("/run/xmesh-node-user-metrics.json")
     if not snapshot.parent.is_dir():
         return
