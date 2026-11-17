@@ -13,7 +13,43 @@ STATE=/var/lib/xmesh-xray-sync
 mkdir -p "$STATE"; chmod 700 "$STATE"
 exec 9>"$STATE/lock"
 flock -n 9 || exit 0
-REQUEST="$(printf '{"node_id":%s}' "$XMESH_NODE_ID")"
+# The signed desired-config request carries the authoritative local guard
+# journal. Only the root-owned, already-persisted totals may become quota-v2
+# acknowledgements; an absent ledger is valid only for first enrollment.
+REQUEST="$(python3 - "$STATE/policy-usage.json" "$XMESH_NODE_ID" <<'PY'
+import json,sys
+from pathlib import Path
+path=Path(sys.argv[1])
+if path.exists():
+    with path.open(encoding="utf-8") as f: ledger=json.load(f)
+    if not isinstance(ledger,dict): raise SystemExit("Invalid durable quota journal")
+    users=ledger.get("users",{})
+    if not isinstance(users,dict): raise SystemExit("Invalid durable quota users")
+else:
+    users={}
+if len(users)>2048: raise SystemExit("Too many durable quota users")
+rows=[]
+for key,entry in users.items():
+    if not isinstance(key,str) or not key.isdecimal() or not isinstance(entry,dict):
+        raise SystemExit("Invalid durable quota entry")
+    uid=int(key)
+    total=entry.get("total",0)
+    if uid<=0 or type(total) is not int or not 0<=total<2**63:
+        raise SystemExit("Invalid durable quota counter")
+    row={"userId":uid,"usedBytes":total}
+    lease=entry.get("quotaReservation")
+    if lease is not None:
+        if not isinstance(lease,dict): raise SystemExit("Invalid durable lease")
+        for field in ("epoch","meterEpoch","reservationId"):
+            value=lease.get(field)
+            if not isinstance(value,str): raise SystemExit("Missing durable lease identity")
+            row[field]=value
+    rows.append(row)
+rows.sort(key=lambda row:row["userId"])
+print(json.dumps({"node_id":int(sys.argv[2]),"quotaProtocolVersion":2,
+                  "quotaLocalCounters":rows},separators=(",",":")))
+PY
+)"
 PATH_API=/api/v1/node/desired-config
 STAMP="$(date +%s)"
 NONCE="$(openssl rand -hex 16)"
