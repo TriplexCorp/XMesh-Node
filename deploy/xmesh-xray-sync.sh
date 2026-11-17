@@ -90,6 +90,10 @@ POLICY_ENABLED=false
 if [[ -r "$POLICY_GUARD" && "${XMESH_AUTONOMOUS_POLICY:-1}" == 1 ]];then
  POLICY_ENABLED=true
 fi
+if [[ "$REVOCATION_FAIL_CLOSED" == true && "$POLICY_ENABLED" != true ]];then
+ echo "Signed quota revocation pending but policy guard unavailable; preserving denial." >&2
+ exit 1
+fi
 OFFLINE_POLICY=false
 GEO_WORKER=/usr/local/libexec/xmesh-geodata-sync.py
 trap 'rc=$?; if [[ -f "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation || echo "CRITICAL: revoked Xray stop requires operator action" >&2;fi; if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"; exit "$rc"' EXIT
