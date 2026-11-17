@@ -589,7 +589,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
             reason = "subscription-awaiting-first-connection"
         elif offline and policy.get("version") == 2 and limit > 0 and counters is None:
             reason = "unverified-traffic-counter"
-        elif offline and budget is not None and policy.get("version") != 2:
+        elif offline and budget is not None and not (policy.get("version") == 2 and limit > 0):
             if counters is None:
                 reason = "unverified-traffic-counter"
             elif total - int(record.get("anchor", 0)) >= int(record.get("budget") or 0):
