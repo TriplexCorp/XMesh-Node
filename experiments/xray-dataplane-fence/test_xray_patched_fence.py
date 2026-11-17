@@ -6,6 +6,7 @@ fences one authenticated user, closes existing transport sessions, and leaves
 the other user's streams running. This is experimental traffic cessation,
 NOT a durable final byte accounting/cryptographic receipt.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -67,8 +68,8 @@ def wait_counter(xray, port, email, minimum=1):
     )
 
 
-def request_fence(path, email):
-    message = json.dumps({"email":email}).encode()
+def request_fence(path, email, revocation_id, expected_status=200):
+    message = json.dumps({"email":email, "revocationId":revocation_id}).encode()
     request = (
         b"POST /v1/fence HTTP/1.1\r\nHost: localhost\r\n"
         b"Connection: close\r\nContent-Type: application/json\r\n"
@@ -85,8 +86,8 @@ def request_fence(path, email):
                 break
             response.extend(chunk)
     headers, body = bytes(response).split(b"\r\n\r\n",1)
-    assert b" 200 " in headers.splitlines()[0], response[-2000:]
-    return json.loads(body)
+    assert f" {expected_status} ".encode() in headers.splitlines()[0], response[-2000:]
+    return json.loads(body) if expected_status == 200 else body
 
 
 def await_socket(path, process):
@@ -108,6 +109,9 @@ def run(xray):
         root = Path(tmp)
         assert root.stat().st_mode & 0o077 == 0
         socket_file = root / "drain.sock"
+        revocation_id = str(uuid.uuid4())
+        journal_file = root / ("observed-" +
+                               hashlib.sha256(EMAIL_A.encode()).hexdigest() + ".json")
         echo = EchoServer(("127.0.0.1",0),EchoHandler)
         threading.Thread(target=echo.serve_forever,daemon=True).start()
         api_port, vless_port, socks_a, socks_b, socks_blank = (
@@ -183,6 +187,7 @@ def run(xray):
                 "GITHUB_ACTIONS":"true",
                 "XMESH_EXPERIMENTAL_DRAIN":"1",
                 "XMESH_EXPERIMENTAL_DRAIN_SOCKET":str(socket_file),
+                "XMESH_EXPERIMENTAL_OBSERVED_DIR":str(root),
             })
             server=subprocess.Popen([xray,"run","-config",str(server_json)],
                                     stdout=log_a,stderr=subprocess.STDOUT,env=env)
@@ -199,9 +204,21 @@ def run(xray):
             before_a=wait_counter(xray,api_port,EMAIL_A)
             before_b=wait_counter(xray,api_port,EMAIL_B)
             assert before_a>0 and before_b>0
-            proof=request_fence(socket_file,EMAIL_A)
+            proof=request_fence(socket_file,EMAIL_A,revocation_id)
             assert proof["fenced"] and proof["drained"] and proof["active"]==0,proof
             assert not proof["finalMeterVerified"] and not proof["refundable"],proof
+            observation=proof["observedCheckpoint"]
+            assert observation["email"] == EMAIL_A
+            assert observation["revocationId"] == revocation_id
+            assert len(observation["runtimeId"]) == 64
+            assert observation["schemaVersion"] == 1
+            assert observation["drained"] and not observation["finalMeterVerified"]
+            assert observation["refundableBytes"] == 0
+            assert (observation["uplinkBytes"] + observation["downlinkBytes"]) >= before_a
+            assert journal_file.is_file(), "No durable experimental Xray journal"
+            assert journal_file.stat().st_mode & 0o077 == 0
+            observed_disk=json.loads(journal_file.read_text())
+            assert observed_disk==observation,(observed_disk,observation)
             assert not probe_echo(a),"Old VLESS-A socket survived fenced process-close"
             denied=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
             try:
@@ -224,9 +241,19 @@ def run(xray):
                 fresh_b.close()
             after_a=wait_counter(xray,api_port,EMAIL_A,before_a)
             after_b=wait_counter(xray,api_port,EMAIL_B,before_b+1)
-            repeat=request_fence(socket_file,EMAIL_A)
+            repeat=request_fence(socket_file,EMAIL_A,revocation_id)
             assert repeat["fenced"] and repeat["drained"] and repeat["active"]==0
+            assert repeat["observedCheckpoint"]==observation
             assert not repeat["refundable"] and not repeat["finalMeterVerified"]
+            conflicting=request_fence(socket_file,EMAIL_A,str(uuid.uuid4()),
+                                      expected_status=409)
+            assert b"checkpoint" in conflicting,conflicting
+            assert json.loads(journal_file.read_text())==observation
+            # Data remains after shutting down the Xray process: this
+            # verifies persistence, not a terminal-byte correctness barrier.
+            server.terminate()
+            server.wait(timeout=5)
+            assert json.loads(journal_file.read_text())==observation
             assert server.poll() is None,"Xray server exited during selective fence"
             report={
                 "patchedXray":"a4a3dff5b20c2faae567b742c172c7b95e75c083",
@@ -237,6 +264,10 @@ def run(xray):
                 "statsServiceStillAvailable":True,
                 "userABeforeFenceBytes":before_a,"userAAfterFenceBytes":after_a,
                 "userBAfterFenceBytes":after_b,
+                "observedJournalFsynced":True,
+                "observedJournalSurvivedProcessExit":True,
+                "observedRuntimeIdBound":True,
+                "observedRevocationIdBound":True,
                 "finalMeterVerified":False,"refundableBytes":0,
             }
             print("EXPERIMENTAL PATCHED XRAY FENCE "+json.dumps(report,sort_keys=True),
