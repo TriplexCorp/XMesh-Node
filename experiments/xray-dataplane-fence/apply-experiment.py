@@ -71,7 +71,7 @@ def run(root: Path):
     )
     source = replace_once(
         source,
-        '\tif user != nil && len(user.Email) > 0 {',
+        '\tif user != nil && len(user.Email) > 0 {\n\t\tp := d.policy.ForLevel(user.Level)',
         '''    // Account-bearing VLESS user admission precedes ALL counter wrapping.
     if sessionInbound != nil && sessionInbound.User != nil &&
         sessionInbound.Tag == "vless-share" {
@@ -87,7 +87,8 @@ def run(root: Path):
             return nil, nil, err
         }
     }
-    if user != nil && len(user.Email) > 0 {''',
+    if user != nil && len(user.Email) > 0 {
+        p := d.policy.ForLevel(user.Level)''',
     )
     source = replace_once(
         source,
