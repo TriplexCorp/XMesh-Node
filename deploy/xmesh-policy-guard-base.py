@@ -318,8 +318,64 @@ def get_counters():
         return None, None, None
 
 
-def store_metrics_snapshot(ledger, node_id, now_ms):
-    """Publish durable monotonic counters to the unprivileged signed metrics agent."""
+def verified_snapshot_scope(document, state_dir, node_id):
+    """Resolve (user, inbound) permissions ONLY from an already committed policy.
+
+    verify_envelope checks Ed25519 signature, pinned signing key, node identity,
+    bound Xray config digest and exact account provisioning. A prepared but not
+    committed policy must never authorize telemetry publication.
+    """
+    policy = verify_envelope(document, state_dir, node_id)
+    ids = {user["xrayId"]: user["userId"] for user in policy["users"]}
+    identity_map = {user["userId"]: user["xrayId"] for user in policy["users"]}
+    permitted = {}
+    for inbound in document["config"]["inbounds"]:
+        if inbound.get("tag") == "xmesh_stats_in":
+            continue
+        tag = inbound.get("tag")
+        # An empty or absent tag can never be authorized by Nexus's
+        # inbound-tag verifier: do not try to publish its traffic.
+        if tag is None:
+            # Older valid single-inbound profiles have no explicit tag.
+            # They may still be admitted by Xray, but Nexus cannot authorize
+            # a per-inbound counter without an actual tag. Withhold those
+            # user samples rather than breaking policy commit or guessing.
+            continue
+        if not isinstance(tag, str) or not tag or len(tag.encode("utf-8")) > 128:
+            raise ValueError("Signed proxy inbound cannot be metered without a valid tag")
+        accounts, credential_key = configured_accounts(inbound)
+        scoped = dict(identity_map)
+        scoped["_protocol"] = inbound["protocol"]
+        scoped["_method"] = inbound["settings"].get("method", "")
+        for account in accounts:
+            policy_uuid = account_uuid(account, credential_key, scoped)
+            user_id = ids.get(policy_uuid)
+            if user_id is None:
+                raise ValueError("Signed proxy account is not provisioned for metering")
+            permitted.setdefault(user_id, set()).add(tag)
+    return permitted
+
+
+def committed_snapshot_scope(state_dir, node_id):
+    """Never trust pending policy or cached counters as proof of assignment."""
+    committed = state_dir / "policy-envelope.json"
+    if not committed.is_file():
+        return None
+    return verified_snapshot_scope(load_json(committed), state_dir, node_id)
+
+
+def store_metrics_snapshot(ledger, node_id, now_ms, permitted):
+    """Expose only currently signed accounts/inbounds, retaining ALL ledger history.
+
+    User-wide counters include each currently authorized user's historical
+    cumulative inbound totals, even when some inbounds have been retired.
+    These totals must never decrease when a tag is removed: Nexus persists
+    per-user monotonic baselines separately from per-inbound baselines.
+    The per-inbound publication is restricted to current signed (user, tag)
+    pairs. No historical entry is deleted from the root-owned ledger.
+    """
+    if not isinstance(permitted, dict):
+        raise ValueError("Committed signed telemetry scope is required")
     rows = []
     totals = {}
     for key, value in ledger.get("inbounds", {}).items():
@@ -327,20 +383,30 @@ def store_metrics_snapshot(ledger, node_id, now_ms):
             user_id, tag = json.loads(key)
             if type(user_id) is not int or user_id <= 0 or not isinstance(tag, str):
                 continue
-            uplink = max(0, int(value["totalUp"]))
-            downlink = max(0, int(value["totalDown"]))
+            # Ignore history for users no longer assigned to this node.
+            allowed_tags = permitted.get(user_id)
+            if not isinstance(allowed_tags, set) or not allowed_tags:
+                continue
+            uplink = int(value["totalUp"])
+            downlink = int(value["totalDown"])
+            if not 0 <= uplink < (1 << 63) or not 0 <= downlink < (1 << 63):
+                raise ValueError("Out-of-range durable traffic counter")
         except (ValueError, TypeError, KeyError):
             continue
-        rows.append({"userId": user_id, "inboundTag": tag,
-                     "uplinkBytes": uplink, "downlinkBytes": downlink})
         total = totals.setdefault(user_id, [0, 0])
         total[0] += uplink
         total[1] += downlink
+        if tag in allowed_tags:
+            rows.append({"userId": user_id, "inboundTag": tag,
+                         "uplinkBytes": uplink, "downlinkBytes": downlink})
     rows.sort(key=lambda row: (row["userId"], row["inboundTag"]))
+    user_rows = [{"userId": user_id, "uplinkBytes": pair[0],
+                  "downlinkBytes": pair[1]} for user_id, pair in sorted(totals.items())]
+    if any(not 0 <= value < (1 << 63) for row in user_rows
+           for field, value in row.items() if field != "userId"):
+        raise ValueError("Aggregated durable traffic counter overflow")
     payload = {"nodeId": node_id, "sampledAtMs": now_ms,
-               "userInboundTraffic": rows,
-               "userTraffic": [{"userId": u, "uplinkBytes": pair[0],
-                                "downlinkBytes": pair[1]} for u, pair in sorted(totals.items())]}
+               "userInboundTraffic": rows, "userTraffic": user_rows}
     snapshot = Path("/run/xmesh-node-user-metrics.json")
     if not snapshot.parent.is_dir():
         return
@@ -352,6 +418,7 @@ def store_metrics_snapshot(ledger, node_id, now_ms):
     except KeyError:
         # A partially installed metrics agent cannot access the file.
         pass
+
 
 def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=None):
     """Accumulate durable per-user bytes without changing admission policy."""
@@ -510,10 +577,15 @@ def main():
             counters, runtime_id, inbound_counters = get_counters()
             if counters is None or inbound_counters is None:
                 raise ValueError("Xray StatsService query failed; counters not published")
+            # Verify the committed Ed25519 policy before publishing telemetry.
+            scope = committed_snapshot_scope(state, args.node_id)
+            if scope is None:
+                raise ValueError("Missing committed signed policy for user telemetry")
             ledger = load_json(ledger_file)
-            ledger = integrate_counters(ledger, counters, runtime_id, int(time.time() * 1000), inbound_counters)
+            now_ms = int(time.time() * 1000)
+            ledger = integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters)
             write_atomic(ledger_file, canonical(ledger))
-            store_metrics_snapshot(ledger, args.node_id, int(time.time() * 1000))
+            store_metrics_snapshot(ledger, args.node_id, now_ms, scope)
             print(f"XMesh user meter: sampled {len(inbound_counters)} user/inbound counters", file=sys.stderr)
         finally:
             os.close(lock_fd)
@@ -524,6 +596,16 @@ def main():
             raise ValueError("Missing validated pending policy snapshot")
         # A single atomic rename keeps config and policy bound together.
         os.replace(pending, state / "policy-envelope.json")
+        # Immediately republish filtered counters after assignment changes.
+        # In particular, do not leave retired users in the unprivileged
+        # snapshot until the next sampling timer has fired.
+        scope = committed_snapshot_scope(state, args.node_id)
+        ledger_file = state / "policy-usage.json"
+        if scope is not None and ledger_file.is_file():
+            ledger = load_json(ledger_file)
+            if ledger.get("inbounds"):
+                store_metrics_snapshot(ledger, args.node_id,
+                                       int(time.time() * 1000), scope)
         return
     now_ms = int(time.time() * 1000) if args.now_ms is None else args.now_ms
     if not args.output:
@@ -548,7 +630,11 @@ def main():
                                         args.action == "offline", now_ms, inbound_counters)
     write_atomic(ledger_file, canonical(ledger))
     if inbound_counters is not None:
-        store_metrics_snapshot(ledger, args.node_id, now_ms)
+        # The fresh prepare policy is pending. Until commit, publish only
+        # against the previous committed Ed25519 authorization scope.
+        scope = committed_snapshot_scope(state, args.node_id)
+        if scope is not None:
+            store_metrics_snapshot(ledger, args.node_id, now_ms, scope)
     write_atomic(args.output, canonical(effective))
     if args.action == "prepare":
         write_atomic(state / "policy-envelope.json.pending", canonical(doc))
