@@ -27,6 +27,20 @@ from test_quota_v2_xray_user_inbound_drain import (  # noqa: E402
 
 EMAIL_A = "xmesh-experiment-a"
 EMAIL_B = "xmesh-experiment-b"
+# Run a real patched-Xray process per transport. Production remains untouched.
+TRANSPORTS = ("tcp", "ws", "xhttp")
+
+
+def make_stream_settings(transport):
+    settings = {"network": transport, "security": "none"}
+    if transport == "ws":
+        settings["wsSettings"] = {"path": "/xmesh-ci-ws"}
+    elif transport == "xhttp":
+        # Explicit mode keeps a deterministic HTTP/1.1 local test transport.
+        settings["xhttpSettings"] = {"path": "/xmesh-ci-xhttp/", "mode": "packet-up"}
+    elif transport != "tcp":
+        raise AssertionError(f"Unsupported test transport: {transport}")
+    return settings
 
 
 def command(*argv, check=True):
@@ -101,11 +115,12 @@ def await_socket(path, process):
     raise AssertionError("Patched Xray did not start private Unix control socket")
 
 
-def run(xray):
+def run(xray, transport):
+    assert transport in TRANSPORTS
     assert os.getenv("GITHUB_ACTIONS") == "true"
     assert os.getenv("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
     assert Path(xray).is_file()
-    with tempfile.TemporaryDirectory(prefix="xmesh-v2-patched-xray-") as tmp:
+    with tempfile.TemporaryDirectory(prefix=f"xmesh-v2-{transport}-") as tmp:
         root = Path(tmp)
         assert root.stat().st_mode & 0o077 == 0
         socket_file = root / "drain.sock"
@@ -134,7 +149,7 @@ def run(xray):
                      {"id":identity_a,"email":EMAIL_A,"level":0},
                      {"id":identity_b,"email":EMAIL_B,"level":0},
                      {"id":identity_blank,"level":0}]},
-                 "streamSettings":{"network":"tcp","security":"none"}},
+                 "streamSettings":make_stream_settings(transport)},
                 {"tag":"xmesh_stats_in","listen":"127.0.0.1","port":api_port,
                  "protocol":"dokodemo-door","settings":{
                      "address":"127.0.0.1","port":api_port,"network":"tcp"}},
@@ -151,7 +166,7 @@ def run(xray):
             return {"tag":tag,"protocol":"vless","settings":{"vnext":[{
                 "address":"127.0.0.1","port":vless_port,
                 "users":[{"id":identity,"encryption":"none"}]}]},
-                "streamSettings":{"network":"tcp","security":"none"}}
+                "streamSettings":make_stream_settings(transport)}
         client_config={
             "log":{"loglevel":"warning"},
             "inbounds":[
@@ -257,6 +272,7 @@ def run(xray):
             assert json.loads(journal_file.read_text())==observation
             report={
                 "patchedXray":"a4a3dff5b20c2faae567b742c172c7b95e75c083",
+                "testedTransport":transport,
                 "userAFenced":True,"existingUserAStreamEnded":True,
                 "newUserAStreamsRejected":True,
                 "blankVlessEmailRejected":True,
@@ -300,4 +316,7 @@ def run(xray):
 if __name__=="__main__":
     if len(sys.argv)!=2:
         raise SystemExit("usage: test_xray_patched_fence.py <patched-xray-binary>")
-    run(str(Path(sys.argv[1]).resolve()))
+    binary=str(Path(sys.argv[1]).resolve())
+    for transport in TRANSPORTS:
+        print(f"START PATCHED XRAY TRANSPORT: {transport}", flush=True)
+        run(binary, transport)
