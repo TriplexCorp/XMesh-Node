@@ -157,6 +157,78 @@ class SignedPolicyTests(unittest.TestCase):
             guarded.committed_snapshot_scope(self.state, 12)
         committed.write_text(saved)
 
+    def test_real_signed_reassignment_filters_published_metrics_without_losing_ledger(self):
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("xmesh_scope_transition", GUARD)
+        guarded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guarded)
+        self.configure_dual_profile()
+        second = "550e8400-e29b-41d4-a716-446655440022"
+        second_user = {
+            "userId": 22, "xrayId": second,
+            "expireAtMs": NOW + 86400000,
+            "panelUsedBytes": 0, "offlineBudgetBytes": 100,
+        }
+        second_client = {
+            "id": second, "email": "xmesh-u22--vless-main", "level": 0,
+        }
+        self.policy["users"].append(second_user.copy())
+        self.config["inbounds"][0]["settings"]["clients"].append(second_client.copy())
+        def resign():
+            self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+            self.write_envelope()
+        def export(ledger):
+            permitted = guarded.committed_snapshot_scope(self.state, 12)
+            with patch.object(guarded.base, "write_atomic") as write, \
+                 patch.object(guarded.base.Path, "is_dir", return_value=True), \
+                 patch.object(guarded.base.grp, "getgrnam", side_effect=KeyError):
+                guarded.store_metrics_snapshot(ledger, 12, NOW, permitted)
+            return json.loads(write.call_args.args[1])
+
+        resign()
+        self.run_guard("prepare")
+        self.run_guard("commit")
+        ledger = guarded.integrate_counters({}, {"1": 150, "22": 75}, "runtime-a", NOW, {
+            ("1", "vless-main"): {"uplink": 60, "downlink": 40},
+            ("1", "hysteria-main"): {"uplink": 30, "downlink": 20},
+            ("22", "vless-main"): {"uplink": 45, "downlink": 30},
+        })
+        old_snapshot = export(ledger)
+        self.assertEqual({row["userId"] for row in old_snapshot["userTraffic"]}, {1, 22})
+        old_ledger_total = ledger["users"]["22"]["total"]
+
+        # Signed updated revision removes user 22 from this node.
+        self.policy["issuedAtMs"] = NOW + 100
+        self.policy["users"] = [user for user in self.policy["users"] if user["userId"] != 22]
+        self.config["inbounds"][0]["settings"]["clients"] = [
+            item for item in self.config["inbounds"][0]["settings"]["clients"]
+            if item["email"] != "xmesh-u22--vless-main"
+        ]
+        resign()
+        self.run_guard("prepare", NOW + 100)
+        # Pending authorization has no effect on the published scope.
+        self.assertEqual({row["userId"] for row in export(ledger)["userTraffic"]}, {1, 22})
+        self.run_guard("commit")
+        filtered = export(ledger)
+        self.assertEqual(filtered["userTraffic"], [
+            {"userId": 1, "uplinkBytes": 90, "downlinkBytes": 60},
+        ])
+        self.assertEqual({r["userId"] for r in filtered["userInboundTraffic"]}, {1})
+        self.assertEqual(ledger["users"]["22"]["total"], old_ledger_total)
+
+        # An independent, later signed revision restores the assignment.
+        self.policy["issuedAtMs"] = NOW + 200
+        self.policy["users"].append(second_user.copy())
+        self.config["inbounds"][0]["settings"]["clients"].append(second_client.copy())
+        resign()
+        self.run_guard("prepare", NOW + 200)
+        self.run_guard("commit")
+        restored = export(ledger)
+        self.assertEqual(restored["userTraffic"], old_snapshot["userTraffic"])
+        self.assertEqual(len(restored["userInboundTraffic"]), 3)
+        self.assertEqual(export(ledger), restored)  # repeated send is idempotent
+
     def test_dual_signed_policy_authorizes_and_revokes_both_transports(self):
         self.configure_dual_profile()
         self.run_guard("prepare")
