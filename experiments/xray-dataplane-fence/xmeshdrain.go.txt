@@ -28,6 +28,9 @@ var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
 type trackedSession struct {
     email string
     stop func()
+    // Process() and the route's outbound task are independent lifetimes.
+    workerFinished bool
+    routeFinished bool
 }
 type userState struct {
     fenced bool
@@ -102,12 +105,32 @@ func Finish(ctx context.Context) {
     gate.Lock()
     defer gate.Unlock()
     session := gate.sessions[id]
-    if session == nil {
-        return
-    }
-    delete(gate.sessions, id)
+    if session == nil { return }
+    session.workerFinished = true
+    completeIfFinishedLocked(id,session)
+}
+
+// RouteFinish runs after the asynchronous routedDispatch() returns.
+// This strengthens the stop barrier but is NOT final accounting proof:
+// Xray outbound implementations may launch further background writers.
+func RouteFinish(ctx context.Context) {
+    if !enabled { return }
+    id := uint64(c.IDFromContext(ctx))
+    if id == 0 { return }
+    gate.Lock()
+    defer gate.Unlock()
+    session := gate.sessions[id]
+    if session == nil { return }
+    session.routeFinished = true
+    completeIfFinishedLocked(id,session)
+}
+
+// Caller holds gate.Mutex. Do not complete on worker exit alone.
+func completeIfFinishedLocked(id uint64,session *trackedSession) {
+    if !session.workerFinished || !session.routeFinished { return }
+    delete(gate.sessions,id)
     u := gate.users[session.email]
-    delete(u.active, id)
+    delete(u.active,id)
     if u.fenced && len(u.active) == 0 && !u.closed {
         close(u.done)
         u.closed = true
