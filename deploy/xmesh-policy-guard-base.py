@@ -508,6 +508,28 @@ def enforce_quota_reservation(user, record, total, now_ms):
     if lease["acknowledgedBytes"] > total:
         raise ValueError("Acknowledgement is ahead of durable local usage")
     old = record.get("quotaReservation")
+    revoke = user.get("quotaRevocation")
+    if revoke is not None:
+        fields = ("requestId", "epoch", "meterEpoch", "reservationId")
+        if not isinstance(revoke, dict) or set(revoke) != set(fields):
+            raise ValueError("Malformed signed quota revocation")
+        if not isinstance(revoke["requestId"], str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                revoke["requestId"]):
+            raise ValueError("Malformed signed quota revocation identity")
+        if any(revoke[field] != lease[field]
+               for field in ("epoch", "meterEpoch", "reservationId")):
+            raise ValueError("Quota revocation not bound to signed node lease")
+    previous_revoke = record.get("quotaRevocation")
+    if isinstance(previous_revoke, dict) and previous_revoke.get("epoch") == lease["epoch"]:
+        if revoke != previous_revoke:
+            # A newer signed policy can renew a lease, but cannot cancel a
+            # previously committed revocation for the same account epoch.
+            raise ValueError("Signed quota revocation rollback")
+    if revoke is not None:
+        record["quotaRevocation"] = dict(revoke)
+    elif isinstance(previous_revoke, dict) and previous_revoke.get("epoch") != lease["epoch"]:
+        record.pop("quotaRevocation", None)
     if old is not None:
         if old["meterEpoch"] != lease["meterEpoch"]:
             raise ValueError("Meter incarnation changed without reconciliation")
@@ -520,6 +542,8 @@ def enforce_quota_reservation(user, record, total, now_ms):
         if old["epoch"] == lease["epoch"] and lease["revision"] == old["revision"] and lease != old:
             raise ValueError("Conflicting quota reservation revision")
     record["quotaReservation"] = dict(lease)
+    if revoke is not None:
+        return "quota-revocation-pending"
     if now_ms >= lease["validUntilMs"]:
         return "quota-reservation-expired"
     if total >= lease["ceilingBytes"]:
