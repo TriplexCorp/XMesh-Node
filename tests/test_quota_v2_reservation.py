@@ -106,7 +106,9 @@ class ReservationGuardTests(unittest.TestCase):
         policy["issuedAtMs"] = 3000
         _, _, denied = guard.enforce(
             policy, copy.deepcopy(config), ledger, {"1":5}, "xray-a", False, 3000)
-        self.assertEqual(denied.get(uid), "quota")
+        # A signed increase in another node's aggregate usage is not grounds
+        # to undo this node's prior locally enforced quota cutoff.
+        self.assertEqual(denied.get(uid), "locally-revoked")
 
     def test_signed_ceiling_cannot_be_less_than_acknowledged_usage(self):
         invalid=lease(ceiling=40,ack=41)
