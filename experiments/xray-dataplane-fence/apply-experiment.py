@@ -91,10 +91,10 @@ def run(root: Path):
     )
     source = replace_once(
         source,
-        'func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {\\n',
-        'func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {\\n'
-        '    // A returned inbound Process is not necessarily a finished route.\\n'
-        '    defer xmeshdrain.RouteFinish(ctx)\\n',
+        'func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {\n',
+        'func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {\n'
+        '    // A returned inbound Process is not necessarily a finished route.\n'
+        '    defer xmeshdrain.RouteFinish(ctx)\n',
     )
     dispatcher_file.write_text(source, encoding="utf-8")
 
