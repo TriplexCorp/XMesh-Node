@@ -140,6 +140,14 @@ class ReservationGuardTests(unittest.TestCase):
             policy, copy.deepcopy(config), ledger, {"1":2}, "xray-a", False, 2000)
         self.assertEqual(denied[uid],"quota-revocation-pending")
         self.assertEqual(effective["inbounds"][0]["settings"]["clients"],[])
+        with self.assertRaisesRegex(ValueError,"still provisioned"):
+            guard.applied_revocation_proofs(policy, config, copy.deepcopy(ledger))
+        committed=guard.applied_revocation_proofs(
+            policy, effective, copy.deepcopy(ledger))
+        proof=committed["users"]["1"]["quotaRevocationApplied"]
+        self.assertEqual(proof["requestId"],user["quotaRevocation"]["requestId"])
+        self.assertEqual(proof["usedBytes"],2)
+        # This acknowledgement is NOT a refundable final meter.
         # A newer policy cannot reinstate the old grant in the same epoch.
         user.pop("quotaRevocation")
         user["quotaReservation"]=lease(revision=3)
