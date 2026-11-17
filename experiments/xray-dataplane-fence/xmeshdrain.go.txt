@@ -144,6 +144,8 @@ type result struct {
     Drained bool `json:"drained"`
     FinalMeterVerified bool `json:"finalMeterVerified"`
     Refundable bool `json:"refundable"`
+    // This record is fsynced but explicitly NOT authoritative final traffic.
+    ObservedCheckpoint *observedCheckpoint `json:"observedCheckpoint,omitempty"`
 }
 
 func state(email string, u *userState) result {
@@ -191,11 +193,15 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
     }
     // This is accessible only through a root-owned local Unix socket
     // in a disposable CI runner. It is NEVER a production Node control API.
-    var req struct { Email string `json:"email"` }
+    var req struct {
+        Email string `json:"email"`
+        RevocationID string `json:"revocationId"`
+    }
     r.Body = http.MaxBytesReader(w, r.Body, 512)
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
-        len(req.Email) == 0 || len(req.Email) > 128 {
-        http.Error(w, "invalid email", http.StatusBadRequest)
+        len(req.Email) == 0 || len(req.Email) > 128 ||
+        !validateRevocationID(req.RevocationID) {
+        http.Error(w, "invalid scoped request", http.StatusBadRequest)
         return
     }
     ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
@@ -206,12 +212,25 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
             http.StatusRequestTimeout)
         return
     }
+    observedRecord, err := persistObservedCheckpoint(req.Email,req.RevocationID)
+    if err != nil {
+        // No trustworthy checkpoint was committed; do NOT issue a success
+        // response even if the user's TCP sessions were physically stopped.
+        http.Error(w, "observed checkpoint rejected: "+err.Error(),http.StatusConflict)
+        return
+    }
+    snapshot.ObservedCheckpoint = &observedRecord
     _ = json.NewEncoder(w).Encode(snapshot)
 }
 
 func init() {
     if !enabled {
         return
+    }
+    // This experiment never runs without a durable, private *observed*
+    // journal. The file still does not authorize refunds.
+    if err := configureObservedCheckpoint(os.Getenv("XMESH_EXPERIMENTAL_OBSERVED_DIR")); err != nil {
+        panic(err)
     }
     socket := os.Getenv("XMESH_EXPERIMENTAL_DRAIN_SOCKET")
     if socket == "" {
