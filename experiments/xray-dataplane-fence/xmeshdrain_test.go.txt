@@ -35,6 +35,7 @@ func TestSelectiveFenceAndRepeatNeverRefund(t *testing.T) {
     stopped := make(chan struct{})
     if err := Register(first, "user-a", func() {
         Finish(first)
+        RouteFinish(first)
         close(stopped)
     }); err != nil { t.Fatal(err) }
     if err := Register(second, "user-b", func() {}); err != nil { t.Fatal(err) }
@@ -56,7 +57,9 @@ func TestSelectiveFenceAndRepeatNeverRefund(t *testing.T) {
     again,err := fence(deadline,"user-a")
     if err != nil || again != info { t.Fatalf("non-idempotent: %+v %v",again,err) }
     Finish(second)
+    RouteFinish(second)
     Finish(ctx(14))
+    RouteFinish(ctx(14))
 }
 
 func TestFenceTimeoutKeepsAdmissionClosed(t *testing.T) {
@@ -73,6 +76,7 @@ func TestFenceTimeoutKeepsAdmissionClosed(t *testing.T) {
         t.Fatalf("timeout resurrected admission: %v",err)
     }
     Finish(s)
+    RouteFinish(s)
     recovered,err:=fence(context.Background(),"stuck")
     if err!=nil || recovered.FinalMeterVerified || recovered.Refundable ||
         !recovered.Drained {
@@ -91,7 +95,9 @@ func TestSessionIdentityCannotSwitchUsers(t *testing.T) {
         t.Fatalf("missing runtime session allowed: %v",err)
     }
     Finish(s)
+    RouteFinish(s)
     Finish(s)
+    RouteFinish(s)
 }
 
 func TestManyConcurrentRegistrationsCannotCrossFence(t *testing.T) {
@@ -106,7 +112,7 @@ func TestManyConcurrentRegistrationsCannotCrossFence(t *testing.T) {
             defer wg.Done()
             id:=uint32(i+100)
             c:=ctx(id)
-            if err:=Register(c,"crowd",func(){Finish(c)}); err==nil {
+            if err:=Register(c,"crowd",func(){Finish(c);RouteFinish(c)}); err==nil {
                 mu.Lock()
                 ids=append(ids,id)
                 mu.Unlock()
@@ -165,10 +171,34 @@ func TestDuplicateLiveSessionIDCannotFakeDrain(t *testing.T) {
         t.Fatalf("duplicate produced false terminal proof: %+v %v",snapshot,err)
     }
     Finish(s)
+    RouteFinish(s)
     recovered,err := fence(context.Background(),"owner")
     if err!=nil || !recovered.Drained || recovered.FinalMeterVerified ||
         recovered.Refundable { t.Fatalf("invalid finality: %+v %v",recovered,err) }
     if err := Register(s,"owner",func(){}); !errors.Is(err,errFenced) {
         t.Fatalf("fence allowed reentry: %v",err)
     }
+}
+
+func TestWorkerExitCannotHideRunningRoute(t *testing.T) {
+    resetGate()
+    s := ctx(20)
+    if err := Register(s,"route-live",func(){Finish(s)}); err != nil {
+        t.Fatal(err)
+    }
+    // A returned inbound worker does not imply routedDispatch finished.
+    Finish(s)
+    short,cancel := context.WithTimeout(context.Background(),20*time.Millisecond)
+    defer cancel()
+    snapshot,err := fence(short,"route-live")
+    if !errors.Is(err,context.DeadlineExceeded) || snapshot.Drained || snapshot.Refundable {
+        t.Fatalf("premature drain before route completion: %+v %v",snapshot,err)
+    }
+    if err:=Register(ctx(21),"route-live",func(){}); !errors.Is(err,errFenced) {
+        t.Fatalf("waiting for route reopened admission: %v",err)
+    }
+    RouteFinish(s)
+    recovered,err := fence(context.Background(),"route-live")
+    if err != nil || !recovered.Drained || recovered.FinalMeterVerified ||
+        recovered.Refundable { t.Fatalf("false finality: %+v %v",recovered,err) }
 }
