@@ -115,6 +115,46 @@ class ReservationGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             guard.enforce_quota_reservation({"quotaReservation":invalid},{},41,1000)
 
+    def test_signed_revocation_deny_is_sticky_and_bound_to_lease(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds":[{"tag":"MAIN","protocol":"vless",
+                  "settings":{"clients":[{"id":uid}]}}]}
+        user = {"userId":1,"xrayId":uid,"expireAtMs":90000,
+                "panelUsedBytes":0,"limitBytes":1000,
+                "offlineBudgetBytes":50,"quotaReservation":lease()}
+        policy = {"version":2,"nodeId":1,"issuedAtMs":1000,
+                  "validUntilMs":100000,"users":[user]}
+        effective, ledger, denied = guard.enforce(
+            policy, copy.deepcopy(config), {}, {"1":1}, "xray-a", False, 1000)
+        self.assertNotIn(uid, denied)
+        self.assertEqual(len(effective["inbounds"][0]["settings"]["clients"]), 1)
+        user["quotaReservation"]=lease(revision=2)
+        user["quotaRevocation"]={
+            "requestId":"44444444-4444-4444-8444-444444444444",
+            "epoch":lease()["epoch"],
+            "meterEpoch":lease()["meterEpoch"],
+            "reservationId":lease()["reservationId"]
+        }
+        policy["issuedAtMs"]=2000
+        effective, ledger, denied = guard.enforce(
+            policy, copy.deepcopy(config), ledger, {"1":2}, "xray-a", False, 2000)
+        self.assertEqual(denied[uid],"quota-revocation-pending")
+        self.assertEqual(effective["inbounds"][0]["settings"]["clients"],[])
+        # A newer policy cannot reinstate the old grant in the same epoch.
+        user.pop("quotaRevocation")
+        user["quotaReservation"]=lease(revision=3)
+        policy["issuedAtMs"]=3000
+        with self.assertRaisesRegex(ValueError,"revocation rollback"):
+            guard.enforce(policy, copy.deepcopy(config), ledger,
+                          {"1":2}, "xray-a", False, 3000)
+        # A malicious different reservation cannot target this lease.
+        user["quotaRevocation"]={"requestId":"44444444-4444-4444-8444-444444444444",
+            "epoch":lease()["epoch"],"meterEpoch":lease()["meterEpoch"],
+            "reservationId":"99999999-9999-4999-8999-999999999999"}
+        with self.assertRaisesRegex(ValueError,"not bound"):
+            guard.enforce(policy, copy.deepcopy(config), ledger,
+                          {"1":2}, "xray-a", False, 3000)
+
     def test_identity_revision_ack_and_lifetime_validation(self):
         for field,value in [("meterEpoch","bad"),("revision",True),
                             ("acknowledgedBytes",100),("ceilingBytes",-1)]:
