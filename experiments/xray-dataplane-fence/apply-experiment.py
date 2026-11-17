@@ -131,6 +131,15 @@ def run(root: Path):
         '    // A returned inbound Process is not necessarily a finished route.\n'
         '    defer xmeshdrain.RouteFinish(ctx)\n',
     )
+    # Install the counted-write gate on all three user statistics writer paths
+    # (getLink uplink/downlink and DispatchLink downlink).
+    for writer_path in ("inboundLink.Writer", "outboundLink.Writer", "link.Writer"):
+        source = replace_once(
+            source,
+            "\\t\\t\\t\\t\\tWriter:  " + writer_path + ",\\n",
+            "\\t\\t\\t\\t\\tWriter:  " + writer_path + ",\\n"
+            "\\t\\t\\t\\t\\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\\n",
+        )
     dispatcher_file.write_text(source, encoding="utf-8")
 
     worker_file = root / "app/proxyman/inbound/worker.go"
@@ -212,6 +221,37 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
         '    ctx = c.ContextWithID(ctx, session.NewID())\n',
     )
     mux_file.write_text(mux, encoding="utf-8")
+    # Experimental post-meter writer barrier. Scoped writers cannot write or
+    # count any bytes after the user's admission fence. Already started writes
+    # remain tracked until their downstream WriteMultiBuffer returns.
+    meter_writer_file = root / "app/dispatcher/stats.go"
+    meter_source = meter_writer_file.read_text(encoding="utf-8")
+    meter_source = replace_once(
+        meter_source,
+        '"github.com/xtls/xray-core/common"\\n',
+        '"github.com/xtls/xray-core/app/xmeshdrain"\\n'
+        '\\t"github.com/xtls/xray-core/common"\\n',
+    )
+    meter_source = replace_once(
+        meter_source,
+        '\\tWriter  buf.Writer\\n',
+        '\\tWriter  buf.Writer\\n\\tExperimentalEmail string\\n',
+    )
+    meter_source = replace_once(
+        meter_source,
+        '\\tw.Counter.Add(int64(mb.Len()))\\n\\treturn w.Writer.WriteMultiBuffer(mb)',
+        '''    if w.ExperimentalEmail != "" {
+        if err := xmeshdrain.BeginMeterWrite(w.ExperimentalEmail); err != nil {
+            buf.ReleaseMulti(mb)
+            return err
+        }
+        defer xmeshdrain.EndMeterWrite(w.ExperimentalEmail)
+    }
+    w.Counter.Add(int64(mb.Len()))
+    return w.Writer.WriteMultiBuffer(mb)''',
+    )
+    meter_writer_file.write_text(meter_source, encoding="utf-8")
+
     # CI-ONLY diagnostic: capture the exact origin of late UDP user meter
     # increments. Remove this probe before any production consideration.
     stats_counter_file = root / "app/stats/counter.go"
@@ -238,7 +278,7 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
          str(shared / "observed_checkpoint.go"),
          str(shared / "observed_checkpoint_test.go"),
          str(dispatcher_file), str(worker_file), str(mux_file),
-         str(stats_counter_file)],
+         str(stats_counter_file), str(meter_writer_file)],
         check=True,
         cwd=root,
     )
