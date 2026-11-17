@@ -1,0 +1,34 @@
+name: Quota v2 real Xray revocation stop (disposable)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/xmesh-xray-sync.sh'
+      - 'tests/test_quota_v2_real_xray_stop.py'
+      - '.github/workflows/quota-v2-real-xray-stop.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/xmesh-xray-sync.sh'
+      - 'tests/test_quota_v2_real_xray_stop.py'
+      - '.github/workflows/quota-v2-real-xray-stop.yml'
+permissions:
+  contents: read
+jobs:
+  physical-stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify disposable test and production shell syntax
+        run: |
+          python3 -m py_compile tests/test_quota_v2_real_xray_stop.py
+          bash -n deploy/xmesh-xray-sync.sh
+      - name: Pull actual published Xray process image
+        run: docker pull ghcr.io/xtls/xray-core:26.10.31
+      - name: Prove signed revocation stop disables automatic restart and kills live traffic
+        env:
+          XMESH_DISPOSABLE_XRAY_CANARY: "1"
+        run: python3 tests/test_quota_v2_real_xray_stop.py
