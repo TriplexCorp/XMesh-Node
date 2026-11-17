@@ -596,8 +596,10 @@ def main():
         scope = committed_snapshot_scope(state, args.node_id)
         ledger_file = state / "policy-usage.json"
         if scope is not None and ledger_file.is_file():
-            store_metrics_snapshot(load_json(ledger_file), args.node_id,
-                                   int(time.time() * 1000), scope)
+            ledger = load_json(ledger_file)
+            if ledger.get("inbounds"):
+                store_metrics_snapshot(ledger, args.node_id,
+                                       int(time.time() * 1000), scope)
         return
     now_ms = int(time.time() * 1000) if args.now_ms is None else args.now_ms
     if not args.output:
