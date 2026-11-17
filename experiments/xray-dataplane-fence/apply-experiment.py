@@ -38,6 +38,15 @@ def run(root: Path):
         shared / "xmeshdrain_test.go",
     )
 
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/observed_checkpoint.go.txt",
+        shared / "observed_checkpoint.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/observed_checkpoint_test.go.txt",
+        shared / "observed_checkpoint_test.go",
+    )
+
     dispatcher_file = root / "app/dispatcher/default.go"
     source = dispatcher_file.read_text(encoding="utf-8")
     source = replace_once(
@@ -45,6 +54,11 @@ def run(root: Path):
         '"github.com/xtls/xray-core/common"\n',
         '"github.com/xtls/xray-core/app/xmeshdrain"\n'
         '\t"github.com/xtls/xray-core/common"\n',
+    )
+    source = replace_once(
+        source,
+        '\td.stats = sm\n\treturn nil\n}',
+        '\td.stats = sm\n    xmeshdrain.BindStatsManager(sm)\n\treturn nil\n}',
     )
     source = replace_once(
         source,
@@ -149,6 +163,8 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     worker_file.write_text(worker, encoding="utf-8")
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
+         str(shared / "observed_checkpoint.go"),
+         str(shared / "observed_checkpoint_test.go"),
          str(dispatcher_file), str(worker_file)],
         check=True,
         cwd=root,
