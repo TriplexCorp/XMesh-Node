@@ -509,7 +509,9 @@ def sample_before_xray_replace(state_dir, node_id, now_ms=None):
     # Only already COMMITTED signed scope can publish the old process's
     # counters. A pending, uncommitted policy cannot grant telemetry scope.
     scope = committed_snapshot_scope(state_dir, node_id)
-    if scope is None:
+    revoked_ids = {user["userId"] for user in policy["users"]
+                   if user.get("quotaRevocation") is not None}
+    if not isinstance(scope, dict) or any(not scope.get(uid) for uid in revoked_ids):
         raise ValueError("Missing committed signed scope for old Xray sample")
     ledger_file = state_dir / "policy-usage.json"
     if not ledger_file.is_file():
