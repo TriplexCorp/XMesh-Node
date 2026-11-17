@@ -30,7 +30,7 @@ def run(root: Path):
     shared = root / "app" / "xmeshdrain"
     shared.mkdir(mode=0o700, exist_ok=False)
     shutil.copyfile(
-        NODE_ROOT / "experiments/xray-dataplane-fence/xmeshdrain.go",
+        NODE_ROOT / "experiments/xray-dataplane-fence/xmeshdrain.go.txt",
         shared / "xmeshdrain.go",
     )
 
