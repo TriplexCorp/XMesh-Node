@@ -63,12 +63,12 @@ def connect_socks(port, target):
         try:
             sock = socket.create_connection(("127.0.0.1", port), timeout=3)
             sock.settimeout(5)
-            sock.sendall(b"\\x05\\x01\\x00")
-            assert recv_exact(sock, 2) == b"\\x05\\x00"
-            sock.sendall(b"\\x05\\x01\\x00\\x01" +
+            sock.sendall(b"\x05\x01\x00")
+            assert recv_exact(sock, 2) == b"\x05\x00"
+            sock.sendall(b"\x05\x01\x00\x01" +
                          socket.inet_aton("127.0.0.1") + struct.pack(">H", target))
             header = recv_exact(sock, 4)
-            assert header[:2] == b"\\x05\\x00", f"SOCKS5 refused route: {header!r}"
+            assert header[:2] == b"\x05\x00", f"SOCKS5 refused route: {header!r}"
             addr_len = {1: 4, 4: 16}.get(header[3])
             if addr_len is None:
                 assert header[3] == 3
