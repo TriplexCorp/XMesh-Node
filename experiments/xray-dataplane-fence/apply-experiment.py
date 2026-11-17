@@ -136,9 +136,9 @@ def run(root: Path):
     for writer_path in ("inboundLink.Writer", "outboundLink.Writer", "link.Writer"):
         source = replace_once(
             source,
-            "\\t\\t\\t\\t\\tWriter:  " + writer_path + ",\\n",
-            "\\t\\t\\t\\t\\tWriter:  " + writer_path + ",\\n"
-            "\\t\\t\\t\\t\\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\\n",
+            "\t\t\t\t\tWriter:  " + writer_path + ",\n",
+            "\t\t\t\t\tWriter:  " + writer_path + ",\n"
+            "\t\t\t\t\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\n",
         )
     dispatcher_file.write_text(source, encoding="utf-8")
 
@@ -228,18 +228,18 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     meter_source = meter_writer_file.read_text(encoding="utf-8")
     meter_source = replace_once(
         meter_source,
-        '"github.com/xtls/xray-core/common"\\n',
-        '"github.com/xtls/xray-core/app/xmeshdrain"\\n'
-        '\\t"github.com/xtls/xray-core/common"\\n',
+        '"github.com/xtls/xray-core/common"\n',
+        '"github.com/xtls/xray-core/app/xmeshdrain"\n'
+        '\t"github.com/xtls/xray-core/common"\n',
     )
     meter_source = replace_once(
         meter_source,
-        '\\tWriter  buf.Writer\\n',
-        '\\tWriter  buf.Writer\\n\\tExperimentalEmail string\\n',
+        '\tWriter  buf.Writer\n',
+        '\tWriter  buf.Writer\n\tExperimentalEmail string\n',
     )
     meter_source = replace_once(
         meter_source,
-        '\\tw.Counter.Add(int64(mb.Len()))\\n\\treturn w.Writer.WriteMultiBuffer(mb)',
+        '\tw.Counter.Add(int64(mb.Len()))\n\treturn w.Writer.WriteMultiBuffer(mb)',
         '''    if w.ExperimentalEmail != "" {
         if err := xmeshdrain.BeginMeterWrite(w.ExperimentalEmail); err != nil {
             buf.ReleaseMulti(mb)
