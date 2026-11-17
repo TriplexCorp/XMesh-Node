@@ -26,7 +26,7 @@ jobs:
           go-version-file: go.mod
       - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
       - run: test "$(cat VERSION)" = "6.0.0"
-      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.12"
+      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.13"
       - run: python3 -m py_compile deploy/xmesh-xray-update.py deploy/xmesh-policy-guard.py deploy/xmesh-policy-guard-base.py deploy/xmesh-profile-attest.py deploy/xmesh-hot-user-reconcile.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
@@ -41,7 +41,7 @@ jobs:
           ref: 647adcf7af326b205fce12545fb5d75a20bb8191
           path: .ci-previous-node
           persist-credentials: false
-      - name: Prove old ledger survives 6.0.11 to 6.0.12 upgrade, outage and restart
+      - name: Prove old ledger survives 6.0.11 to 6.0.13 upgrade, outage and restart
         shell: bash
         run: |
           set -Eeuo pipefail
