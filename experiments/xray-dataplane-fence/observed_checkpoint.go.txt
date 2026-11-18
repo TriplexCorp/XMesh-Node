@@ -5,7 +5,6 @@
 package xmeshdrain
 
 import (
-    "crypto/rand"
     "crypto/sha256"
     "encoding/hex"
     "encoding/json"
@@ -61,9 +60,10 @@ var observed = struct {
     runtimeID string
 }{}
 
-// configureObservedCheckpoint generates a new runtime identity and requires
-// a private, pre-existing directory. The real CI process calls this at start.
-// Never infer a trusted runtime from a previous disk file.
+// configureObservedCheckpoint computes a Linux process-bound identity and
+// requires a private directory. A separate Node verifier must cross-check
+// the identity against the INDEPENDENTLY DISCOVERED managed Xray host PID.
+// This is still NONFINAL evidence and proves no post-stop writer completion.
 func configureObservedCheckpoint(directory string) error {
     if directory == "" || !filepath.IsAbs(directory) {
         return errors.New("observed checkpoint directory must be absolute")
@@ -72,15 +72,15 @@ func configureObservedCheckpoint(directory string) error {
     if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
         return errors.New("observed checkpoint directory must exist and be private")
     }
-    var bytes [32]byte
-    if _,err := rand.Read(bytes[:]); err != nil { return err }
+    processID,err:=currentRuntimeIdentity()
+    if err!=nil{return err}
     // A recovered durable fence must be installed before Xray admits users.
     if err:=restoreDurableFences(directory);err!=nil{return err}
     observed.Lock()
     defer observed.Unlock()
     observed.directory = directory
     observed.manager = nil // An old in-memory Xray process meter is never recoverable.
-    observed.runtimeID = hex.EncodeToString(bytes[:])
+    observed.runtimeID = processID
     return nil
 }
 
