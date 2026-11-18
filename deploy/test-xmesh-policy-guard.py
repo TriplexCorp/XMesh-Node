@@ -103,6 +103,13 @@ class SignedPolicyTests(unittest.TestCase):
         spec.loader.exec_module(guarded)
         self.config["inbounds"][0]["tag"] = "vless-main"
         self.config["inbounds"][0]["settings"]["clients"][0]["email"] = "xmesh-u1--vless-main"
+        # A separately authenticated CDN inbound is present in the signed
+        # COMMITTED config. It must be represented even if no session used it.
+        cdn = copy.deepcopy(self.config["inbounds"][0])
+        cdn["tag"] = "vless-cdn"
+        cdn["port"] = 28352
+        cdn["settings"]["clients"][0]["email"] = "xmesh-u1--vless-cdn"
+        self.config["inbounds"].append(cdn)
         self.policy["version"] = 2
         user = self.policy["users"][0]
         user["limitBytes"] = 1000
@@ -136,8 +143,12 @@ class SignedPolicyTests(unittest.TestCase):
             "reservationId": lease["reservationId"], "revision": 2,
             "revocationId": revoke["requestId"], "runtimeId": "a" * 64,
             "uplinkBytes": 70, "downlinkBytes": 80,
-            "inboundMeters": [{"email": "xmesh-u1--vless-main",
-                              "uplinkBytes": 70, "downlinkBytes": 80}],
+            "inboundMeters": [
+                {"email": "xmesh-u1--vless-cdn",
+                 "uplinkBytes": 40, "downlinkBytes": 40},
+                {"email": "xmesh-u1--vless-main",
+                 "uplinkBytes": 30, "downlinkBytes": 40},
+            ],
             "drained": True,
             "finalMeterVerified": False, "refundableBytes": 0
         }
@@ -152,7 +163,28 @@ class SignedPolicyTests(unittest.TestCase):
         snapshot = guarded.verify_committed_observed_checkpoint(
             self.state, 12, observation, ledger)
         self.assertTrue(snapshot["scopeBoundToSignedPolicy"])
+        self.assertTrue(snapshot["completeSignedInboundScopeObserved"])
+        self.assertEqual(snapshot["signedInboundCount"], 2)
         self.assertEqual(snapshot["observedRawBytes"], 150)
+        # Omitting even an UNUSED-but-SIGNED CDN inbound must be rejected.
+        incomplete = copy.deepcopy(observation)
+        incomplete["inboundMeters"] = [incomplete["inboundMeters"][1]]
+        with self.assertRaisesRegex(ValueError, "Missing signed inbound"):
+            guarded.verify_committed_observed_checkpoint(
+                self.state, 12, incomplete, ledger)
+        for mutation in ("duplicate", "wrong", "inverted", "unsorted"):
+            broken = copy.deepcopy(observation)
+            if mutation == "duplicate":
+                broken["inboundMeters"][1] = broken["inboundMeters"][0]
+            elif mutation == "wrong":
+                broken["inboundMeters"][0]["email"] = "xmesh-u2--vless-cdn"
+            elif mutation == "inverted":
+                broken["inboundMeters"][0]["uplinkBytes"] += 1
+            else:
+                broken["inboundMeters"].reverse()
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                guarded.verify_committed_observed_checkpoint(
+                    self.state, 12, broken, ledger)
         self.assertIs(snapshot["finalMeterVerified"], False)
         self.assertEqual(snapshot["refundableBytes"], 0)
         # Cross the actual verified signed-policy boundary before the
