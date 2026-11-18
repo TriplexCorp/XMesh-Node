@@ -7,6 +7,7 @@ import (
     "net"
     "os"
     "path/filepath"
+    "strings"
     "testing"
 )
 
@@ -79,7 +80,7 @@ func TestDurableFenceRejectsInvalidSymlinkAndTamperedScopes(t *testing.T) {
             case "world-readable":
                 if err:=os.WriteFile(path,data,0644);err!=nil{t.Fatal(err)}
             case "wrong-name":
-                path=filepath.Join(dir,"fence-"+string(make([]byte,64))+".json")
+                path=filepath.Join(dir,"fence-"+strings.Repeat("0",64)+".json")
                 if err:=os.WriteFile(path,data,0600);err!=nil{t.Fatal(err)}
             case "wrong-schema":
                 record.SchemaVersion=3
