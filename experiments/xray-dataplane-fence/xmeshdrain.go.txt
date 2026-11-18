@@ -88,12 +88,16 @@ func IsTrackedInbound(ctx context.Context) bool {
 func RequireInboundCoverage(ctx context.Context) error {
     if !enabled { return nil }
     subject := session.InboundFromContext(ctx)
-    if subject == nil || subject.User == nil { return nil }
-    // The private StatsService's dokodemo-door listener is a management
-    // channel, never a billable VLESS user inbound. Xray may attach a
-    // generic user context to internal API sessions; keep it accessible.
+    if subject == nil { return nil }
+    // A private StatsService call does not need user authentication.
     if subject.Tag == "xmesh_stats_in" { return nil }
-    if !IsTrackedInbound(ctx) {
+    // Never let a tagged dataplane route proceed without user attribution,
+    // even if upstream Xray omitted the authenticated User context. Checking
+    // only for User != nil permits silent unmetered traffic on that route.
+    if subject.Tag != "" && (subject.User == nil || subject.User.Email == "") {
+        return errors.New("experimental Xray: unattributed user-bearing inbound")
+    }
+    if subject.User != nil && !IsTrackedInbound(ctx) {
         return errors.New("experimental Xray: authenticated user on untracked inbound")
     }
     return nil

@@ -52,6 +52,22 @@ func TestMultiInboundCoverageIsStrictAndIncludesBlankUserEmails(t *testing.T) {
     if err := RequireInboundCoverage(scoped("vless-cdn", "same-account")); err != nil {
         t.Fatalf("explicit secondary inbound unexpectedly refused: %v", err)
     }
+    if err := RequireInboundCoverage(scoped("vless-cdn", "")); err == nil {
+        t.Fatal("tagged user inbound with blank email skipped the coverage gate")
+    }
+    noUser := session.ContextWithInbound(context.Background(), &session.Inbound{
+        Tag: "vless-cdn",
+    })
+    if err := RequireInboundCoverage(noUser); err == nil {
+        t.Fatal("tagged inbound with missing authenticated User was unmetered")
+    }
+    if err := RequireInboundCoverage(scoped("vless-unlisted", "")); err == nil {
+        t.Fatal("unknown user-bearing inbound with blank email was unmetered")
+    }
+    if err := RequireInboundCoverage(session.ContextWithInbound(
+        context.Background(), &session.Inbound{Tag: "xmesh_stats_in"})); err != nil {
+        t.Fatalf("private StatsService without User was blocked: %v",err)
+    }
     if err := RequireInboundCoverage(scoped("vless-unlisted", "same-account")); err == nil {
         t.Fatal("an untracked user-bearing inbound bypassed quota accounting")
     }
