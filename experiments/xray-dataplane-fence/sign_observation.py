@@ -15,6 +15,10 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from runtime_identity import trusted_runtime_identity, verify_live_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -108,13 +112,15 @@ def verify_envelope(envelope, node_id, public_key_path):
     if not isinstance(p, dict) or set(p) != {
             "schemaVersion", "kind", "nodeId", "checkpoint",
             "checkpointSha256", "boundToCommittedPolicy",
-            "completeSignedInboundScopeObserved", "finalMeterVerified",
+            "completeSignedInboundScopeObserved",
+            "liveRuntimeIndependentlyVerified", "finalMeterVerified",
             "settlementEligible", "refundableBytes"} or (
             type(p["schemaVersion"]) is not int or p["schemaVersion"] != 1 or
             p["kind"] != KIND or type(p["nodeId"]) is not int or
             p["nodeId"] != node_id or node_id <= 0 or
             p["boundToCommittedPolicy"] is not True or
             p["completeSignedInboundScopeObserved"] is not True or
+            p["liveRuntimeIndependentlyVerified"] is not True or
             p["finalMeterVerified"] is not False or
             p["settlementEligible"] is not False or
             type(p["refundableBytes"]) is not int or p["refundableBytes"] != 0):
@@ -243,7 +249,13 @@ def append_only(dfd, name, evidence):
     return True
 
 
-def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir):
+def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir,
+                       trusted_xray_host_pid):
+    # Caller MUST resolve this PID from trusted container management rather
+    # than from the Node's untrusted claimed checkpoint. This verification
+    # takes place while Xray is STILL LIVE, before its identity can disappear.
+    # It is explicitly not evidence of writer flush / terminality.
+    verify_live_runtime(checkpoint, trusted_xray_host_pid)
     if type(node_id) is not int or node_id <= 0:
         raise ValueError("invalid Node ID")
     # No pending policy, raw counter, or Node heartbeat may substitute here.
@@ -261,6 +273,7 @@ def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir):
         "checkpointSha256": hashlib.sha256(canonical(checkpoint)).hexdigest(),
         "boundToCommittedPolicy": True,
         "completeSignedInboundScopeObserved": True,
+        "liveRuntimeIndependentlyVerified": True,
         "finalMeterVerified": False, "settlementEligible": False,
         "refundableBytes": 0,
     }

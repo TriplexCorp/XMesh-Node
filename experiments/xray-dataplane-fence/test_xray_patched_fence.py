@@ -20,6 +20,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
+from runtime_identity import verify_live_runtime
 from test_quota_v2_xray_user_inbound_drain import (  # noqa: E402
     EchoHandler, EchoServer, reserve_port, connect_socks, echo_bytes,
     probe_echo,
@@ -315,6 +316,14 @@ def run(xray, transport):
             assert proof["fenced"] and proof["drained"] and proof["active"]==0,proof
             assert not proof["finalMeterVerified"] and not proof["refundable"],proof
             observation=proof["observedCheckpoint"]
+            assert verify_live_runtime(observation, server.pid), (
+                "Observed Xray runtime is not independently tied to the live host PID")
+            try:
+                verify_live_runtime(observation, client.pid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Client PID substituted for measured server PID")
             assert observation["email"] == EMAIL_A
             assert observation["revocationId"] == revocation_id
             for k, v in test_lease_scope(EMAIL_A,revocation_id).items():
