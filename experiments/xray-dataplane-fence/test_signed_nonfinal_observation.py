@@ -54,6 +54,16 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         subprocess.run(["openssl", "pkey", "-in", str(self.key),
                         "-pubout", "-out", str(self.pub)], check=True,
                        capture_output=True)
+        self.managed_identity = ("a" * 64, "2026-11-18T12:00:00Z", os.getpid())
+        # The real Agent journal stores Docker container ID + StartedAt,
+        # raw user counter and each signed inbound's own monotonic floor.
+        self.valid_managed_ledger = {
+            "runtimeId": self.managed_identity[0] + " " + self.managed_identity[1],
+            "users": {"1": {"last": 110, "total": 120}},
+            "inbounds": {'[1,"MAIN"]': {
+                "lastUp": 80, "lastDown": 15,
+                "totalUp": 90, "totalDown": 20}},
+        }
         self.valid_binding = {
             "scopeBoundToSignedPolicy": True,
             "completeSignedInboundScopeObserved": True,
@@ -92,9 +102,79 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         self.assertEqual(target.stat().st_ino, inode)
         self.assertEqual(target.read_bytes(), before)
 
+    def write_managed_ledger(self, document=None):
+        data = self.valid_managed_ledger if document is None else document
+        (self.state / "policy-usage.json").write_text(
+            json.dumps(data, sort_keys=True))
+
+    def test_managed_observation_below_durable_floor_refused(self):
+        self.write_managed_ledger()
+        cases = (
+            ("user-total", lambda cp, led: led["users"]["1"].update(last=111)),
+            ("inbound-up", lambda cp, led: led["inbounds"]['[1,"MAIN"]'].update(lastUp=91)),
+            ("inbound-down", lambda cp, led: led["inbounds"]['[1,"MAIN"]'].update(lastDown=21)),
+            ("missing-inbound", lambda cp, led: led["inbounds"].clear()),
+            ("counter-reset", lambda cp, led: cp.update(uplinkBytes=1,
+                                  inboundMeters=[{"email": "xmesh-u1--MAIN",
+                                                 "uplinkBytes": 1, "downlinkBytes": 20}])),
+            ("different-docker-runtime", lambda cp, led: led.update(runtimeId="b"*64+" 2026-11-18T12:00:00Z")),
+        )
+        for name, mutate in cases:
+            cp = checkpoint()
+            ledger = copy.deepcopy(self.valid_managed_ledger)
+            mutate(cp, ledger)
+            self.write_managed_ledger(ledger)
+            with self.subTest(case=name), patch.object(
+                    evidence, "inspect_managed_xray", return_value=self.managed_identity
+                    ), patch.object(
+                    evidence, "verify_managed_xray_runtime", return_value=True
+                    ), patch.object(
+                    evidence.guard, "verify_committed_observed_checkpoint",
+                    return_value=self.valid_binding):
+                with self.assertRaises(ValueError):
+                    evidence.create_observation(
+                        self.state, 7, cp, self.key, self.output)
+            self.assertEqual(list(self.output.iterdir()), [],
+                             "invalid raw counter produced an immutable receipt")
+        self.write_managed_ledger()
+
+    def test_concurrent_journal_advance_during_signing_refused(self):
+        self.write_managed_ledger()
+        cp = checkpoint()
+        real_sign = evidence.sign_bytes
+
+        def advance_after_signing(key, message):
+            signature = real_sign(key, message)
+            newer = copy.deepcopy(self.valid_managed_ledger)
+            newer["users"]["1"]["total"] = 140
+            newer["users"]["1"]["last"] = 115
+            self.write_managed_ledger(newer)
+            return signature
+
+        with patch.object(evidence, "inspect_managed_xray",
+                          return_value=self.managed_identity), patch.object(
+                evidence, "verify_managed_xray_runtime", return_value=True
+                ), patch.object(
+                evidence, "sign_bytes", side_effect=advance_after_signing
+                ), patch.object(
+                evidence.guard, "verify_committed_observed_checkpoint",
+                return_value=self.valid_binding):
+            with self.assertRaisesRegex(ValueError, "changed during signing"):
+                evidence.create_observation(self.state, 7, cp, self.key, self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_explicit_pid_fixture_not_marked_as_durable_floor_verified(self):
+        cp = checkpoint()
+        receipt = self.create(cp)
+        self.assertFalse(receipt["payload"]["monotonicLedgerFloorVerified"])
+        self.assertEqual(receipt["payload"]["durableAbsoluteFloorBytes"], 0)
+        verified = evidence.verify_envelope(receipt, 7, self.pub)
+        self.assertFalse(verified["settlementEligible"])
+
     def test_normal_signer_auto_discovers_managed_docker_runtime(self):
         cp = checkpoint()
-        identity = ("a" * 64, "2026-11-18T12:00:00Z", os.getpid())
+        self.write_managed_ledger()
+        identity = self.managed_identity
         with patch.object(evidence, "inspect_managed_xray",
                           side_effect=[identity, identity]) as docker, patch.object(
                 evidence, "verify_managed_xray_runtime",
@@ -105,6 +185,9 @@ class SignedNonfinalObservationTests(unittest.TestCase):
                 self.state, 7, cp, self.key, self.output)
         self.assertEqual(docker.call_count, 2)
         checked.assert_called_once_with(cp)
+        self.assertEqual(receipt["payload"]["schemaVersion"], 2)
+        self.assertTrue(receipt["payload"]["monotonicLedgerFloorVerified"])
+        self.assertEqual(receipt["payload"]["durableAbsoluteFloorBytes"], 120)
         self.assertTrue(evidence.verify_envelope(
             receipt, 7, self.pub)["liveRuntimeIndependentlyVerified"])
         self.assertEqual(len(list(self.output.iterdir())), 1)
