@@ -13,6 +13,7 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "reflect"
     "sort"
     "sync"
 
@@ -251,7 +252,7 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     }
     path:=checkpointPath(observed.directory,email)
     if old,err:=loadCheckpoint(path);err==nil{
-        if old!=record {
+        if !reflect.DeepEqual(old,record) {
             return empty,errors.New("existing checkpoint mismatch or late counter update")
         }
         return old,nil
