@@ -70,6 +70,19 @@ func IsTrackedInbound(ctx context.Context) bool {
     return ok
 }
 
+// Every authenticated user stream is billable on this disposable Xray.
+// Missing a configured inbound must not silently provide an unmetered path.
+// Never interpret coverage success as a proof of terminal dataplane bytes.
+func RequireInboundCoverage(ctx context.Context) error {
+    if !enabled { return nil }
+    subject := session.InboundFromContext(ctx)
+    if subject == nil || subject.User == nil { return nil }
+    if !IsTrackedInbound(ctx) {
+        return errors.New("experimental Xray: authenticated user on untracked inbound")
+    }
+    return nil
+}
+
 type trackedSession struct {
     email string
     stop func()
