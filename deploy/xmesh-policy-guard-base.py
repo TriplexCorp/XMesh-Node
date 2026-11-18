@@ -746,8 +746,23 @@ def sample_before_xray_replace(state_dir, node_id, now_ms=None):
     return True
 
 
+def mark_quota_meter_discontinuity(record, reason, runtime_id, now_ms):
+    """Persist a STICKY refusal for unprovable signed quota-v2 usage.
+
+    A running process's raw counter reset, or replacement without a proven
+    terminal old-process meter, can omit spent bytes. Never infer zero use or
+    credit unverified capacity. Legacy non-v2 metering remains unchanged.
+    """
+    if not isinstance(record.get("quotaReservation"), dict):
+        return
+    if "quotaMeterContinuityLost" not in record:
+        record["quotaMeterContinuityLost"] = {
+            "reason": reason, "runtimeId": runtime_id, "atMs": now_ms,
+        }
+
+
 def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=None):
-    """Accumulate durable per-user bytes without changing admission policy."""
+    """Accumulate durable per-user bytes; latch any untrusted quota-v2 interval."""
     if not isinstance(ledger, dict):
         ledger = {}
     history = ledger.get("users", {})
@@ -759,27 +774,65 @@ def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=No
     if counters is not None:
         prev_runtime = ledger.get("runtimeId")
         if prev_runtime != runtime_id:
-            # A restarted container has fresh, lower Xray cumulative counters.
+            # A restarted container starts fresh counters. The old values
+            # are only durable *floors*: without a complete terminal meter,
+            # the unobserved bytes between last sample and process exit are
+            # UNKNOWN. Quota-v2 users must be denied until reconciliation.
             for record in history.values():
+                if prev_runtime is not None or (
+                        record.get("total", 0) or record.get("last", 0)):
+                    mark_quota_meter_discontinuity(
+                        record, "unverified-xray-runtime-transition",
+                        runtime_id, now_ms)
                 record["last"] = 0
             for record in ledger.get("inbounds", {}).values():
                 record["lastUp"] = 0
                 record["lastDown"] = 0
         ledger["runtimeId"] = runtime_id
+        if prev_runtime == runtime_id:
+            # Omitting a previously sampled user with an active signed lease
+            # is NOT evidence that their outstanding traffic became zero.
+            for user_id, record in history.items():
+                if user_id not in counters and int(record.get("last", 0)) > 0:
+                    mark_quota_meter_discontinuity(
+                        record, "missing-xray-user-counter", runtime_id, now_ms)
         for user_id, value in counters.items():
             record = history.setdefault(user_id, {})
             last = max(0, int(record.get("last", 0)))
+            if prev_runtime == runtime_id and value < last:
+                mark_quota_meter_discontinuity(
+                    record, "regressed-xray-user-counter", runtime_id, now_ms)
             record["total"] = max(0, int(record.get("total", 0))) + (
                 value - last if value >= last else value)
             record["last"] = value
         if inbound_counters is not None:
             inbound_history = ledger.setdefault("inbounds", {})
+            if prev_runtime == runtime_id:
+                # A former nonzero, same-runtime inbound meter disappearing
+                # from StatsService is an unverified accounting interval.
+                for encoded, prior in inbound_history.items():
+                    try:
+                        old_user, old_tag = json.loads(encoded)
+                        present = (str(old_user), old_tag) in inbound_counters
+                        active_bytes = (int(prior.get("lastUp", 0)) +
+                                        int(prior.get("lastDown", 0)))
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        continue
+                    if not present and active_bytes > 0:
+                        mark_quota_meter_discontinuity(
+                            history.setdefault(str(old_user), {}),
+                            "missing-xray-inbound-counter", runtime_id, now_ms)
             for (user_id, tag), count in inbound_counters.items():
                 cache_key = json.dumps([int(user_id), tag], separators=(",", ":"))
                 item = inbound_history.setdefault(cache_key, {})
                 for direction, suffix in (("uplink", "Up"), ("downlink", "Down")):
                     raw = count[direction]
                     last = max(0, int(item.get("last" + suffix, 0)))
+                    if prev_runtime == runtime_id and raw < last:
+                        user_record = history.setdefault(str(user_id), {})
+                        mark_quota_meter_discontinuity(
+                            user_record, "regressed-xray-inbound-counter",
+                            runtime_id, now_ms)
                     item["total" + suffix] = max(0, int(item.get("total" + suffix, 0))) + (
                         raw - last if raw >= last else raw)
                     item["last" + suffix] = raw
@@ -925,6 +978,12 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         # An absent offline traffic quota is not an exemption from expiration.
         if offline and now_ms >= policy["validUntilMs"]:
             reason = "policy-expired"
+        # This sticky root-owned ledger marker is independent of a fresh
+        # online signed policy response. A revision that did not prove the
+        # missing meter interval cannot silently re-enable traffic.
+        if (policy.get("version") == 2 and limit > 0 and
+                record.get("quotaMeterContinuityLost") is not None):
+            reason = "quota-meter-continuity-lost"
         if reason and offline:
             # Preserve the FIRST denial reason. An already exhausted quota
             # must not later be relabelled "policy-expired" and silently
