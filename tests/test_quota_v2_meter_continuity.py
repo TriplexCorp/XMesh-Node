@@ -139,6 +139,83 @@ class MeterContinuityFailClosedTests(unittest.TestCase):
         self.assertEqual(denied, {})
         self.assertNotIn("quotaMeterContinuityLost", ledger["users"]["1"])
 
+    def test_signed_new_epoch_must_be_zero_grant_before_continuity_recovery(self):
+        policy, config, ledger = self.start()
+        _, ledger, denied = guard.enforce(
+            policy, copy.deepcopy(config), ledger,
+            {"1": 2}, "new-xray-runtime", False, 1300, count(up=2))
+        self.assertEqual(denied.get(UUID), "quota-meter-continuity-lost")
+        self.assertEqual(ledger["users"]["1"]["total"], 22)
+        old_epoch = lease()["epoch"]
+        zero = lease(revision=3, ceiling=22)
+        zero["epoch"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        zero["reservationId"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        zero["acknowledgedBytes"] = 22
+        # An online signed NEW epoch cannot silently provide new spending
+        # capacity while the old runtime's missing bytes remain unresolved.
+        early = dict(zero, ceilingBytes=30)
+        policy["users"][0]["quotaReservation"] = early
+        policy["issuedAtMs"] = 2000
+        with self.assertRaisesRegex(ValueError, "zero-grant signed epoch"):
+            guard.enforce(policy, copy.deepcopy(config), copy.deepcopy(ledger),
+                          {"1": 2}, "new-xray-runtime", False, 2000, count(up=2))
+        self.assertIn("quotaMeterContinuityLost", ledger["users"]["1"])
+
+        # A trusted NEW accounting epoch starts with exactly ZERO available
+        # bytes: old conservative spending stays charged, with no refund.
+        policy["users"][0]["quotaReservation"] = zero
+        effective, ledger, blocked = guard.enforce(
+            policy, copy.deepcopy(config), ledger,
+            {"1": 2}, "new-xray-runtime", False, 2000, count(up=2))
+        self.assertEqual(blocked.get(UUID), "quota")
+        self.assertEqual(effective["inbounds"][0]["settings"]["clients"], [])
+        record = ledger["users"]["1"]
+        self.assertNotIn("quotaMeterContinuityLost", record)
+        self.assertEqual(record["quotaRetiredEpochs"], [old_epoch])
+        self.assertEqual(
+            record["quotaMeterContinuityLastResolved"]["resolvedBySignedEpoch"],
+            zero["epoch"])
+        self.assertEqual(
+            record["quotaMeterContinuityLastResolved"]["refundableBytes"], 0)
+        self.assertEqual(record["total"], 22)
+
+        # Only a SUBSEQUENT signed revision of this NEW epoch can now
+        # provide a spendable grant, independently authorized by Nexus.
+        active = dict(zero, revision=4, ceilingBytes=31)
+        policy["users"][0]["quotaReservation"] = active
+        policy["issuedAtMs"] = 3000
+        effective, ledger, blocked = guard.enforce(
+            policy, copy.deepcopy(config), ledger,
+            {"1": 2}, "new-xray-runtime", False, 3000, count(up=2))
+        self.assertEqual(blocked, {})
+        self.assertEqual(len(effective["inbounds"][0]["settings"]["clients"]), 1)
+        self.assertEqual(ledger["users"]["1"]["total"], 22)
+
+        # The originally signed epoch cannot be replayed after its
+        # successor was zero-grant reanchored, even with a bigger revision.
+        stale = lease(revision=99, ceiling=1000)
+        stale["acknowledgedBytes"] = 22
+        policy["users"][0]["quotaReservation"] = stale
+        with self.assertRaisesRegex(ValueError, "retired signed quota epoch replay"):
+            guard.enforce(policy, copy.deepcopy(config), copy.deepcopy(ledger),
+                          {"1": 2}, "new-xray-runtime", False, 3100, count(up=2))
+
+    def test_unverified_epoch_reanchor_requires_exact_durable_absolute_floor(self):
+        policy, config, ledger = self.start()
+        _, ledger, _ = guard.enforce(
+            policy, copy.deepcopy(config), ledger,
+            {"1": 2}, "new-runtime", False, 1300, count(up=2))
+        staged = lease(revision=2, ceiling=22)
+        staged["epoch"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        staged["reservationId"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        for ack, ceiling in ((21, 22), (22, 23), (0, 100)):
+            policy["users"][0]["quotaReservation"] = dict(
+                staged, acknowledgedBytes=ack, ceilingBytes=ceiling)
+            with self.subTest(ack=ack, ceiling=ceiling), self.assertRaises(
+                    ValueError):
+                guard.enforce(policy, copy.deepcopy(config), copy.deepcopy(ledger),
+                              {"1": 2}, "new-runtime", False, 2000, count(up=2))
+
     def test_legacy_restart_and_reset_behavior_stays_compatible(self):
         record = {"users": {"1": {"last": 20, "total": 20}},
                   "runtimeId": "legacy-old",

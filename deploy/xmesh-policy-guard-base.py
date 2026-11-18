@@ -886,6 +886,15 @@ def enforce_quota_reservation(user, record, total, now_ms):
         record["quotaRevocation"] = dict(revoke)
     elif isinstance(previous_revoke, dict) and previous_revoke.get("epoch") != lease["epoch"]:
         record.pop("quotaRevocation", None)
+    retired = record.get("quotaRetiredEpochs", [])
+    if (not isinstance(retired, list) or len(retired) > 512 or
+            any(not isinstance(epoch, str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", epoch)
+                for epoch in retired) or len(set(retired)) != len(retired)):
+        raise ValueError("Corrupt retired quota epoch ledger")
+    if lease["epoch"] in retired:
+        raise ValueError("Previously retired signed quota epoch replay")
+    reanchor = False
     if old is not None:
         if old["meterEpoch"] != lease["meterEpoch"]:
             raise ValueError("Meter incarnation changed without reconciliation")
@@ -897,7 +906,36 @@ def enforce_quota_reservation(user, record, total, now_ms):
             raise ValueError("Quota reservation rollback")
         if old["epoch"] == lease["epoch"] and lease["revision"] == old["revision"] and lease != old:
             raise ValueError("Conflicting quota reservation revision")
+        if old["epoch"] != lease["epoch"]:
+            if old["reservationId"] == lease["reservationId"]:
+                raise ValueError("New quota epoch reused old reservation identity")
+            if len(retired) >= 512:
+                raise ValueError("Retired quota epoch journal full; reconcile offline")
+            if record.get("quotaMeterContinuityLost") is not None:
+                # The previous Xray incarnation may have transferred
+                # unobserved bytes. An ordinary renewed revision MUST NOT
+                # refill it. Only an independently signed NEW accounting
+                # epoch that begins with ZERO available grant may reanchor
+                # the absolute Node meter. Nexus must first fully charge
+                # the old held lease; no refund is implied by this change.
+                if not (lease["acknowledgedBytes"] == total and
+                        lease["ceilingBytes"] == total):
+                    raise ValueError(
+                        "Unverified Xray meter requires zero-grant signed epoch reanchor")
+                reanchor = True
+            retired.append(old["epoch"])
+            record["quotaRetiredEpochs"] = retired
     record["quotaReservation"] = dict(lease)
+    if reanchor:
+        # Preserve the incident for audit; never erase evidence by replaying
+        # another policy revision in the same old epoch.
+        record["quotaMeterContinuityLastResolved"] = {
+            **record["quotaMeterContinuityLost"],
+            "resolvedBySignedEpoch": lease["epoch"],
+            "resolvedByReservationId": lease["reservationId"],
+            "refundableBytes": 0,
+        }
+        record.pop("quotaMeterContinuityLost")
     if revoke is not None:
         return "quota-revocation-pending"
     if now_ms >= lease["validUntilMs"]:
