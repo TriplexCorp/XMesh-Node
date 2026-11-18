@@ -9,6 +9,8 @@ import (
     "time"
 
     c "github.com/xtls/xray-core/common/ctx"
+    "github.com/xtls/xray-core/common/protocol"
+    "github.com/xtls/xray-core/common/session"
 )
 
 func TestMain(m *testing.M) {
@@ -16,6 +18,53 @@ func TestMain(m *testing.M) {
     // Unix control endpoint from these tests.
     enabled = true
     os.Exit(m.Run())
+}
+
+
+func TestMultiInboundCoverageIsStrictAndIncludesBlankUserEmails(t *testing.T) {
+    original := trackedInboundTags
+    defer func() { trackedInboundTags = original }()
+    tags, err := parseTrackedInboundTags("vless-share,vless-cdn")
+    if err != nil || len(tags) != 2 { t.Fatalf("coverage: %v %v", tags, err) }
+    trackedInboundTags = tags
+    scoped := func(tag, email string) context.Context {
+        return session.ContextWithInbound(context.Background(), &session.Inbound{
+            Tag: tag, User: &protocol.User{Email: email},
+        })
+    }
+    for _, tag := range []string{"vless-share", "vless-cdn"} {
+        scopedCtx := scoped(tag, "same-account")
+        if !IsTrackedInbound(scopedCtx) || ScopedEmail(scopedCtx) != "same-account" {
+            t.Fatalf("billable inbound %s bypassed session accounting", tag)
+        }
+        blank := scoped(tag, "")
+        if !IsTrackedInbound(blank) || ScopedEmail(blank) != "" {
+            t.Fatal("blank authenticated email bypasses Register error path")
+        }
+    }
+    if IsTrackedInbound(scoped("xmesh_stats_in", "same-account")) ||
+        ScopedEmail(scoped("xmesh_stats_in", "same-account")) != "" {
+        t.Fatal("private management StatsService was classified as a user stream")
+    }
+    if IsTrackedInbound(context.Background()) {
+        t.Fatal("unattributed context was treated as a tracked session")
+    }
+    for _, raw := range []string{
+        ",vless-share", "vless-share,", "vless-share,vless-share",
+        "vless-share, vless-cdn", "vless-share,xmesh_stats_in!",
+        "vless-share/other", "vless-share\n", "vless-share,vless-cdn,",
+    } {
+        if _, err := parseTrackedInboundTags(raw); err == nil {
+            t.Fatalf("invalid coverage list accepted: %q", raw)
+        }
+    }
+    fallback, err := parseTrackedInboundTags("")
+    if err != nil || len(fallback) != 1 {
+        t.Fatal("legacy isolated test inbound was not preserved")
+    }
+    if _, ok := fallback["vless-share"]; !ok {
+        t.Fatal("default test inbound missing")
+    }
 }
 
 func resetGate() {
