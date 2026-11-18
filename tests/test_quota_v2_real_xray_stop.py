@@ -7,7 +7,7 @@ already existing managed container. This tests physical revocation safety, not
 statistical finality or refundable bytes.
 """
 import contextlib
-import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,11 +24,13 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "ghcr.io/xtls/xray-core:26.10.31"
 NAME = "xmesh-managed-xray"
 
-STOP_SPEC = importlib.util.spec_from_file_location(
-    "xmesh_quota_physical_stop_attestor",
-    ROOT / "experiments/quota-v2-physical-stop/attestor.py")
-attestor = importlib.util.module_from_spec(STOP_SPEC)
-STOP_SPEC.loader.exec_module(attestor)
+# Keep the exact SAME OldXrayProbe class across the physical-stop and
+# signed-stop-chain modules; importing a second copy would break this binding.
+sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
+import attestor
+import stop_chain
+import sign_observation as observed
+import runtime_identity
 
 
 def cmd(*argv, check=True):
@@ -91,6 +93,65 @@ def verify_stopped():
     assert raw == "false no", f"Revoked Xray still runnable via Docker restart: {raw!r}"
 
 
+def synthetic_signed_observation_fixture(root, host_pid):
+    """Signature-chain canary only: bytes and policy approval are SYNTHETIC.
+
+    This tests the exact live PID/process -> immutable Node Ed25519 receipt ->
+    old PID stop transition, NOT Xray StatsService byte accuracy, complete
+    committed production policy, or any entitlement to quota refunds.
+    """
+    observed_dir, stopped_dir = root / "observed", root / "stopped"
+    observed_dir.mkdir(mode=0o700)
+    stopped_dir.mkdir(mode=0o700)
+    key, pub = root / "fixture-node.key", root / "fixture-node.pub"
+    cmd("openssl", "genpkey", "-algorithm", "Ed25519",
+        "-out", str(key))
+    os.chmod(key, 0o600)
+    cmd("openssl", "pkey", "-in", str(key), "-pubout",
+        "-out", str(pub))
+    email = "xmesh-u101--test-quota-v2"
+    checkpoint = {
+        "schemaVersion": 3,
+        "email": email, "nodeId": 9, "userId": 101,
+        "epoch": "11111111-1111-4111-8111-111111111111",
+        "meterEpoch": "22222222-2222-4222-8222-222222222222",
+        "reservationId": "33333333-3333-4333-8333-333333333333",
+        "revision": 3,
+        "revocationId": "44444444-4444-4444-8444-444444444444",
+        "runtimeId": runtime_identity.trusted_runtime_identity(host_pid),
+        "uplinkBytes": 0, "downlinkBytes": 0,
+        "inboundMeters": [{
+            "email": email, "uplinkBytes": 0, "downlinkBytes": 0}],
+        "drained": True, "finalMeterVerified": False,
+        "refundableBytes": 0,
+    }
+    signed = {
+        "schemaVersion": 2, "kind": observed.KIND, "nodeId": 9,
+        "checkpoint": checkpoint,
+        "checkpointSha256": hashlib.sha256(
+            observed.canonical(checkpoint)).hexdigest(),
+        "boundToCommittedPolicy": True,
+        "completeSignedInboundScopeObserved": True,
+        "liveRuntimeIndependentlyVerified": True,
+        "monotonicLedgerFloorVerified": True,
+        "durableAbsoluteFloorBytes": 0,
+        "finalMeterVerified": False,
+        "settlementEligible": False, "refundableBytes": 0,
+    }
+    envelope = {
+        "algorithm": "Ed25519", "payload": signed,
+        "signature": observed.sign_bytes(
+            key, observed.DOMAIN + observed.canonical(signed))}
+    dfd = observed.private_directory(observed_dir)
+    try:
+        observed.append_only(
+            dfd, observed.receipt_name(checkpoint),
+            observed.canonical(envelope) + b"\\n")
+    finally:
+        os.close(dfd)
+    return checkpoint, observed_dir, stopped_dir, key, pub
+
+
 def run():
     assert os.getenv("GITHUB_ACTIONS") == "true", "Use a disposable GitHub Actions worker"
     assert os.getenv("XMESH_DISPOSABLE_XRAY_CANARY") == "1", "Explicit disposable canary opt-in required"
@@ -128,6 +189,7 @@ def run():
         created = False
         session = None
         stop_probe = None
+        signed_chain = None
         try:
             docker(
                 "run", "-d", "--name", NAME, "--restart", "unless-stopped",
@@ -152,6 +214,10 @@ def run():
             marker_inode = marker.stat().st_ino
             assert durable_marker("status").stdout.strip() == "armed"
             stop_probe = attestor.begin_old_xray_probe()
+            cp, observed_dir, stopped_dir, test_key, test_pub = (
+                synthetic_signed_observation_fixture(root, stop_probe.old_pid))
+            signed_chain = stop_chain.prepare_old_process_stop(
+                stop_probe, cp, observed_dir, 9, test_pub)
             script = (
                 "set -Eeuo pipefail\n" + helper +
                 "\nREVOCATION_MARKER=" + str(marker) + "\n" +
@@ -168,6 +234,23 @@ def run():
             assert physical_stop["finalMeterVerified"] is False
             assert physical_stop["settlementEligible"] is False
             assert physical_stop["refundableBytes"] == 0
+            linked = stop_chain.complete_old_process_stop(
+                signed_chain, root, production_marker_helper,
+                observed_dir, stopped_dir, test_key, test_pub)
+            linked_again = stop_chain.complete_old_process_stop(
+                signed_chain, root, production_marker_helper,
+                observed_dir, stopped_dir, test_key, test_pub)
+            assert linked == linked_again
+            raw_original = (observed_dir / observed.receipt_name(cp)).read_bytes()
+            chained = stop_chain.verify_stop_chain(
+                linked, raw_original, 9, test_pub)
+            assert chained["oldContainerId"] == physical_stop["oldContainerId"]
+            assert chained["oldStartedAt"] == physical_stop["oldStartedAt"]
+            assert chained["oldRuntimeId"] == cp["runtimeId"]
+            assert chained["finalMeterVerified"] is False
+            assert chained["settlementEligible"] is False
+            assert chained["refundableBytes"] == 0
+            print("PASS: synthetic signed observation chained to same stopped Xray PID; NONFINAL", flush=True)
             assert marker.is_file(), "Stop must not clear durable revocation intent"
             print("PASS: real Xray stopped, restart policy disabled, marker retained", flush=True)
             # The old established stream must not continue delivering traffic.
