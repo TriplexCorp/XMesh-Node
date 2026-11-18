@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "xray-dataplane-fence"))
 import sign_observation as observed
 import runtime_identity
@@ -209,6 +210,17 @@ def complete_old_process_stop(bound, state_dir, marker_helper,
     envelope = {
         "algorithm": "Ed25519", "payload": payload, "signature": signature}
     verify_stop_chain(envelope, raw, bound.node_id, trusted_public_key)
+    # Recheck the managed process and deny marker after signing, before any
+    # durable stop-chain publication. Historical exit is not a promise that
+    # Docker will remain stopped forever, but a concurrent restart may not
+    # be recorded as a valid completed stop transaction.
+    current = attestor.inspect_managed()
+    if (attestor.identity(current) != bound.probe.docker_identity or
+            current["State"].get("Running") is not False or
+            current["State"].get("Pid") != 0 or
+            current["HostConfig"]["RestartPolicy"].get("Name") != "no"):
+        raise ValueError("Xray restarted while signing the stop chain")
+    attestor.marker_armed(state_dir, marker_helper)
     evidence = observed.canonical(envelope) + b"\n"
     if len(evidence) > observed.MAX_RECORD:
         raise ValueError("stop-chain evidence too large")
