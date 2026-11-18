@@ -65,7 +65,8 @@ def command(*argv, check=True):
                           timeout=15, check=check)
 
 
-def query_counter(xray, port, email):
+def query_direction_counters(xray, port, email):
+    """Read BOTH real Xray StatsService directions, never guess from a sum."""
     result = command(xray, "api", "statsquery", f"--server=127.0.0.1:{port}",
                      "-pattern", f"user>>>{email}")
     stats = json.loads(result.stdout)["stat"]
@@ -73,9 +74,16 @@ def query_counter(xray, port, email):
     for item in stats:
         for suffix in ("uplink", "downlink"):
             if item["name"] == f"user>>>{email}>>>traffic>>>{suffix}":
-                values[suffix] = int(item["value"])
-    assert len(values) == 2, (email, stats)
-    return sum(values.values())
+                assert suffix not in values, (email, stats)
+                value = item["value"]
+                assert type(value) in (str, int) and str(value).isdecimal()
+                values[suffix] = int(value)
+    assert set(values) == {"uplink", "downlink"}, (email, stats)
+    return values
+
+
+def query_counter(xray, port, email):
+    return sum(query_direction_counters(xray, port, email).values())
 
 
 def wait_counter(xray, port, email, minimum=1):
@@ -374,6 +382,32 @@ def run(xray, transport):
             after_cdn=wait_counter(xray,api_port,EMAIL_A_CDN,before_cdn)
             assert after_cdn >= before_cdn
             after_b=wait_counter(xray,api_port,EMAIL_B,before_b+1)
+            # A completed tracked read/write drain should NOT permit a late
+            # counter update on EITHER signed main/CDN inbound when other
+            # users continue transferring on the same shared Xray process.
+            # This checks a finite observation window, NOT terminality:
+            # uninstrumented background writers and a future restart remain
+            # outside the proof. Production refunds MUST stay prohibited.
+            expected_meter = {
+                row["email"]: {
+                    "uplink": row["uplinkBytes"],
+                    "downlink": row["downlinkBytes"],
+                }
+                for row in observation["inboundMeters"]
+            }
+            assert set(expected_meter) == {EMAIL_A, EMAIL_A_CDN}, expected_meter
+            for sample_index in range(3):
+                # The control plane and unrelated billable user B remain live.
+                # B sends new real echo traffic across each sample.
+                echo_bytes(b, 2048)
+                for email in sorted(expected_meter):
+                    actual = query_direction_counters(xray, api_port, email)
+                    assert actual == expected_meter[email], (
+                        "Real Xray metered bytes changed AFTER completed fence drain",
+                        transport, sample_index, email, expected_meter[email],
+                        actual, observation,
+                    )
+                time.sleep(0.07)
             repeat=request_fence(socket_file,EMAIL_A,revocation_id)
             assert repeat["fenced"] and repeat["drained"] and repeat["active"]==0
             assert repeat["observedCheckpoint"]==observation
@@ -412,6 +446,8 @@ def run(xray, transport):
                 "statsServiceStillAvailable":True,
                 "userABeforeFenceBytes":before_a,"userAAfterFenceBytes":after_a,
                 "userBAfterFenceBytes":after_b,
+                "boundedPostDrainMainCDNBytesStable":True,
+                "boundedStabilityStillNotTerminalMeter":True,
                 "observedJournalFsynced":True,
                 "observedJournalSurvivedProcessExit":True,
                 "observedRuntimeIdBound":True,
