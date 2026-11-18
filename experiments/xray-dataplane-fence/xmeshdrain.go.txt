@@ -109,6 +109,9 @@ type trackedSession struct {
 type userState struct {
     fenced bool
     active map[uint64]func()
+    // Capture all authenticated per-inbound Xray emails seen for this stable
+    // billing user. This set is NOT a proof of complete signed topology.
+    emails map[string]struct{}
     // Count all in-flight per-user metered writes. New writes are rejected
     // atomically once the admission fence is active.
     writes int
@@ -127,7 +130,7 @@ var gate = struct {
 func ensureUser(email string) *userState {
     u := gate.users[email]
     if u == nil {
-        u = &userState{active: make(map[uint64]func()), done: make(chan struct{})}
+        u = &userState{active: make(map[uint64]func()), emails: make(map[string]struct{}), done: make(chan struct{})}
         gate.users[email] = u
     }
     return u
@@ -167,6 +170,7 @@ func Register(ctx context.Context, email string, stop func()) error {
         return errDuplicateSession
     }
     u.active[id] = stop
+    u.emails[email] = struct{}{}
     gate.sessions[id] = &trackedSession{email: canonicalMeterUser(email), stop: stop}
     return nil
 }

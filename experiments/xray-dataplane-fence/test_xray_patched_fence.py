@@ -323,7 +323,10 @@ def run(xray, transport):
             assert observation["schemaVersion"] == 2
             assert observation["drained"] and not observation["finalMeterVerified"]
             assert observation["refundableBytes"] == 0
-            assert (observation["uplinkBytes"] + observation["downlinkBytes"]) >= before_a
+            assert (observation["uplinkBytes"] + observation["downlinkBytes"]) >= before_a + before_cdn, (
+                "Observed checkpoint silently omitted the independently billed CDN email", observation,
+                before_a, before_cdn
+            )
             assert journal_file.is_file(), "No durable experimental Xray journal"
             assert journal_file.stat().st_mode & 0o077 == 0
             observed_disk=json.loads(journal_file.read_text())
@@ -390,7 +393,8 @@ def run(xray, transport):
                 "newUserAStreamsRejected":True,
                 "secondaryCDNInboundRevoked":True,
                 "distinctSignedInboundEmailsShareUserFence":True,
-                "observedSnapshotStillNonfinalAndDoesNotAggregateCDN":True,
+                "observedSnapshotAggregatesSeenMainAndCDNEmails":True,
+                "observedSnapshotStillNonfinalAndNotCompleteSignedScope":True,
                 "unlistedBillableInboundDenied":True,
                 "blankVlessEmailRejected":True,
                 "existingUserBStreamSurvived":True,"newUserBStreamsAccepted":True,
