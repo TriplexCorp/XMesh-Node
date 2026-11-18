@@ -78,12 +78,7 @@ func reconcilePendingJournal(dir,name string) error {
             return errors.New("pending observed meter conflicts with published scope")
         }
     }else if strings.HasPrefix(name,".taint-pending-") {
-        partial,err:=readDurableCounterTaint(pending)
-        if err!=nil{return fmt.Errorf("untrusted pending counter taint: %w",err)}
-        final=durableCounterTaintPath(dir,partial.CanonicalUser)
-        committed,err:=readDurableCounterTaint(final)
-        if err!=nil{return fmt.Errorf("unpublished counter taint; deny Xray restart: %w",err)}
-        if committed!=partial{return errors.New("pending counter taint differs from published taint")}
+        return reconcilePendingCounterTaint(dir,name)
     }else{return nil}
     before,err:=os.Lstat(pending)
     if err!=nil{return err}
