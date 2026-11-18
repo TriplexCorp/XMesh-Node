@@ -1,0 +1,98 @@
+package buf
+
+import (
+    "io"
+    "sync/atomic"
+    "testing"
+    "time"
+)
+
+// Only injected into the disposable exact-pinned Xray checkout in CI.
+type xmeshCounter struct{ value atomic.Int64 }
+func(c *xmeshCounter) Value() int64 {return c.value.Load()}
+func(c *xmeshCounter) Set(v int64) int64 {return c.value.Swap(v)}
+func(c *xmeshCounter) Add(v int64) int64 {return c.value.Add(v)-v}
+
+type xmeshBlockingReader struct {
+    begun chan struct{}
+    unblock chan struct{}
+    calls atomic.Int32
+}
+func (r *xmeshBlockingReader) ReadMultiBuffer() (MultiBuffer,error) {
+    r.calls.Add(1)
+    if r.begun!=nil {close(r.begun);r.begun=nil}
+    <-r.unblock
+    b:=New()
+    if _,err:=b.Write([]byte("exactly-7"));err!=nil {return nil,err}
+    return MultiBuffer{b},nil
+}
+
+func TestExperimentalTimeoutReaderCountsBeforeDrain(t *testing.T) {
+    underlying:=&xmeshBlockingReader{
+        begun:make(chan struct{}),
+        unblock:make(chan struct{}),
+    }
+    counter:=&xmeshCounter{}
+    var begin,finish atomic.Int32
+    allowed:=atomic.Bool{}
+    allowed.Store(true)
+    reader:=&TimeoutWrapperReader{
+        Reader:underlying,Counter:counter,
+        ExperimentalBegin:func() bool{
+            if !allowed.Load(){return false}
+            begin.Add(1)
+            return true
+        },
+        ExperimentalEnd:func(){finish.Add(1)},
+    }
+    mb,err:=reader.ReadMultiBufferTimeout(10*time.Millisecond)
+    if err!=nil||mb!=nil {t.Fatalf("first timeout: %v %v",mb,err)}
+    if begin.Load()!=1||finish.Load()!=0||counter.Value()!=0 {
+        t.Fatal("timed-out read was already marked completed")
+    }
+    mb,err=reader.ReadMultiBufferTimeout(10*time.Millisecond)
+    if err!=nil||mb!=nil {t.Fatalf("second timeout: %v %v",mb,err)}
+    if underlying.calls.Load()!=1||begin.Load()!=1 {
+        t.Fatal("second timeout started a new chargeable read")
+    }
+    // Installation of the user fence disallows *new* reads, but an already
+    // admitted async read must finish its counter update before End is called.
+    allowed.Store(false)
+    close(underlying.unblock)
+    mb,err=reader.ReadMultiBuffer()
+    if err!=nil||mb.Len()!=9 {t.Fatalf("pending read result: %v %v",mb,err)}
+    if finish.Load()!=1||counter.Value()!=9 {
+        t.Fatalf("read completion before accounting: counter=%d finish=%d",
+            counter.Value(),finish.Load())
+    }
+    ReleaseMulti(mb)
+    mb,err=reader.ReadMultiBuffer()
+    if err!=io.EOF||mb!=nil || underlying.calls.Load()!=1 ||
+        counter.Value()!=9||begin.Load()!=1{
+        t.Fatalf("late read was admitted or recounted: %v %v",mb,err)
+    }
+    mb,err=reader.ReadMultiBufferTimeout(time.Millisecond)
+    if err!=io.EOF||mb!=nil {
+        t.Fatalf("late timed read admitted: %v %v",mb,err)
+    }
+    if finish.Load()!=1{t.Fatal("async read completion double counted")}
+}
+
+func TestExperimentalDirectReadReturnsAfterCounterUpdate(t *testing.T){
+    source:=&xmeshBlockingReader{unblock:make(chan struct{})}
+    close(source.unblock)
+    counter:=&xmeshCounter{}
+    var begin,finish atomic.Int32
+    r:=&TimeoutWrapperReader{
+        Reader:source,Counter:counter,
+        ExperimentalBegin:func()bool{begin.Add(1);return true},
+        ExperimentalEnd:func(){finish.Add(1)},
+    }
+    mb,err:=r.ReadMultiBuffer()
+    if err!=nil||mb.Len()!=9{t.Fatalf("direct read failed: %v %v",mb,err)}
+    if counter.Value()!=9||begin.Load()!=1||finish.Load()!=1{
+        t.Fatalf("direct read returned before accounting: %d %d %d",
+            counter.Value(),begin.Load(),finish.Load())
+    }
+    ReleaseMulti(mb)
+}
