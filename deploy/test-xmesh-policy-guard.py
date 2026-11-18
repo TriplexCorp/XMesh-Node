@@ -94,6 +94,96 @@ class SignedPolicyTests(unittest.TestCase):
         self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
         self.write_envelope()
 
+    def test_observed_checkpoint_requires_signed_committed_lease_and_stop(self):
+        """The Xray observation is ONLY scope-bound; it cannot refund bytes."""
+        import importlib.util
+        import copy
+        spec = importlib.util.spec_from_file_location("xmesh_signed_observation", GUARD)
+        guarded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guarded)
+        self.config["inbounds"][0]["tag"] = "vless-main"
+        self.config["inbounds"][0]["settings"]["clients"][0]["email"] = "xmesh-u1--vless-main"
+        self.policy["version"] = 2
+        user = self.policy["users"][0]
+        user["limitBytes"] = 1000
+        lease = {
+            "epoch": "11111111-1111-4111-8111-111111111111",
+            "meterEpoch": "22222222-2222-4222-8222-222222222222",
+            "reservationId": "33333333-3333-4333-8333-333333333333",
+            "revision": 1, "acknowledgedBytes": 0, "ceilingBytes": 500,
+            "validUntilMs": NOW + 7200000
+        }
+        user["quotaReservation"] = lease
+        self.policy["configSha256"] = hashlib.sha256(compact(self.config)).hexdigest()
+        self.write_envelope()
+        self.run_guard("prepare")
+        self.run_guard("commit")
+        revoke = {
+            "requestId": "44444444-4444-4444-8444-444444444444",
+            "epoch": lease["epoch"], "meterEpoch": lease["meterEpoch"],
+            "reservationId": lease["reservationId"]
+        }
+        self.policy["issuedAtMs"] = NOW + 1000
+        user["quotaReservation"]["revision"] = 2
+        user["quotaRevocation"] = revoke
+        self.write_envelope()
+        self.run_guard("prepare", NOW + 1000)
+        self.assertEqual(self.num_clients(), 0)
+        observation = {
+            "schemaVersion": 2, "nodeId": 12, "userId": 1,
+            "email": "xmesh-u1--vless-main",
+            "epoch": lease["epoch"], "meterEpoch": lease["meterEpoch"],
+            "reservationId": lease["reservationId"], "revision": 2,
+            "revocationId": revoke["requestId"], "runtimeId": "a" * 64,
+            "uplinkBytes": 70, "downlinkBytes": 80, "drained": True,
+            "finalMeterVerified": False, "refundableBytes": 0
+        }
+        ledger = json.loads((self.state / "policy-usage.json").read_text())
+        with self.assertRaisesRegex(ValueError, "Unassigned or unrevoked"):
+            guarded.verify_committed_observed_checkpoint(
+                self.state, 12, observation, ledger)
+        # Only the reconciler may commit after the denied effective config is applied.
+        (self.state / "config.json").write_text(self.output.read_text())
+        self.run_guard("commit", NOW + 1000)
+        ledger = json.loads((self.state / "policy-usage.json").read_text())
+        snapshot = guarded.verify_committed_observed_checkpoint(
+            self.state, 12, observation, ledger)
+        self.assertTrue(snapshot["scopeBoundToSignedPolicy"])
+        self.assertEqual(snapshot["observedRawBytes"], 150)
+        self.assertIs(snapshot["finalMeterVerified"], False)
+        self.assertEqual(snapshot["refundableBytes"], 0)
+        tests = [
+            ("nodeId", 13), ("userId", 2), ("revision", 3),
+            ("email", "xmesh-u2--vless-main"), ("revocationId", "5" * 8 + "-5555-4555-8555-" + "5" * 12),
+            ("epoch", "55555555-5555-4555-8555-555555555555"),
+            ("meterEpoch", "66666666-6666-4666-8666-666666666666"),
+            ("reservationId", "77777777-7777-4777-8777-777777777777"),
+            ("runtimeId", ""), ("schemaVersion", 1),
+            ("drained", False), ("finalMeterVerified", True),
+            ("refundableBytes", 1), ("uplinkBytes", -1),
+        ]
+        for key, bad in tests:
+            with self.subTest(mutation=key):
+                altered = {**observation, key: bad}
+                with self.assertRaises(ValueError):
+                    guarded.verify_committed_observed_checkpoint(
+                        self.state, 12, altered, ledger)
+        with self.assertRaises(ValueError):
+            guarded.verify_committed_observed_checkpoint(
+                self.state, 12, observation, {})
+        raw = (self.state / "policy-envelope.json")
+        original = raw.read_text()
+        forged = json.loads(original)
+        forged["policy"]["users"][0]["quotaReservation"]["revision"] = 500
+        raw.write_text(json.dumps(forged))
+        try:
+            with self.assertRaises(ValueError):
+                guarded.verify_committed_observed_checkpoint(
+                    self.state, 12, observation, ledger)
+        finally:
+            raw.write_text(original)
+
+
     def test_signed_multi_protocol_accounts_and_offline_cutoff(self):
         for protocol in ("vless", "vmess", "trojan", "shadowsocks", "hysteria", "masque"):
             with self.subTest(protocol=protocol):
