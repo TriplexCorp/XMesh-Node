@@ -139,6 +139,26 @@ def run(root: Path):
         '    // A returned inbound Process is not necessarily a finished route.\n'
         '    defer xmeshdrain.RouteFinish(ctx)\n',
     )
+    # The upstream TimeoutWrapperReader charges a pending timeout read only
+    # when a future ReadMultiBuffer() reaps it. Without that second call an
+    # asynchronous read may finish AFTER a reported drain. For the scoped
+    # experimental VLESS inbound, account the result inside the read worker
+    # and track the worker until it finishes; leave every other Xray reader
+    # unchanged.
+    source = replace_once(
+        source,
+        '\t\t\t\tlink.Reader.(*buf.TimeoutWrapperReader).Counter = c\n',
+        '''                link.Reader.(*buf.TimeoutWrapperReader).Counter = c
+                if email := xmeshdrain.ScopedEmail(ctx); email != "" {
+                    link.Reader.(*buf.TimeoutWrapperReader).ExperimentalBegin = func() bool {
+                        return xmeshdrain.BeginMeterRead(email)
+                    }
+                    link.Reader.(*buf.TimeoutWrapperReader).ExperimentalEnd = func() {
+                        xmeshdrain.EndMeterRead(email)
+                    }
+                }
+''',
+    )
     # Install the counted-write gate on all three user statistics writer paths
     # (getLink uplink/downlink and DispatchLink downlink).
     for writer_path in ("inboundLink.Writer", "outboundLink.Writer", "link.Writer"):
@@ -260,6 +280,74 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     )
     meter_writer_file.write_text(meter_source, encoding="utf-8")
 
+    reader_file = root / "common/buf/io.go"
+    reader_source = reader_file.read_text(encoding="utf-8")
+    reader_source = replace_once(
+        reader_source,
+        '\tdone chan struct{}\n}',
+        '\tdone chan struct{}\n'
+        '\tExperimentalBegin func() bool\n'
+        '\tExperimentalEnd func()\n}',
+    )
+    reader_source = replace_once(
+        reader_source,
+        'func (r *TimeoutWrapperReader) ReadMultiBuffer() (MultiBuffer, error) {\n',
+        '''func (r *TimeoutWrapperReader) ReadMultiBuffer() (MultiBuffer, error) {
+    if r.ExperimentalBegin != nil {
+        // A timed-out goroutine has already accounted the result before
+        // closing done. Never count its bytes again on the next read.
+        if r.done != nil {
+            <-r.done
+            r.done = nil
+            return r.mb, r.err
+        }
+        if !r.ExperimentalBegin() {
+            return nil, io.EOF
+        }
+        r.mb, r.err = r.Reader.ReadMultiBuffer()
+        if r.Counter != nil { r.Counter.Add(int64(r.mb.Len())) }
+        r.ExperimentalEnd()
+        return r.mb, r.err
+    }
+''',
+    )
+    reader_source = replace_once(
+        reader_source,
+        'func (r *TimeoutWrapperReader) ReadMultiBufferTimeout(duration time.Duration) (MultiBuffer, error) {\n',
+        '''func (r *TimeoutWrapperReader) ReadMultiBufferTimeout(duration time.Duration) (MultiBuffer, error) {
+    if r.ExperimentalBegin != nil {
+        if r.done == nil {
+            if !r.ExperimentalBegin() {
+                return nil, io.EOF
+            }
+            r.done = make(chan struct{})
+            // The read may outlive the caller's timeout. Its metering and
+            // completion must NOT outlive the tracked in-flight operation.
+            go func() {
+                r.mb, r.err = r.Reader.ReadMultiBuffer()
+                if r.Counter != nil { r.Counter.Add(int64(r.mb.Len())) }
+                r.ExperimentalEnd()
+                close(r.done)
+            }()
+        }
+        timeout := time.NewTimer(duration)
+        defer timeout.Stop()
+        select {
+        case <-r.done:
+            r.done = nil
+            return r.mb, r.err
+        case <-timeout.C:
+            return nil, nil
+        }
+    }
+''',
+    )
+    reader_file.write_text(reader_source, encoding="utf-8")
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/timeout_reader_test.go.txt",
+        root / "common/buf/io_experimental_timeout_test.go",
+    )
+
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
          str(shared / "observed_checkpoint.go"),
@@ -267,7 +355,8 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
          str(shared / "durable_fence.go"),
          str(shared / "durable_fence_test.go"),
          str(dispatcher_file), str(worker_file), str(mux_file),
-         str(meter_writer_file)],
+         str(meter_writer_file), str(reader_file),
+         str(root / "common/buf/io_experimental_timeout_test.go")],
         check=True,
         cwd=root,
     )

@@ -40,6 +40,9 @@ type userState struct {
     // Count all in-flight per-user metered writes. New writes are rejected
     // atomically once the admission fence is active.
     writes int
+    // Track asynchronous TimeoutWrapperReader operations through their
+    // counter increment, including callbacks resumed AFTER a timeout.
+    reads int
     done chan struct{}
     closed bool
 }
@@ -132,10 +135,35 @@ func EndMeterWrite(email string) {
     completeUserIfIdleLocked(u)
 }
 
+// BeginMeterRead is called before a scoped, billable buffer read starts.
+// No new user reads may begin once their admission fence is installed.
+func BeginMeterRead(email string) bool {
+    if !enabled || email=="" { return true }
+    gate.Lock()
+    defer gate.Unlock()
+    u:=ensureUser(email)
+    if u.fenced {return false}
+    u.reads++
+    return true
+}
+
+// EndMeterRead must run AFTER the read result is accounted, even if an
+// async timeout returned earlier. If it is never called, the drain remains
+// incomplete rather than minting a potentially false final meter.
+func EndMeterRead(email string) {
+    if !enabled || email=="" { return }
+    gate.Lock()
+    defer gate.Unlock()
+    u:=ensureUser(email)
+    if u.reads<=0 {panic("experimental xmesh drain: unbalanced metered reads")}
+    u.reads--
+    completeUserIfIdleLocked(u)
+}
+
 // Caller must hold gate.Mutex; neither active logical sessions nor
 // in-flight counted writes may remain before a fence is marked drained.
 func completeUserIfIdleLocked(u *userState) {
-    if u.fenced && len(u.active) == 0 && u.writes == 0 && !u.closed {
+    if u.fenced && len(u.active) == 0 && u.writes == 0 && u.reads == 0 && !u.closed {
         close(u.done)
         u.closed = true
     }
@@ -198,7 +226,7 @@ type result struct {
 func state(email string, u *userState) result {
     return result{
         Email: email, Fenced: u.fenced, Active: len(u.active),
-        Drained: u.closed && len(u.active) == 0 && u.writes == 0,
+        Drained: u.closed && len(u.active) == 0 && u.writes == 0 && u.reads == 0,
         FinalMeterVerified: false, Refundable: false,
     }
 }
