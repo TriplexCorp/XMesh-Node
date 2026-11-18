@@ -14,6 +14,7 @@ import re
 import socket
 import socketserver
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -130,9 +131,18 @@ def run():
             created = True
             session = wait_for_echo(port)
             print("PASS: real Xray serves traffic before revocation", flush=True)
+            # Exercise the EXACT production marker publication helper:
+            # file fsync, exclusive atomic hardlink, parent directory fsync.
             marker = root / "quota-revocation-deny-pending"
-            marker.write_text("signed-v2-deny\n", encoding="ascii")
-            os.chmod(marker, 0o600)
+            production_marker_helper = ROOT / "deploy/xmesh-quota-revocation-marker.py"
+            def durable_marker(operation):
+                return cmd(sys.executable, str(production_marker_helper), operation, str(root))
+            assert durable_marker("status").stdout.strip() == "clear"
+            durable_marker("arm")
+            assert marker.stat().st_mode & 0o077 == 0
+            assert marker.read_bytes() == b"signed-v2-deny\n"
+            marker_inode = marker.stat().st_ino
+            assert durable_marker("status").stdout.strip() == "armed"
             script = (
                 "set -Eeuo pipefail\n" + helper +
                 "\nREVOCATION_MARKER=" + str(marker) + "\n" +
@@ -158,6 +168,11 @@ def run():
                     raise AssertionError("Revoked Xray accepted new connection")
             time.sleep(1)
             verify_stopped()
+            # A previously committed marker must be re-synced, not replaced,
+            # when the same signed revocation is replayed after a restart.
+            durable_marker("arm")
+            assert marker.stat().st_ino == marker_inode
+            assert durable_marker("status").stdout.strip() == "armed"
             # Repeated boot/reconcile should be idempotent, never auto-start.
             cmd("bash", "-c", script)
             verify_stopped()
