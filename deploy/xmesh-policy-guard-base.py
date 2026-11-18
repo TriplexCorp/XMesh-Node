@@ -807,6 +807,21 @@ def integrate_counters(ledger, counters, runtime_id, now_ms, inbound_counters=No
             record["last"] = value
         if inbound_counters is not None:
             inbound_history = ledger.setdefault("inbounds", {})
+            if prev_runtime == runtime_id:
+                # A former nonzero, same-runtime inbound meter disappearing
+                # from StatsService is an unverified accounting interval.
+                for encoded, prior in inbound_history.items():
+                    try:
+                        old_user, old_tag = json.loads(encoded)
+                        present = (str(old_user), old_tag) in inbound_counters
+                        active_bytes = (int(prior.get("lastUp", 0)) +
+                                        int(prior.get("lastDown", 0)))
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        continue
+                    if not present and active_bytes > 0:
+                        mark_quota_meter_discontinuity(
+                            history.setdefault(str(old_user), {}),
+                            "missing-xray-inbound-counter", runtime_id, now_ms)
             for (user_id, tag), count in inbound_counters.items():
                 cache_key = json.dumps([int(user_id), tag], separators=(",", ":"))
                 item = inbound_history.setdefault(cache_key, {})
