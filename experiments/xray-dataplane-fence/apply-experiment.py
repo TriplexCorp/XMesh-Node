@@ -294,6 +294,76 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     )
     meter_writer_file.write_text(meter_source, encoding="utf-8")
 
+
+    # Patch ONLY the exact disposable Xray StatsService authority. Each user
+    # Counter.Add/Set is serialized with the admission fence and checkpoint.
+    # Never copy this instrumentation into the production Xray installer.
+    counter_file = root / "app/stats/counter.go"
+    counter = counter_file.read_text(encoding="utf-8")
+    counter = replace_once(
+        counter,
+        "type Counter struct {\n\tvalue int64\n}",
+        """type Counter struct {
+    value int64
+    experimentalName string
+    experimentalAudit func(string, func() int64) int64
+}""",
+    )
+    counter = replace_once(
+        counter,
+        "return atomic.SwapInt64(&c.value, newValue)",
+        """if c.experimentalAudit != nil {
+        return c.experimentalAudit(c.experimentalName, func() int64 {
+            return atomic.SwapInt64(&c.value, newValue)
+        })
+    }
+    return atomic.SwapInt64(&c.value, newValue)""",
+    )
+    counter = replace_once(
+        counter,
+        "return atomic.AddInt64(&c.value, delta)",
+        """if c.experimentalAudit != nil && delta != 0 {
+        return c.experimentalAudit(c.experimentalName, func() int64 {
+            return atomic.AddInt64(&c.value, delta)
+        })
+    }
+    return atomic.AddInt64(&c.value, delta)""",
+    )
+    counter_file.write_text(counter, encoding="utf-8")
+
+    manager_file = root / "app/stats/stats.go"
+    manager = manager_file.read_text(encoding="utf-8")
+    manager = replace_once(
+        manager,
+        "\tcounters   map[string]*Counter\n",
+        "\tcounters   map[string]*Counter\n\tcounterAudit func(string, func() int64) int64\n",
+    )
+    manager = replace_once(
+        manager,
+        "// RegisterCounter implements stats.Manager.",
+        """// Refuse binding after user counters have begun accumulating bytes.
+func (m *Manager) SetExperimentalCounterMutationAudit(
+    audit func(string, func() int64) int64,
+) error {
+    m.access.Lock()
+    defer m.access.Unlock()
+    if audit == nil || m.counterAudit != nil || len(m.counters) != 0 {
+        return errors.New("Xray StatsService audit installed too late or twice")
+    }
+    m.counterAudit = audit
+    return nil
+}
+
+// RegisterCounter implements stats.Manager.""",
+    )
+    if manager.count("\tc := new(Counter)\n") != 2:
+        raise ValueError("Pinned StatsService changed counter registration paths")
+    manager = manager.replace(
+        "\tc := new(Counter)\n",
+        "\tc := &Counter{experimentalName: name, experimentalAudit: m.counterAudit}\n",
+    )
+    manager_file.write_text(manager, encoding="utf-8")
+
     reader_file = root / "common/buf/io.go"
     reader_source = reader_file.read_text(encoding="utf-8")
     reader_source = replace_once(
@@ -370,7 +440,8 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
          str(shared / "durable_fence.go"),
          str(shared / "durable_fence_test.go"),
          str(dispatcher_file), str(worker_file), str(mux_file),
-         str(meter_writer_file), str(reader_file),
+         str(meter_writer_file), str(counter_file), str(manager_file),
+         str(reader_file),
          str(root / "common/buf/io_experimental_timeout_test.go")],
         check=True,
         cwd=root,

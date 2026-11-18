@@ -122,6 +122,8 @@ type userState struct {
     // Track asynchronous TimeoutWrapperReader operations through their
     // counter increment, including callbacks resumed AFTER a timeout.
     reads int
+    // Any direct user-byte Counter.Add/Set after fencing poisons the meter.
+    lateCounterMutation bool
     done chan struct{}
     closed bool
 }
@@ -184,6 +186,27 @@ func Register(ctx context.Context, email string, stop func()) error {
 func ScopedEmail(ctx context.Context) string {
     if !IsTrackedInbound(ctx) { return "" }
     return session.InboundFromContext(ctx).User.Email
+}
+
+// AuditRawCounterMutation interlocks ALL experimental StatsService raw user
+// byte mutations with the fence and snapshot journal, even when called outside
+// known transport wrappers. A post-fence Add+Set ABA poisons the observation.
+// This is NONFINAL experimental detection, never a refundable meter.
+func AuditRawCounterMutation(name string, mutate func() int64) int64 {
+    if !enabled { return mutate() }
+    raw, ok := strings.CutPrefix(name, "user>>>")
+    if !ok { return mutate() }
+    email, direction, ok := strings.Cut(raw, ">>>traffic>>>")
+    if !ok || email == "" || (direction != "uplink" && direction != "downlink") {
+        return mutate()
+    }
+    gate.Lock()
+    defer gate.Unlock()
+    value := mutate()
+    if u := gate.users[canonicalMeterUser(email)]; u != nil && u.fenced {
+        u.lateCounterMutation = true
+    }
+    return value
 }
 
 // BeginMeterWrite starts one tracked, billable writer operation. It must
