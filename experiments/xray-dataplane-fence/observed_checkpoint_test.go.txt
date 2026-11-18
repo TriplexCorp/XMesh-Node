@@ -55,6 +55,66 @@ func setupCheckpoint(t *testing.T,email string) (string,func(int64,int64)) {
     return dir,func(a,b int64){up.Add(a);down.Add(b)}
 }
 
+// Different StatsService counters are independent atomics, not a single
+// transaction. A late async callback must invalidate a torn signed-scope
+// observation before the immutable journal is published.
+func TestObservedMeterTwoPassRejectsLateCounterGrowth(t *testing.T) {
+    cdn:="xmesh-u101--vless-cdn"
+    main:="xmesh-u101--vless-share"
+    aliases:=[]string{cdn,main}
+    values:=map[string]uint64{
+        cdn+"/uplink":40,cdn+"/downlink":30,
+        main+"/uplink":60,main+"/downlink":20,
+    }
+    calls:=0
+    fixed:=func(alias,dir string)(uint64,error) {
+        calls++
+        return values[alias+"/"+dir],nil
+    }
+    rows,up,down,err:=readObservedMeterTwice(aliases,main,fixed)
+    if err!=nil || up!=100 || down!=50 || len(rows)!=2 || calls!=8 {
+        t.Fatalf("stable 2-inbound meter broken: %v %d %d %d %+v",err,up,down,calls,rows)
+    }
+    calls=0
+    changing:=func(alias,dir string)(uint64,error) {
+        calls++
+        amount:=values[alias+"/"+dir]
+        if calls>4 && alias==cdn && dir=="uplink" {amount++}
+        return amount,nil
+    }
+    rows,up,down,err=readObservedMeterTwice(aliases,main,changing)
+    if err==nil || rows!=nil || up!=0 || down!=0 {
+        t.Fatalf("torn runtime counter silently captured: %v %+v %d %d",err,rows,up,down)
+    }
+    cases:=[]struct{name string;aliases []string;request string}{
+        {"omitted_request",[]string{cdn},main},
+        {"duplicate",[]string{cdn,cdn},main},
+        {"unsorted",[]string{main,cdn},main},
+        {"foreign_identity",[]string{cdn,"xmesh-u102--vless-share"},main},
+    }
+    for _,tc:=range cases {
+        t.Run(tc.name,func(t *testing.T){
+            if _,_,_,err:=readObservedMeterTwice(tc.aliases,tc.request,fixed);err==nil{
+                t.Fatal("invalid meter identity list was accepted")
+            }
+        })
+    }
+    for _,mode:=range []string{"missing","overflow"} {
+        t.Run(mode,func(t *testing.T) {
+            read:=func(alias,dir string)(uint64,error){
+                if mode=="missing" && alias==cdn && dir=="downlink" {
+                    return 0,errors.New("missing CDN downlink")
+                }
+                if mode=="overflow" {return uint64(1<<63-1),nil}
+                return values[alias+"/"+dir],nil
+            }
+            if _,_,_,err:=readObservedMeterTwice(aliases,main,read);err==nil {
+                t.Fatalf("counter %s was accepted",mode)
+            }
+        })
+    }
+}
+
 func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T) {
     mainEmail:="xmesh-u101--vless-share"
     cdnEmail:="xmesh-u101--vless-cdn"
