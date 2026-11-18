@@ -56,6 +56,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
                        capture_output=True)
         self.valid_binding = {
             "scopeBoundToSignedPolicy": True,
+            "completeSignedInboundScopeObserved": True,
             "finalMeterVerified": False, "refundableBytes": 0,
         }
 
