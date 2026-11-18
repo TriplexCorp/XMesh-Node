@@ -105,7 +105,7 @@ func validScope(scope checkpointScope) bool {
 }
 
 func checkpointPath(directory,email string) string {
-    digest := sha256.Sum256([]byte(email))
+    digest := sha256.Sum256([]byte(canonicalMeterUser(email)))
     return filepath.Join(directory,"observed-"+hex.EncodeToString(digest[:])+".json")
 }
 
@@ -154,7 +154,7 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     // The fencing gate is independent of this manager lock. Recheck the
     // post-drain state, but never interpret it as final byte accounting.
     gate.Lock()
-    u:=gate.users[email]
+    u:=gate.users[canonicalMeterUser(email)]
     drained:=u!=nil && u.fenced && u.closed && len(u.active)==0 && u.writes==0 && u.reads==0
     gate.Unlock()
     if !drained { return empty,errors.New("cannot sample undrained user") }
