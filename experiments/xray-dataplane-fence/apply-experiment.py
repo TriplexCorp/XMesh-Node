@@ -43,6 +43,10 @@ def run(root: Path):
         shared / "observed_checkpoint.go",
     )
     shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/runtime_identity.go.txt",
+        shared / "runtime_identity.go",
+    )
+    shutil.copyfile(
         NODE_ROOT / "experiments/xray-dataplane-fence/observed_checkpoint_test.go.txt",
         shared / "observed_checkpoint_test.go",
     )
@@ -361,6 +365,7 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
          str(shared / "observed_checkpoint.go"),
+         str(shared / "runtime_identity.go"),
          str(shared / "observed_checkpoint_test.go"),
          str(shared / "durable_fence.go"),
          str(shared / "durable_fence_test.go"),
