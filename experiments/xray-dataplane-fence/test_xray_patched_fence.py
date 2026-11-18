@@ -157,9 +157,9 @@ def run(xray, transport):
                                hashlib.sha256(EMAIL_A.encode()).hexdigest() + ".json")
         echo = EchoServer(("127.0.0.1",0),EchoHandler)
         threading.Thread(target=echo.serve_forever,daemon=True).start()
-        api_port, vless_port, cdn_port, socks_a, socks_cdn, socks_b, socks_blank = (
+        api_port, vless_port, cdn_port, unsafe_port, socks_a, socks_cdn, socks_unsafe, socks_b, socks_blank = (
             reserve_port(),reserve_port(),reserve_port(),reserve_port(),
-            reserve_port(),reserve_port(),reserve_port()
+            reserve_port(),reserve_port(),reserve_port(),reserve_port(),reserve_port()
         )
         identity_a, identity_b, identity_blank = (
             str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())
@@ -186,6 +186,13 @@ def run(xray, transport):
                  "settings":{"decryption":"none","clients":[
                      {"id":identity_a,"email":EMAIL_A,"level":0}]},
                  "streamSettings":{"network":"tcp","security":"none"}},
+                # This third live Xray listener is intentionally absent
+                # from the declared billable allowlist; it must reject A.
+                {"tag":"vless-unsafe","listen":"127.0.0.1","port":unsafe_port,
+                 "protocol":"vless",
+                 "settings":{"decryption":"none","clients":[
+                     {"id":identity_a,"email":EMAIL_A,"level":0}]},
+                 "streamSettings":{"network":"tcp","security":"none"}},
                 {"tag":"xmesh_stats_in","listen":"127.0.0.1","port":api_port,
                  "protocol":"dokodemo-door","settings":{
                      "address":"127.0.0.1","port":api_port,"network":"tcp"}},
@@ -198,11 +205,12 @@ def run(xray, transport):
             "routing":{"rules":[{"type":"field","inboundTag":["xmesh_stats_in"],
                                   "outboundTag":"xmesh_stats_api"}]}
         }
-        def outbound(tag, identity, *, cdn=False):
+        def outbound(tag, identity, *, cdn=False, unsafe=False):
+            destination = unsafe_port if unsafe else (cdn_port if cdn else vless_port)
             config = {"tag":tag,"protocol":"vless","settings":{"vnext":[{
-                "address":"127.0.0.1","port":cdn_port if cdn else vless_port,
+                "address":"127.0.0.1","port":destination,
                 "users":[{"id":identity,"encryption":"none"}]}]},
-                "streamSettings":make_stream_settings("tcp" if cdn else transport)}
+                "streamSettings":make_stream_settings("tcp" if (cdn or unsafe) else transport)}
             # Exercise two simultaneous logical streams A on one physical MUX
             # transport, while user B uses a separate physical connection.
             if transport == "mux-tcp" and tag == "user-a":
@@ -215,6 +223,8 @@ def run(xray, transport):
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
                 {"tag":"socks-cdn","listen":"127.0.0.1","port":socks_cdn,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
+                {"tag":"socks-unsafe","listen":"127.0.0.1","port":socks_unsafe,
+                 "protocol":"socks","settings":{"auth":"noauth","udp":False}},
                 {"tag":"socks-b","listen":"127.0.0.1","port":socks_b,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
                 {"tag":"socks-blank","listen":"127.0.0.1","port":socks_blank,
@@ -222,10 +232,13 @@ def run(xray, transport):
             ],
             "outbounds":[outbound("user-a",identity_a),
                          outbound("user-a-cdn",identity_a,cdn=True),
+                         outbound("user-unsafe",identity_a,unsafe=True),
                          outbound("user-b",identity_b),
                          outbound("user-blank",identity_blank)],
             "routing":{"rules":[{"type":"field","inboundTag":["socks-cdn"],
                                   "outboundTag":"user-a-cdn"},
+                                {"type":"field","inboundTag":["socks-unsafe"],
+                                  "outboundTag":"user-unsafe"},
                                 {"type":"field","inboundTag":["socks-b"],
                                   "outboundTag":"user-b"},
                                 {"type":"field","inboundTag":["socks-blank"],
@@ -267,6 +280,17 @@ def run(xray, transport):
             b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             echo_bytes(a,8192)
             echo_bytes(cdn,8192)
+            # An omitted user-bearing inbound is a hard admission failure,
+            # even BEFORE the user's actual signed revocation is delivered.
+            try:
+                untracked = connect_socks(socks_unsafe, echo.server_address[1], "127.0.0.1")
+            except (OSError, AssertionError):
+                pass
+            else:
+                try:
+                    assert not probe_echo(untracked), "Untracked inbound served unmetered traffic"
+                finally:
+                    untracked.close()
             if transport == "mux-tcp":
                 # Both A streams coexist before revocation. Reusing the
                 # parent's session ID would reject the second registration.
@@ -354,6 +378,7 @@ def run(xray, transport):
                 "userAFenced":True,"existingUserAStreamEnded":True,
                 "newUserAStreamsRejected":True,
                 "secondaryCDNInboundRevoked":True,
+                "unlistedBillableInboundDenied":True,
                 "blankVlessEmailRejected":True,
                 "existingUserBStreamSurvived":True,"newUserBStreamsAccepted":True,
                 "statsServiceStillAvailable":True,
