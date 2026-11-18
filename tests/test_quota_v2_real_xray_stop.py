@@ -146,7 +146,7 @@ def synthetic_signed_observation_fixture(root, host_pid):
     try:
         observed.append_only(
             dfd, observed.receipt_name(checkpoint),
-            observed.canonical(envelope) + b"\\n")
+            observed.canonical(envelope) + b"\n")
     finally:
         os.close(dfd)
     return checkpoint, observed_dir, stopped_dir, key, pub
