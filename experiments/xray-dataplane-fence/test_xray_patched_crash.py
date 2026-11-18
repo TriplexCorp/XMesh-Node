@@ -24,7 +24,7 @@ from test_quota_v2_xray_user_inbound_drain import (
     EchoHandler, EchoServer, reserve_port, connect_socks, echo_bytes, probe_echo,
 )
 from test_xray_patched_fence import (
-    command, await_socket, request_fence, wait_counter, EMAIL_A, EMAIL_B,
+    command, await_socket, request_fence, wait_counter, EMAIL_A, EMAIL_A_USER_KEY, EMAIL_B,
     test_lease_scope,
 )
 
@@ -79,7 +79,7 @@ def run(xray):
         root=Path(tmp)
         assert root.stat().st_mode & 0o077 == 0
         control=root/"drain.sock"
-        email_hash=hashlib.sha256(EMAIL_A.encode()).hexdigest()
+        email_hash=hashlib.sha256(EMAIL_A_USER_KEY.encode()).hexdigest()
         marker=root/f"fence-{email_hash}.json"
         observed=root/f"observed-{email_hash}.json"
         revocation=str(uuid.uuid4())

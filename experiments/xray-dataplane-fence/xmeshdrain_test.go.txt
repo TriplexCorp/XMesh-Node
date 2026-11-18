@@ -90,6 +90,79 @@ func ctx(id uint32) context.Context {
     return c.ContextWithID(context.Background(),c.ID(id))
 }
 
+func TestSignedUserIdentityAcrossMainAndCDNEmailsCannotBypassFence(t *testing.T) {
+    resetGate()
+    mainEmail := "xmesh-u101--vless-main"
+    cdnEmail := "xmesh-u101--vless-cdn"
+    if canonicalMeterUser(mainEmail) != canonicalMeterUser(cdnEmail) ||
+        canonicalMeterUser(mainEmail) != "xmesh-u101" {
+        t.Fatal("signed same-user accounting identities not combined")
+    }
+    for _, tag := range []string{"xmesh-u101--PL%2FCDN", "xmesh-u101--🇵🇱CDN"} {
+        if canonicalMeterUser(tag) != "xmesh-u101" {
+            t.Fatalf("signed encoded transport tag escaped user fence: %s",tag)
+        }
+    }
+    for _, malformed := range []string{"xmesh-u01--vless-main", "xmesh-u0--cdn",
+        "xmesh-u101--", "xmesh-u101--invalid>tag", "xmesh-u102--cdn"} {
+        if canonicalMeterUser(malformed) == canonicalMeterUser(mainEmail) {
+            t.Fatalf("an unrelated or invalid identity was merged: %s",malformed)
+        }
+    }
+    primary, secondary := ctx(2801),ctx(2802)
+    stopped := make(chan string, 2)
+    if err := Register(primary,mainEmail,func(){
+        Finish(primary)
+        RouteFinish(primary)
+        stopped <- "main"
+    }); err != nil { t.Fatal(err) }
+    if err := Register(secondary,cdnEmail,func(){
+        Finish(secondary)
+        RouteFinish(secondary)
+        stopped <- "cdn"
+    }); err != nil { t.Fatal(err) }
+    if err := BeginMeterWrite(cdnEmail); err != nil { t.Fatal(err) }
+    outcome := make(chan result,1)
+    failure := make(chan error,1)
+    go func(){
+        deadline,cancel := context.WithTimeout(context.Background(),2*time.Second)
+        defer cancel()
+        value,err := fence(deadline,mainEmail)
+        if err != nil { failure <- err; return }
+        outcome <- value
+    }()
+    <-stopped
+    <-stopped
+    for _, email := range []string{mainEmail,cdnEmail} {
+        if err := Register(ctx(2803),email,func(){}); !errors.Is(err,errFenced) {
+            t.Fatalf("revoked tag %s admitted another stream: %v",email,err)
+        }
+        if err := BeginMeterWrite(email); !errors.Is(err,errFenced) {
+            t.Fatalf("revoked tag %s admitted another billable write: %v",email,err)
+        }
+        if BeginMeterRead(email) {
+            t.Fatalf("revoked tag %s admitted another async meter read",email)
+        }
+    }
+    select {
+    case <-outcome: t.Fatal("fence completed before CDN writer finished")
+    case err := <-failure: t.Fatalf("premature error: %v",err)
+    case <-time.After(35*time.Millisecond):
+    }
+    EndMeterWrite(cdnEmail)
+    select {
+    case value := <-outcome:
+        if !value.Fenced || !value.Drained || value.Active!=0 ||
+           value.FinalMeterVerified || value.Refundable {
+            t.Fatalf("incorrect canonical-user fence: %+v",value)
+        }
+    case err := <-failure:
+        t.Fatal(err)
+    case <-time.After(time.Second):
+        t.Fatal("canonical-user fence did not finish")
+    }
+}
+
 func TestSelectiveFenceAndRepeatNeverRefund(t *testing.T) {
     resetGate()
     first, second := ctx(11), ctx(12)

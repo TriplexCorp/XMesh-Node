@@ -12,6 +12,7 @@ import (
     "net/http"
     "os"
     "path/filepath"
+    "regexp"
     "strings"
     "sync"
     "time"
@@ -31,6 +32,17 @@ var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
 // Every user-bearing inbound must be enumerated. A single-inbound fence
 // cannot protect a second CDN/secondary listener carrying the same identity.
 var trackedInboundTags = map[string]struct{}{"vless-share": {}}
+var signedUserEmail = regexp.MustCompile(`^xmesh-u([1-9][0-9]{0,18})--([^\x00-\x20>]{1,128})$`)
+
+// A signed policy emits distinct per-inbound emails for the same billing
+// user. Always fence the stable account identity, not the individual tag.
+// Unknown experimental identities remain distinct; no loose prefix merging.
+func canonicalMeterUser(email string) string {
+    if matches := signedUserEmail.FindStringSubmatch(email); matches != nil {
+        return "xmesh-u" + matches[1]
+    }
+    return email
+}
 
 func parseTrackedInboundTags(raw string) (map[string]struct{}, error) {
     if raw == "" {
@@ -141,12 +153,12 @@ func Register(ctx context.Context, email string, stop func()) error {
     }
     gate.Lock()
     defer gate.Unlock()
-    u := ensureUser(email)
+    u := ensureUser(canonicalMeterUser(email))
     if u.fenced {
         return errFenced
     }
     if existing := gate.sessions[id]; existing != nil {
-        if existing.email != email {
+        if existing.email != canonicalMeterUser(email) {
             return errors.New("experimental xmesh drain: session ID changed user")
         }
         // Reusing a live ID could leave an untracked transport open after
@@ -155,7 +167,7 @@ func Register(ctx context.Context, email string, stop func()) error {
         return errDuplicateSession
     }
     u.active[id] = stop
-    gate.sessions[id] = &trackedSession{email: email, stop: stop}
+    gate.sessions[id] = &trackedSession{email: canonicalMeterUser(email), stop: stop}
     return nil
 }
 
@@ -173,7 +185,7 @@ func BeginMeterWrite(email string) error {
     if !enabled || email == "" { return nil }
     gate.Lock()
     defer gate.Unlock()
-    u := ensureUser(email)
+    u := ensureUser(canonicalMeterUser(email))
     if u.fenced { return errFenced }
     u.writes++
     return nil
@@ -183,7 +195,7 @@ func EndMeterWrite(email string) {
     if !enabled || email == "" { return }
     gate.Lock()
     defer gate.Unlock()
-    u := ensureUser(email)
+    u := ensureUser(canonicalMeterUser(email))
     if u.writes <= 0 {
         panic("experimental xmesh drain: unbalanced tracked meter writes")
     }
@@ -197,7 +209,7 @@ func BeginMeterRead(email string) bool {
     if !enabled || email=="" { return true }
     gate.Lock()
     defer gate.Unlock()
-    u:=ensureUser(email)
+    u:=ensureUser(canonicalMeterUser(email))
     if u.fenced {return false}
     u.reads++
     return true
@@ -210,7 +222,7 @@ func EndMeterRead(email string) {
     if !enabled || email=="" { return }
     gate.Lock()
     defer gate.Unlock()
-    u:=ensureUser(email)
+    u:=ensureUser(canonicalMeterUser(email))
     if u.reads<=0 {panic("experimental xmesh drain: unbalanced metered reads")}
     u.reads--
     completeUserIfIdleLocked(u)
@@ -289,7 +301,7 @@ func state(email string, u *userState) result {
 
 func fence(ctx context.Context, email string) (result, error) {
     gate.Lock()
-    u := ensureUser(email)
+    u := ensureUser(canonicalMeterUser(email))
     var cancels []func()
     if !u.fenced {
         u.fenced = true

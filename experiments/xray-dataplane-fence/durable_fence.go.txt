@@ -26,7 +26,7 @@ type durableFenceRecord struct {
 }
 
 func durableFencePath(dir,email string) string {
-    digest:=sha256.Sum256([]byte(email))
+    digest:=sha256.Sum256([]byte(canonicalMeterUser(email)))
     return filepath.Join(dir,"fence-"+hex.EncodeToString(digest[:])+".json")
 }
 
@@ -91,7 +91,7 @@ func restoreDurableFences(dir string) error {
         return errors.New("cannot restore fences while authenticated sessions live")
     }
     for email:=range scopes {
-        u:=ensureUser(email)
+        u:=ensureUser(canonicalMeterUser(email))
         u.fenced=true
         completeUserIfIdleLocked(u)
     }
