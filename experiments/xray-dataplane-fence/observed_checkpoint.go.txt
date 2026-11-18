@@ -32,12 +32,21 @@ type checkpointScope struct {
     RevocationID string `json:"revocationId"`
 }
 
+type observedInboundMeter struct {
+    Email string `json:"email"`
+    UplinkBytes uint64 `json:"uplinkBytes"`
+    DownlinkBytes uint64 `json:"downlinkBytes"`
+}
+
 type observedCheckpoint struct {
     checkpointScope
     SchemaVersion int `json:"schemaVersion"`
     RuntimeID string `json:"runtimeId"`
     UplinkBytes uint64 `json:"uplinkBytes"`
     DownlinkBytes uint64 `json:"downlinkBytes"`
+    // Exact sorted raw per-inbound identities, NOT merely one combined
+    // counter. Node can independently compare this to signed policy scope.
+    InboundMeters []observedInboundMeter `json:"inboundMeters"`
     Drained bool `json:"drained"`
     // Deliberately false; callers MUST NOT treat the scope as signed proof.
     FinalMeterVerified bool `json:"finalMeterVerified"`
@@ -121,12 +130,38 @@ func loadCheckpoint(path string) (observedCheckpoint,error) {
     b,err := os.ReadFile(path)
     if err != nil { return existing,err }
     if err = json.Unmarshal(b,&existing); err != nil { return existing,err }
-    if existing.SchemaVersion != 2 || !validScope(existing.checkpointScope) ||
+    if existing.SchemaVersion != 3 || !validScope(existing.checkpointScope) ||
         !existing.Drained ||
-        existing.FinalMeterVerified || existing.RefundableBytes != 0 {
-        return existing,errors.New("unsupported or refundable existing checkpoint")
+        existing.FinalMeterVerified || existing.RefundableBytes != 0 ||
+        !validObservedInboundMeters(existing) {
+        return existing,errors.New("unsupported, incomplete or refundable existing checkpoint")
     }
     return existing,nil
+}
+
+// Meter rows must be sorted, unique and exactly sum to the checkpoint
+// totals. These are still just observational bytes, not terminal settlement.
+func validObservedInboundMeters(record observedCheckpoint) bool {
+    rows:=record.InboundMeters
+    if len(rows)==0 || len(rows)>16{return false}
+    const limit=uint64(1<<63-1)
+    var uplink,downlink uint64
+    previous:=""
+    sawRequest:=false
+    for _,row:=range rows {
+        if row.Email=="" || len(row.Email)>128 ||
+           canonicalMeterUser(row.Email)!=canonicalMeterUser(record.Email) ||
+           (previous!="" && row.Email<=previous) ||
+           row.UplinkBytes>limit-uplink || row.DownlinkBytes>limit-downlink {
+            return false
+        }
+        if row.Email==record.Email{sawRequest=true}
+        uplink+=row.UplinkBytes
+        downlink+=row.DownlinkBytes
+        previous=row.Email
+    }
+    return sawRequest && downlink<=limit-uplink &&
+        uplink==record.UplinkBytes && downlink==record.DownlinkBytes
 }
 
 // persistObservedCheckpoint is called ONLY after fence() has stopped new
@@ -174,6 +209,7 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     // have not been proven quiescent.
     foundRequestEmail:=false
     var uplink,downlink uint64
+    meters:=make([]observedInboundMeter,0,len(seenEmails))
     const maxSignedMeter=uint64(1<<63-1)
     read := func(alias,direction string)(uint64,error) {
         counter:=observed.manager.GetCounter("user>>>"+alias+">>>traffic>>>"+direction)
@@ -196,16 +232,22 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
         }
         uplink+=up
         downlink+=down
+        meters=append(meters,observedInboundMeter{
+            Email:alias,UplinkBytes:up,DownlinkBytes:down,
+        })
     }
     if !foundRequestEmail || downlink>maxSignedMeter-uplink {
         return empty,errors.New("missing request email or observed total overflow")
     }
     record:=observedCheckpoint{
         checkpointScope:scope,
-        SchemaVersion:2,
+        SchemaVersion:3,
         RuntimeID:observed.runtimeID,UplinkBytes:uplink,
-        DownlinkBytes:downlink,Drained:true,
+        DownlinkBytes:downlink,InboundMeters:meters,Drained:true,
         FinalMeterVerified:false,RefundableBytes:0,
+    }
+    if !validObservedInboundMeters(record) {
+        return empty,errors.New("invalid observed inbound meter scope")
     }
     path:=checkpointPath(observed.directory,email)
     if old,err:=loadCheckpoint(path);err==nil{
