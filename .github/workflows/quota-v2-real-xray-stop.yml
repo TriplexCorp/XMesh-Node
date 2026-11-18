@@ -47,4 +47,7 @@ jobs:
       - name: Prove signed revocation stop disables automatic restart and kills live traffic
         env:
           XMESH_DISPOSABLE_XRAY_CANARY: "1"
-        run: python3 tests/test_quota_v2_real_xray_stop.py
+        # Published Xray is a root-owned Docker process. The host's
+        # production Node agent runs as root; only this disposable test
+        # needs the same privilege to independently read /proc/<hostpid>.
+        run: sudo -n --preserve-env=GITHUB_ACTIONS,XMESH_DISPOSABLE_XRAY_CANARY python3 tests/test_quota_v2_real_xray_stop.py
