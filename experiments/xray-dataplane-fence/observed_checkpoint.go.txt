@@ -13,6 +13,7 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "sort"
     "sync"
 
     "github.com/xtls/xray-core/features/stats"
@@ -156,20 +157,49 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     gate.Lock()
     u:=gate.users[canonicalMeterUser(email)]
     drained:=u!=nil && u.fenced && u.closed && len(u.active)==0 && u.writes==0 && u.reads==0
+    var seenEmails []string
+    if u!=nil {
+        for alias:=range u.emails { seenEmails=append(seenEmails,alias) }
+    }
     gate.Unlock()
     if !drained { return empty,errors.New("cannot sample undrained user") }
-
-    read := func(direction string)(uint64,error) {
-        counter:=observed.manager.GetCounter("user>>>"+email+">>>traffic>>>"+direction)
-        if counter==nil { return 0,fmt.Errorf("missing %s counter",direction) }
+    if len(seenEmails)==0 || len(seenEmails)>16 {
+        return empty,errors.New("missing or unbounded observed inbound identities")
+    }
+    sort.Strings(seenEmails)
+    // Every observed account-bearing inbound must contribute to the sample.
+    // A single request-email read would undercount actual main+CDN traffic.
+    // Still NONFINAL: observed sessions are NOT an authenticated enumeration
+    // of every provisioned signed inbound, and unrelated background writers
+    // have not been proven quiescent.
+    foundRequestEmail:=false
+    var uplink,downlink uint64
+    const maxSignedMeter=uint64(1<<63-1)
+    read := func(alias,direction string)(uint64,error) {
+        counter:=observed.manager.GetCounter("user>>>"+alias+">>>traffic>>>"+direction)
+        if counter==nil { return 0,fmt.Errorf("missing %s counter for %s",direction,alias) }
         n:=counter.Value()
-        if n<0 { return 0,fmt.Errorf("negative %s counter",direction) }
+        if n<0 { return 0,fmt.Errorf("negative %s counter for %s",direction,alias) }
         return uint64(n),nil
     }
-    uplink,err:=read("uplink")
-    if err!=nil{return empty,err}
-    downlink,err:=read("downlink")
-    if err!=nil{return empty,err}
+    for _,alias:=range seenEmails {
+        if canonicalMeterUser(alias)!=canonicalMeterUser(email) {
+            return empty,errors.New("observed alias switched billed user")
+        }
+        if alias==email { foundRequestEmail=true }
+        up,err:=read(alias,"uplink")
+        if err!=nil{return empty,err}
+        down,err:=read(alias,"downlink")
+        if err!=nil{return empty,err}
+        if up>maxSignedMeter-uplink || down>maxSignedMeter-downlink {
+            return empty,errors.New("observed inbound byte totals overflow")
+        }
+        uplink+=up
+        downlink+=down
+    }
+    if !foundRequestEmail || downlink>maxSignedMeter-uplink {
+        return empty,errors.New("missing request email or observed total overflow")
+    }
     record:=observedCheckpoint{
         checkpointScope:scope,
         SchemaVersion:2,
