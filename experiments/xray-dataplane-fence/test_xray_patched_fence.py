@@ -280,6 +280,10 @@ def run(xray, transport):
             b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             echo_bytes(a,8192)
             echo_bytes(cdn,8192)
+            # The private StatsService remains available alongside both
+            # metered inbounds and the deliberately unlisted third listener.
+            before_unlisted = wait_counter(xray, api_port, EMAIL_A)
+            assert before_unlisted > 0
             # An omitted user-bearing inbound is a hard admission failure,
             # even BEFORE the user's actual signed revocation is delivered.
             try:
