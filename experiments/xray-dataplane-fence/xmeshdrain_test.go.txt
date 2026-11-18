@@ -243,3 +243,44 @@ func TestMeterWriteBarrierPreventsLateWrites(t *testing.T) {
         t.Fatalf("new metered write accepted after completion: %v",err)
     }
 }
+
+func TestMeterReadBarrierIncludesTimedOutAsyncReader(t *testing.T){
+    resetGate()
+    stream:=ctx(302)
+    stopped:=make(chan struct{})
+    if err:=Register(stream,"pending-read",func(){close(stopped)});err!=nil{
+        t.Fatal(err)
+    }
+    if !BeginMeterRead("pending-read"){t.Fatal("failed to start test read")}
+    outcome:=make(chan struct{info result;err error},1)
+    go func(){
+        bound,cancel:=context.WithTimeout(context.Background(),time.Second)
+        defer cancel()
+        info,err:=fence(bound,"pending-read")
+        outcome<-struct{info result;err error}{info,err}
+    }()
+    <-stopped
+    Finish(stream)
+    RouteFinish(stream)
+    if BeginMeterRead("pending-read"){
+        t.Fatal("revocation allowed a new metered read")
+    }
+    select {
+    case got:=<-outcome:
+        t.Fatalf("premature drain while timed-out read pending: %+v",got)
+    case <-time.After(50*time.Millisecond):
+    }
+    EndMeterRead("pending-read")
+    select {
+    case got:=<-outcome:
+        if got.err!=nil||!got.info.Drained||got.info.FinalMeterVerified||
+            got.info.Refundable {
+            t.Fatalf("completion falsely authorizes refundable bytes: %+v",got)
+        }
+    case <-time.After(2*time.Second):
+        t.Fatal("drain never completed after pending read was accounted")
+    }
+    if BeginMeterRead("pending-read"){
+        t.Fatal("read admission reopened after drain")
+    }
+}
