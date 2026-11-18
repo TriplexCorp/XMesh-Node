@@ -189,6 +189,8 @@ class SignedPolicyTests(unittest.TestCase):
             / "experiments/xray-dataplane-fence/sign_observation.py")
         signer = importlib.util.module_from_spec(signed_spec)
         signed_spec.loader.exec_module(signer)
+        # A real, independently obtained host PID is required by the signer.
+        observation["runtimeId"] = signer.trusted_runtime_identity(os.getpid())
         node_key = self.root / "node-identity-key.pem"
         node_pub = self.root / "node-identity-key.pub"
         subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519",
@@ -199,13 +201,14 @@ class SignedPolicyTests(unittest.TestCase):
         signed_dir = self.root / "signed-nonfinal"
         signed_dir.mkdir(mode=0o700)
         envelope = signer.create_observation(
-            self.state, 12, observation, node_key, signed_dir)
+            self.state, 12, observation, node_key, signed_dir, os.getpid())
         signed = signer.verify_envelope(envelope, 12, node_pub)
+        self.assertTrue(signed["liveRuntimeIndependentlyVerified"])
         self.assertFalse(signed["finalMeterVerified"])
         self.assertFalse(signed["settlementEligible"])
         self.assertEqual(signed["refundableBytes"], 0)
         self.assertEqual(signer.create_observation(
-            self.state, 12, observation, node_key, signed_dir), envelope)
+            self.state, 12, observation, node_key, signed_dir, os.getpid()), envelope)
         # Even correctly signed evidence must fail when the policy is forged.
         original_policy_bytes = (self.state / "policy-envelope.json").read_bytes()
         counterfeit = json.loads(original_policy_bytes)
@@ -214,7 +217,7 @@ class SignedPolicyTests(unittest.TestCase):
         try:
             with self.assertRaises(ValueError):
                 signer.create_observation(
-                    self.state, 12, observation, node_key, signed_dir)
+                    self.state, 12, observation, node_key, signed_dir, os.getpid())
         finally:
             (self.state / "policy-envelope.json").write_bytes(original_policy_bytes)
         tests = [
