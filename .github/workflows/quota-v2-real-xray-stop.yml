@@ -8,6 +8,8 @@ on:
       - 'tests/test_quota_v2_real_xray_stop.py'
       - 'tests/test_quota_v2_physical_stop_attestor.py'
       - 'experiments/quota-v2-physical-stop/attestor.py'
+      - 'experiments/quota-v2-physical-stop/stop_chain.py'
+      - 'tests/test_quota_v2_stop_chain.py'
       - 'tests/test_quota_v2_revocation_marker.py'
       - '.github/workflows/quota-v2-real-xray-stop.yml'
   push:
@@ -18,6 +20,8 @@ on:
       - 'tests/test_quota_v2_real_xray_stop.py'
       - 'tests/test_quota_v2_physical_stop_attestor.py'
       - 'experiments/quota-v2-physical-stop/attestor.py'
+      - 'experiments/quota-v2-physical-stop/stop_chain.py'
+      - 'tests/test_quota_v2_stop_chain.py'
       - 'tests/test_quota_v2_revocation_marker.py'
       - '.github/workflows/quota-v2-real-xray-stop.yml'
 permissions:
@@ -32,8 +36,9 @@ jobs:
           persist-credentials: false
       - name: Verify disposable test and production shell syntax
         run: |
-          python3 -m py_compile tests/test_quota_v2_real_xray_stop.py tests/test_quota_v2_physical_stop_attestor.py experiments/quota-v2-physical-stop/attestor.py
+          python3 -m py_compile tests/test_quota_v2_real_xray_stop.py tests/test_quota_v2_physical_stop_attestor.py tests/test_quota_v2_stop_chain.py experiments/quota-v2-physical-stop/attestor.py experiments/quota-v2-physical-stop/stop_chain.py
           python3 -m py_compile deploy/xmesh-quota-revocation-marker.py tests/test_quota_v2_revocation_marker.py
+          python3 tests/test_quota_v2_stop_chain.py
           python3 tests/test_quota_v2_physical_stop_attestor.py
           python3 tests/test_quota_v2_revocation_marker.py
           bash -n deploy/xmesh-xray-sync.sh
@@ -42,4 +47,7 @@ jobs:
       - name: Prove signed revocation stop disables automatic restart and kills live traffic
         env:
           XMESH_DISPOSABLE_XRAY_CANARY: "1"
-        run: python3 tests/test_quota_v2_real_xray_stop.py
+        # Published Xray is a root-owned Docker process. The host's
+        # production Node agent runs as root; only this disposable test
+        # needs the same privilege to independently read /proc/<hostpid>.
+        run: sudo -n --preserve-env=GITHUB_ACTIONS,XMESH_DISPOSABLE_XRAY_CANARY python3 tests/test_quota_v2_real_xray_stop.py
