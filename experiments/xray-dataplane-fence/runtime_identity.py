@@ -8,10 +8,12 @@ that the observed Xray process is currently alive, NOT that writers stopped.
 """
 import hashlib
 import hmac
+import json
 import os
 from pathlib import Path
 import re
 import select
+import subprocess
 
 DOMAIN = b"XMESH_XRAY_RUNTIME_PROC_V1\x00"
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -97,4 +99,52 @@ def verify_live_runtime(checkpoint, trusted_host_pid):
     actual = trusted_runtime_identity(trusted_host_pid)
     if not hmac.compare_digest(actual, claimed):
         raise ValueError("Xray runtime is not the independently verified live process")
+    return True
+
+
+def inspect_managed_xray():
+    """Independently obtain the currently RUNNING container's host PID.
+
+    Never accept a PID, start time, container ID or image name from the
+    checkpoint. Docker is authoritative only for process discovery here; it
+    is NOT a kernel byte-drain/physical-stop attestation.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .}}",
+             "xmesh-managed-xray"],
+            capture_output=True, text=True, timeout=5, check=True)
+        if not isinstance(result.stdout, str) or not 0 < len(result.stdout) < 1_000_000:
+            raise ValueError("invalid Docker inspect output size")
+        data = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise ValueError("trusted Docker managed Xray inspect unavailable") from exc
+    if not isinstance(data, dict) or data.get("Name") != "/xmesh-managed-xray":
+        raise ValueError("unexpected managed Xray container name")
+    cid = data.get("Id")
+    state = data.get("State")
+    if not isinstance(cid, str) or HEX64.fullmatch(cid) is None or (
+            not isinstance(state, dict) or state.get("Running") is not True):
+        raise ValueError("managed Xray is not an authenticated running container")
+    pid = state.get("Pid")
+    started = state.get("StartedAt")
+    if type(pid) is not int or pid <= 0 or (
+            not isinstance(started, str) or "T" not in started or
+            started.startswith("0001-01-01")):
+        raise ValueError("invalid managed Xray process or start time")
+    return (cid, started, pid)
+
+
+def verify_managed_xray_runtime(checkpoint):
+    """Double-inspect Docker around a kernel pidfd verification.
+
+    Caller does not get to specify the PID. If Docker replaces the container
+    while stats are sampled, signed evidence is refused. This validates
+    process provenance, NOT whether the physical dataplane has drained.
+    """
+    before = inspect_managed_xray()
+    verify_live_runtime(checkpoint, before[2])
+    after = inspect_managed_xray()
+    if before != after:
+        raise ValueError("managed Xray Docker runtime replaced during verification")
     return True
