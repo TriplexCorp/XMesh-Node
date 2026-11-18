@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_quota_v2_xray_user_inbound_drain import recv_exact, reserve_port  # noqa: E402
 from test_xray_patched_fence import (  # noqa: E402
-    command, await_socket, request_fence, wait_counter, query_counter, EMAIL_A, EMAIL_B,
+    command, await_socket, request_fence, wait_counter, query_counter, EMAIL_A, EMAIL_A_USER_KEY, EMAIL_B,
     test_lease_scope,
 )
 
@@ -139,7 +139,7 @@ def run(xray, xudp):
         assert root.stat().st_mode & 0o077 == 0
         control_socket = root / "drain.sock"
         revocation_id = str(uuid.uuid4())
-        checkpoint = root / ("observed-" + hashlib.sha256(EMAIL_A.encode()).hexdigest() + ".json")
+        checkpoint = root / ("observed-" + hashlib.sha256(EMAIL_A_USER_KEY.encode()).hexdigest() + ".json")
         echo = UDPEcho(("127.0.0.1", 0), UDPReply)
         threading.Thread(target=echo.serve_forever, daemon=True).start()
         echo_port = echo.server_address[1]
