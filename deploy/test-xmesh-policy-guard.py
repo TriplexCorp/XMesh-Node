@@ -101,15 +101,9 @@ class SignedPolicyTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("xmesh_signed_observation", GUARD)
         guarded = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guarded)
-        self.config["inbounds"][0]["tag"] = "vless-main"
-        self.config["inbounds"][0]["settings"]["clients"][0]["email"] = "xmesh-u1--vless-main"
-        # A separately authenticated CDN inbound is present in the signed
-        # COMMITTED config. It must be represented even if no session used it.
-        cdn = copy.deepcopy(self.config["inbounds"][0])
-        cdn["tag"] = "vless-cdn"
-        cdn["port"] = 28352
-        cdn["settings"]["clients"][0]["email"] = "xmesh-u1--vless-cdn"
-        self.config["inbounds"].append(cdn)
+        # Real supported dual-inbound layout: TCP VLESS + UDP Hysteria2,
+        # both provisioned to the same user in the SIGNED policy.
+        self.configure_dual_profile()
         self.policy["version"] = 2
         user = self.policy["users"][0]
         user["limitBytes"] = 1000
@@ -144,7 +138,7 @@ class SignedPolicyTests(unittest.TestCase):
             "revocationId": revoke["requestId"], "runtimeId": "a" * 64,
             "uplinkBytes": 70, "downlinkBytes": 80,
             "inboundMeters": [
-                {"email": "xmesh-u1--vless-cdn",
+                {"email": "xmesh-u1--hysteria-main",
                  "uplinkBytes": 40, "downlinkBytes": 40},
                 {"email": "xmesh-u1--vless-main",
                  "uplinkBytes": 30, "downlinkBytes": 40},
