@@ -22,6 +22,7 @@ from runtime_identity import (
     inspect_managed_xray, trusted_runtime_identity,
     verify_live_runtime, verify_managed_xray_runtime,
 )
+from meter_floor import verify_monotonic_meter_floor
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -116,14 +117,20 @@ def verify_envelope(envelope, node_id, public_key_path):
             "schemaVersion", "kind", "nodeId", "checkpoint",
             "checkpointSha256", "boundToCommittedPolicy",
             "completeSignedInboundScopeObserved",
-            "liveRuntimeIndependentlyVerified", "finalMeterVerified",
+            "liveRuntimeIndependentlyVerified", "monotonicLedgerFloorVerified",
+            "durableAbsoluteFloorBytes", "finalMeterVerified",
             "settlementEligible", "refundableBytes"} or (
-            type(p["schemaVersion"]) is not int or p["schemaVersion"] != 1 or
+            type(p["schemaVersion"]) is not int or p["schemaVersion"] != 2 or
             p["kind"] != KIND or type(p["nodeId"]) is not int or
             p["nodeId"] != node_id or node_id <= 0 or
             p["boundToCommittedPolicy"] is not True or
             p["completeSignedInboundScopeObserved"] is not True or
             p["liveRuntimeIndependentlyVerified"] is not True or
+            type(p["monotonicLedgerFloorVerified"]) is not bool or
+            type(p["durableAbsoluteFloorBytes"]) is not int or
+            not 0 <= p["durableAbsoluteFloorBytes"] < 2**63 or
+            (p["monotonicLedgerFloorVerified"] is False and
+             p["durableAbsoluteFloorBytes"] != 0) or
             p["finalMeterVerified"] is not False or
             p["settlementEligible"] is not False or
             type(p["refundableBytes"]) is not int or p["refundableBytes"] != 0):
@@ -273,13 +280,22 @@ def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir,
             bound.get("finalMeterVerified") is not False or
             bound.get("refundableBytes") != 0):
         raise ValueError("Xray checkpoint was not safely bound to signed policy")
+    # Production-style managed Docker path MUST verify this LIVE process's
+    # exact durable raw-counter floors. Direct PID mode is isolated test-only,
+    # and is explicitly labelled as having NO durable floor verification.
+    floor = None
+    if managed_before is not None:
+        floor = verify_monotonic_meter_floor(ledger, checkpoint, managed_before)
     p = {
-        "schemaVersion": 1, "kind": KIND, "nodeId": node_id,
+        "schemaVersion": 2, "kind": KIND, "nodeId": node_id,
         "checkpoint": checkpoint,
         "checkpointSha256": hashlib.sha256(canonical(checkpoint)).hexdigest(),
         "boundToCommittedPolicy": True,
         "completeSignedInboundScopeObserved": True,
         "liveRuntimeIndependentlyVerified": True,
+        "monotonicLedgerFloorVerified": floor is not None,
+        "durableAbsoluteFloorBytes": (
+            floor["durableAbsoluteBytes"] if floor is not None else 0),
         "finalMeterVerified": False, "settlementEligible": False,
         "refundableBytes": 0,
     }
@@ -289,6 +305,10 @@ def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir,
         if inspect_managed_xray() != managed_before:
             raise ValueError("managed Xray replaced before receipt publication")
         verify_live_runtime(checkpoint, managed_before[2])
+        latest = guard.load_json(Path(state_dir) / "policy-usage.json")
+        if canonical(latest) != canonical(ledger):
+            raise ValueError("durable Node meter changed during signing")
+        verify_monotonic_meter_floor(latest, checkpoint, managed_before)
     envelope = {"algorithm": "Ed25519", "payload": p,
                 "signature": signature}
     raw = canonical(envelope) + b"\n"
