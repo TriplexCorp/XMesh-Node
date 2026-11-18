@@ -157,7 +157,12 @@ def receipt_name(checkpoint):
                 raise ValueError("invalid observed lease identity")
         elif type(value) is not int or value <= 0:
             raise ValueError("invalid observed node/user/revision identity")
-    scope = {key: checkpoint[key] for key in fields}
+    # One immutable observation slot per actual reservation, not per
+    # revocation request/revision: changing request IDs cannot mint another
+    # supposedly independent receipt for the same held bytes.
+    reservation_fields = ["nodeId", "userId", "epoch",
+                          "meterEpoch", "reservationId"]
+    scope = {key: checkpoint[key] for key in reservation_fields}
     return "observed-" + hashlib.sha256(canonical(scope)).hexdigest() + ".json"
 
 
