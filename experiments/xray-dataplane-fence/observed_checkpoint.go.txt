@@ -63,6 +63,8 @@ func configureObservedCheckpoint(directory string) error {
     }
     var bytes [32]byte
     if _,err := rand.Read(bytes[:]); err != nil { return err }
+    // A recovered durable fence must be installed before Xray admits users.
+    if err:=restoreDurableFences(directory);err!=nil{return err}
     observed.Lock()
     defer observed.Unlock()
     observed.directory = directory
@@ -143,6 +145,10 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     defer observed.Unlock()
     if observed.directory=="" || observed.runtimeID=="" || observed.manager==nil {
         return empty,errors.New("observed checkpoint not configured")
+    }
+    intent,err:=readDurableFence(durableFencePath(observed.directory,email))
+    if err!=nil || intent.checkpointScope!=scope {
+        return empty,errors.New("no matching durable pre-stop denial for observation")
     }
     // The fencing gate is independent of this manager lock. Recheck the
     // post-drain state, but never interpret it as final byte accounting.
