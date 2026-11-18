@@ -46,6 +46,15 @@ func TestMultiInboundCoverageIsStrictAndIncludesBlankUserEmails(t *testing.T) {
         ScopedEmail(scoped("xmesh_stats_in", "same-account")) != "" {
         t.Fatal("private management StatsService was classified as a user stream")
     }
+    if err := RequireInboundCoverage(scoped("vless-cdn", "same-account")); err != nil {
+        t.Fatalf("explicit secondary inbound unexpectedly refused: %v", err)
+    }
+    if err := RequireInboundCoverage(scoped("vless-unlisted", "same-account")); err == nil {
+        t.Fatal("an untracked user-bearing inbound bypassed quota accounting")
+    }
+    if err := RequireInboundCoverage(context.Background()); err != nil {
+        t.Fatalf("no authenticated session should not be rejected: %v", err)
+    }
     if IsTrackedInbound(context.Background()) {
         t.Fatal("unattributed context was treated as a tracked session")
     }
