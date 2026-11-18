@@ -75,7 +75,10 @@ def begin_old_xray_probe():
         raise ValueError("old managed Xray is not alive for stop proof")
     if not hasattr(os, "pidfd_open"):
         raise ValueError("Linux pidfd support is required for stop proof")
-    pidfd = os.pidfd_open(pid, 0)
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+    except OSError as exc:
+        raise ValueError("old managed Xray exited before pidfd capture") from exc
     try:
         after = inspect_managed()
         if identity(after) != identity(before) or (
