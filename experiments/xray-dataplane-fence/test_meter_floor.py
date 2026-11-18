@@ -99,6 +99,8 @@ class MeterFloorTests(unittest.TestCase):
             lambda d: d["users"]["101"].update(total=-1),
             lambda d: d["inbounds"]['[101,"vless-main"]'].update(lastUp=True),
             lambda d: d["inbounds"]['[101,"vless-main"]'].update(totalDown=None),
+            lambda d: d["inbounds"]['[101,"vless-main"]'].update(totalUp=99),
+            lambda d: d["inbounds"]['[101,"vless-main"]'].update(totalDown=19),
             lambda d: d["users"]["101"].update(total=5),
         ):
             broken = copy.deepcopy(ledger)
