@@ -236,14 +236,11 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
     }
     // This is accessible only through a root-owned local Unix socket
     // in a disposable CI runner. It is NEVER a production Node control API.
-    var req struct {
-        Email string `json:"email"`
-        RevocationID string `json:"revocationId"`
-    }
-    r.Body = http.MaxBytesReader(w, r.Body, 512)
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
-        len(req.Email) == 0 || len(req.Email) > 128 ||
-        !validateRevocationID(req.RevocationID) {
+    var req checkpointScope
+    r.Body = http.MaxBytesReader(w, r.Body, 2048)
+    decoder:=json.NewDecoder(r.Body)
+    decoder.DisallowUnknownFields()
+    if err:=decoder.Decode(&req);err!=nil || !validScope(req) {
         http.Error(w, "invalid scoped request", http.StatusBadRequest)
         return
     }
@@ -255,7 +252,7 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
             http.StatusRequestTimeout)
         return
     }
-    observedRecord, err := persistObservedCheckpoint(req.Email,req.RevocationID)
+    observedRecord, err := persistObservedCheckpoint(req)
     if err != nil {
         // No trustworthy checkpoint was committed; do NOT issue a success
         // response even if the user's TCP sessions were physically stopped.

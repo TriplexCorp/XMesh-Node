@@ -18,14 +18,27 @@ import (
     "github.com/xtls/xray-core/features/stats"
 )
 
+// An observational receipt is scoped to a lease, not just an Xray email.
+// Caller-supplied scope is NOT a signed Node policy and never authorizes refunds.
+type checkpointScope struct {
+    Email string `json:"email"`
+    NodeID int64 `json:"nodeId"`
+    UserID int64 `json:"userId"`
+    Epoch string `json:"epoch"`
+    MeterEpoch string `json:"meterEpoch"`
+    ReservationID string `json:"reservationId"`
+    Revision int64 `json:"revision"`
+    RevocationID string `json:"revocationId"`
+}
+
 type observedCheckpoint struct {
-    SchemaVersion int    `json:"schemaVersion"`
-    Email string         `json:"email"`
-    RevocationID string  `json:"revocationId"`
-    RuntimeID string     `json:"runtimeId"`
-    UplinkBytes uint64   `json:"uplinkBytes"`
+    checkpointScope
+    SchemaVersion int `json:"schemaVersion"`
+    RuntimeID string `json:"runtimeId"`
+    UplinkBytes uint64 `json:"uplinkBytes"`
     DownlinkBytes uint64 `json:"downlinkBytes"`
-    Drained bool         `json:"drained"`
+    Drained bool `json:"drained"`
+    // Deliberately false; callers MUST NOT treat the scope as signed proof.
     FinalMeterVerified bool `json:"finalMeterVerified"`
     RefundableBytes uint64 `json:"refundableBytes"`
 }
@@ -76,6 +89,18 @@ func validateRevocationID(id string) bool {
     return true
 }
 
+func validScope(scope checkpointScope) bool {
+    if scope.Email=="" || len(scope.Email)>128 || scope.NodeID<=0 ||
+        scope.UserID<=0 || scope.Revision<=0 { return false }
+    ids:=[]string{scope.Epoch,scope.MeterEpoch,scope.ReservationID,scope.RevocationID}
+    for _,id:=range ids {
+        if !validateRevocationID(id) { return false }
+        // A nil or all-zero UUID cannot identify a real lease or revocation.
+        if id=="00000000-0000-0000-0000-000000000000" { return false }
+    }
+    return true
+}
+
 func checkpointPath(directory,email string) string {
     digest := sha256.Sum256([]byte(email))
     return filepath.Join(directory,"observed-"+hex.EncodeToString(digest[:])+".json")
@@ -92,7 +117,8 @@ func loadCheckpoint(path string) (observedCheckpoint,error) {
     b,err := os.ReadFile(path)
     if err != nil { return existing,err }
     if err = json.Unmarshal(b,&existing); err != nil { return existing,err }
-    if existing.SchemaVersion != 1 || !existing.Drained ||
+    if existing.SchemaVersion != 2 || !validScope(existing.checkpointScope) ||
+        !existing.Drained ||
         existing.FinalMeterVerified || existing.RefundableBytes != 0 {
         return existing,errors.New("unsupported or refundable existing checkpoint")
     }
@@ -104,14 +130,15 @@ func loadCheckpoint(path string) (observedCheckpoint,error) {
 // original Xray StatsService counters while Xray is still running. Such a
 // sample remains nonterminal because not all writers have proven completion.
 //
-// A repeated request must have the identical (email, runtime, revocation,
+// A repeated request must have the identical (full lease scope, runtime,
 // counters) tuple. A changed meter or process incarnation invalidates the
 // old snapshot rather than silently overwriting/refunding it.
-func persistObservedCheckpoint(email,revocationID string) (observedCheckpoint,error) {
+func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error) {
     var empty observedCheckpoint
-    if email=="" || len(email)>128 || !validateRevocationID(revocationID) {
-        return empty,errors.New("invalid observed checkpoint identity")
+    if !validScope(scope) {
+        return empty,errors.New("invalid observed checkpoint lease scope")
     }
+    email:=scope.Email
     observed.Lock()
     defer observed.Unlock()
     if observed.directory=="" || observed.runtimeID=="" || observed.manager==nil {
@@ -137,7 +164,8 @@ func persistObservedCheckpoint(email,revocationID string) (observedCheckpoint,er
     downlink,err:=read("downlink")
     if err!=nil{return empty,err}
     record:=observedCheckpoint{
-        SchemaVersion:1,Email:email,RevocationID:revocationID,
+        checkpointScope:scope,
+        SchemaVersion:2,
         RuntimeID:observed.runtimeID,UplinkBytes:uplink,
         DownlinkBytes:downlink,Drained:true,
         FinalMeterVerified:false,RefundableBytes:0,

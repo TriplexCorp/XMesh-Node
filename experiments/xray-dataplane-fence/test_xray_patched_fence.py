@@ -95,8 +95,23 @@ def wait_counter(xray, port, email, minimum=1):
     )
 
 
-def request_fence(path, email, revocation_id, expected_status=200):
-    message = json.dumps({"email":email, "revocationId":revocation_id}).encode()
+# Fake scope is supplied only by the disposable test fixture.
+# It is NOT authenticated signed Node lease evidence.
+def test_lease_scope(email, revocation_id, *, node_id=201, user_id=101,
+                     revision=7):
+    return {"email": email, "nodeId": node_id, "userId": user_id,
+            "epoch": "11111111-1111-4111-8111-111111111111",
+            "meterEpoch": "22222222-2222-4222-8222-222222222222",
+            "reservationId": "33333333-3333-4333-8333-333333333333",
+            "revision": revision, "revocationId": revocation_id}
+
+
+def request_fence(path, email, revocation_id, expected_status=200, *,
+                  scope_override=None):
+    scope = test_lease_scope(email, revocation_id)
+    if scope_override:
+        scope.update(scope_override)
+    message = json.dumps(scope).encode()
     request = (
         b"POST /v1/fence HTTP/1.1\r\nHost: localhost\r\n"
         b"Connection: close\r\nContent-Type: application/json\r\n"
@@ -251,8 +266,10 @@ def run(xray, transport):
             observation=proof["observedCheckpoint"]
             assert observation["email"] == EMAIL_A
             assert observation["revocationId"] == revocation_id
+            for k, v in test_lease_scope(EMAIL_A,revocation_id).items():
+                assert observation[k] == v, (k,observation)
             assert len(observation["runtimeId"]) == 64
-            assert observation["schemaVersion"] == 1
+            assert observation["schemaVersion"] == 2
             assert observation["drained"] and not observation["finalMeterVerified"]
             assert observation["refundableBytes"] == 0
             assert (observation["uplinkBytes"] + observation["downlinkBytes"]) >= before_a
@@ -291,6 +308,14 @@ def run(xray, transport):
             conflicting=request_fence(socket_file,EMAIL_A,str(uuid.uuid4()),
                                       expected_status=409)
             assert b"checkpoint" in conflicting,conflicting
+            for wrong in ({"nodeId": 999}, {"userId": 777},
+                          {"epoch": "44444444-4444-4444-8444-444444444444"},
+                          {"meterEpoch": "55555555-5555-4555-8555-555555555555"},
+                          {"reservationId": "66666666-6666-4666-8666-666666666666"},
+                          {"revision": 8}):
+                mismatch = request_fence(socket_file,EMAIL_A,revocation_id,
+                                         expected_status=409,scope_override=wrong)
+                assert b"checkpoint" in mismatch, (wrong,mismatch)
             assert json.loads(journal_file.read_text())==observation
             assert server.poll() is None,"Xray server exited during selective fence"
             # Data remains after shutting down the Xray process: this

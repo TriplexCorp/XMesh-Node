@@ -13,6 +13,16 @@ import (
 
 const testRevocation = "c5208c19-29bf-41b7-b90d-919574e01242"
 
+func testScope(email,revocation string) checkpointScope {
+    return checkpointScope{
+        Email:email,NodeID:201,UserID:101,Revision:7,
+        Epoch:"11111111-1111-4111-8111-111111111111",
+        MeterEpoch:"22222222-2222-4222-8222-222222222222",
+        ReservationID:"33333333-3333-4333-8333-333333333333",
+        RevocationID:revocation,
+    }
+}
+
 func setupCheckpoint(t *testing.T,email string) (string,func(int64,int64)) {
     t.Helper()
     resetGate()
@@ -46,9 +56,10 @@ func setupCheckpoint(t *testing.T,email string) (string,func(int64,int64)) {
 func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
     dir,add:=setupCheckpoint(t,"alice")
     add(100,230)
-    record,err:=persistObservedCheckpoint("alice",testRevocation)
+    record,err:=persistObservedCheckpoint(testScope("alice",testRevocation))
     if err!=nil{t.Fatal(err)}
-    if record.UplinkBytes!=100||record.DownlinkBytes!=230||!record.Drained||
+    if record.SchemaVersion!=2||record.checkpointScope!=testScope("alice",testRevocation)||
+       record.UplinkBytes!=100||record.DownlinkBytes!=230||!record.Drained||
        record.FinalMeterVerified||record.RefundableBytes!=0{
         t.Fatalf("invalid observed-only record: %+v",record)
     }
@@ -58,17 +69,17 @@ func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
     if stat.Mode().Perm()&0077!=0{t.Fatal("world-readable journal")}
     contents,err:=os.ReadFile(file)
     if err!=nil{t.Fatal(err)}
-    repeat,err:=persistObservedCheckpoint("alice",testRevocation)
+    repeat,err:=persistObservedCheckpoint(testScope("alice",testRevocation))
     if err!=nil||repeat!=record{t.Fatalf("non-idempotent retry: %+v %v",repeat,err)}
     add(1,0)
-    if _,err:=persistObservedCheckpoint("alice",testRevocation);err==nil{
+    if _,err:=persistObservedCheckpoint(testScope("alice",testRevocation));err==nil{
         t.Fatal("late counter growth silently accepted immutable observation")
     }
-    if _,err:=persistObservedCheckpoint("alice","d5208c19-29bf-41b7-b90d-919574e01242");err==nil{
+    if _,err:=persistObservedCheckpoint(testScope("alice","d5208c19-29bf-41b7-b90d-919574e01242"));err==nil{
         t.Fatal("different revocation reused checkpoint")
     }
     if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
-    if _,err:=persistObservedCheckpoint("alice",testRevocation);err==nil{
+    if _,err:=persistObservedCheckpoint(testScope("alice",testRevocation));err==nil{
         t.Fatal("different Xray incarnation reused checkpoint")
     }
     after,err:=os.ReadFile(file)
@@ -78,10 +89,10 @@ func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
 
 func TestObservedScopeMissingStatsAndInvalidIdentity(t *testing.T){
     dir,_:=setupCheckpoint(t,"bob")
-    if _,err:=persistObservedCheckpoint("bob","bad-request");err==nil{
+    if _,err:=persistObservedCheckpoint(testScope("bob","bad-request"));err==nil{
         t.Fatal("accepted malformed revocation identity")
     }
-    if _,err:=persistObservedCheckpoint("missing",testRevocation);err==nil{
+    if _,err:=persistObservedCheckpoint(testScope("missing",testRevocation));err==nil{
         t.Fatal("accepted user with no drained session/counters")
     }
     if _,err:=os.Lstat(checkpointPath(dir,"missing"));!errors.Is(err,os.ErrNotExist){
@@ -100,7 +111,7 @@ func TestObservedSymlinkRefusedAndNoVictimOverwrite(t *testing.T){
     victim:=filepath.Join(dir,"victim")
     if err:=os.WriteFile(victim,[]byte("UNCHANGED"),0600);err!=nil{t.Fatal(err)}
     if err:=os.Symlink(victim,checkpointPath(dir,"carol"));err!=nil{t.Fatal(err)}
-    if _,err:=persistObservedCheckpoint("carol",testRevocation);err==nil{
+    if _,err:=persistObservedCheckpoint(testScope("carol",testRevocation));err==nil{
         t.Fatal("existing symlink must fail closed")
     }
     b,err:=os.ReadFile(victim)
@@ -117,7 +128,7 @@ func TestConcurrentObservedRetryDoesNotReplace(t *testing.T) {
         wg.Add(1)
         go func(){
             defer wg.Done()
-            record,err:=persistObservedCheckpoint("dave",testRevocation)
+            record,err:=persistObservedCheckpoint(testScope("dave",testRevocation))
             if err!=nil || record.FinalMeterVerified || record.RefundableBytes!=0 {
                 mu.Lock();failed++;mu.Unlock()
             }
@@ -126,4 +137,47 @@ func TestConcurrentObservedRetryDoesNotReplace(t *testing.T) {
     wg.Wait()
     if failed!=0{t.Fatalf("concurrent idempotence failures: %d",failed)}
     if _,err:=os.Lstat(checkpointPath(dir,"dave"));err!=nil{t.Fatal(err)}
+}
+
+func TestObservedLeaseScopeFailClosed(t *testing.T){
+    dir,_:=setupCheckpoint(t,"scoped")
+    valid:=testScope("scoped",testRevocation)
+    if !validScope(valid) { t.Fatal("valid lease scope was rejected") }
+    wrong:=[]checkpointScope{}
+    corrupt:=func(f func(*checkpointScope)){ cp:=valid; f(&cp); wrong=append(wrong,cp) }
+    corrupt(func(v *checkpointScope){v.NodeID=0})
+    corrupt(func(v *checkpointScope){v.UserID=-1})
+    corrupt(func(v *checkpointScope){v.Revision=0})
+    corrupt(func(v *checkpointScope){v.Epoch="00000000-0000-0000-0000-000000000000"})
+    corrupt(func(v *checkpointScope){v.MeterEpoch="broken"})
+    corrupt(func(v *checkpointScope){v.ReservationID=""})
+    corrupt(func(v *checkpointScope){v.RevocationID="broken"})
+    corrupt(func(v *checkpointScope){v.Email=""})
+    for _,cp:=range wrong {
+        if validScope(cp) {t.Fatalf("accepted invalid scope: %+v",cp)}
+        if _,err:=persistObservedCheckpoint(cp);err==nil {
+            t.Fatalf("persisted invalid lease scope: %+v",cp)
+        }
+    }
+    saved,err:=persistObservedCheckpoint(valid)
+    if err!=nil {t.Fatal(err)}
+    assertChanged:=func(name string, f func(*checkpointScope)){
+        t.Helper()
+        cp:=valid
+        f(&cp)
+        if _,err:=persistObservedCheckpoint(cp);err==nil{
+            t.Fatalf("replayed checkpoint with substituted %s",name)
+        }
+        actual,err:=loadCheckpoint(checkpointPath(dir,valid.Email))
+        if err!=nil || actual!=saved {
+            t.Fatalf("original journal was changed: %+v %v",actual,err)
+        }
+    }
+    assertChanged("node",func(x *checkpointScope){x.NodeID++})
+    assertChanged("user",func(x *checkpointScope){x.UserID++})
+    assertChanged("epoch",func(x *checkpointScope){x.Epoch="44444444-4444-4444-8444-444444444444"})
+    assertChanged("meter",func(x *checkpointScope){x.MeterEpoch="55555555-5555-4555-8555-555555555555"})
+    assertChanged("reservation",func(x *checkpointScope){x.ReservationID="66666666-6666-4666-8666-666666666666"})
+    assertChanged("revision",func(x *checkpointScope){x.Revision++})
+    assertChanged("revocation",func(x *checkpointScope){x.RevocationID="77777777-7777-4777-8777-777777777777"})
 }

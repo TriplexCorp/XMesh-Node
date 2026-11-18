@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_quota_v2_xray_user_inbound_drain import recv_exact, reserve_port  # noqa: E402
 from test_xray_patched_fence import (  # noqa: E402
     command, await_socket, request_fence, wait_counter, query_counter, EMAIL_A, EMAIL_B,
+    test_lease_scope,
 )
 
 
@@ -109,7 +110,7 @@ def exchange_udp(association, echo_port, expect_reply, tag):
 
 def inspect_fence_replay(path, email, revocation_id):
     """Return status and raw bytes. Late UDP/XUDP traffic must yield 409."""
-    payload = json.dumps({"email": email, "revocationId": revocation_id}).encode()
+    payload = json.dumps(test_lease_scope(email, revocation_id)).encode()
     request = (b"POST /v1/fence HTTP/1.1\r\nHost: localhost\r\n"
                b"Connection: close\r\nContent-Type: application/json\r\n"
                + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
@@ -224,6 +225,9 @@ def run(xray, xudp):
             observation = proof["observedCheckpoint"]
             assert observation["refundableBytes"] == 0
             assert observation["revocationId"] == revocation_id
+            assert observation["schemaVersion"] == 2
+            for key,value in test_lease_scope(EMAIL_A,revocation_id).items():
+                assert observation[key] == value
             assert observation["uplinkBytes"] + observation["downlinkBytes"] >= before_a
             assert checkpoint.is_file()
             assert json.loads(checkpoint.read_text()) == observation
