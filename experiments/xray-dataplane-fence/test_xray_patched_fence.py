@@ -425,11 +425,86 @@ def run(xray, transport):
                 assert b"durable fence" in mismatch, (wrong,mismatch)
             assert json.loads(journal_file.read_text())==observation
             assert server.poll() is None,"Xray server exited during selective fence"
+            # The real upstream StatsService --reset endpoint calls Counter.Set.
+            # Its direct user-byte mutation bypasses dispatcher read/write
+            # wrappers, and MUST first fsync a durable discontinuity marker.
+            taint_file=root/("taint-"+hashlib.sha256(EMAIL_A_USER_KEY.encode()).hexdigest()+".json")
+            assert not taint_file.exists()
+            raw_name=f"user>>>{EMAIL_A}>>>traffic>>>uplink"
+            reset=command(xray,"api","stats",f"--server=127.0.0.1:{api_port}",
+                          "-name",raw_name,"-reset")
+            reset_value=json.loads(reset.stdout)["stat"]
+            assert reset_value["name"]==raw_name and int(reset_value["value"])>0, reset_value
+            assert taint_file.is_file() and taint_file.stat().st_mode&0o077==0
+            taint_disk=taint_file.read_bytes()
+            taint=json.loads(taint_disk)
+            assert taint=={"schemaVersion":1,"canonicalUser":EMAIL_A_USER_KEY},taint
+            # A second reset (Set(0) on already zero) must not remove evidence.
+            command(xray,"api","stats",f"--server=127.0.0.1:{api_port}",
+                    "-name",raw_name,"-reset")
+            assert taint_file.read_bytes()==taint_disk
+            poisoned=request_fence(socket_file,EMAIL_A,revocation_id,
+                                   expected_status=409)
+            assert b"late Xray StatsService counter mutation" in poisoned,poisoned
+            assert json.loads(journal_file.read_text())==observation
+            # User B has a different accounting identity, and remains served.
+            assert probe_echo(b),"Raw StatsService reset for A blocked unrelated user B"
+
             # Data remains after shutting down the Xray process: this
             # verifies persistence, not a terminal-byte correctness barrier.
             server.terminate()
             server.wait(timeout=5)
             assert json.loads(journal_file.read_text())==observation
+            assert taint_file.read_bytes()==taint_disk
+            if transport=="tcp":
+                # A truly new Linux Xray PID + StatsService starts from the
+                # old *signed-config test fixture*, without any user-A bytes.
+                # Recovery must restore root-private taint before admission;
+                # otherwise the identical old checkpoint might look valid.
+                server=subprocess.Popen([xray,"run","-config",str(server_json)],
+                                        stdout=log_a,stderr=subprocess.STDOUT,env=env)
+                deadline=time.monotonic()+15
+                while time.monotonic()<deadline:
+                    if server.poll() is not None:
+                        raise AssertionError("Xray refused a valid post-taint restart")
+                    try:
+                        with socket.socket(socket.AF_UNIX) as probe:
+                            probe.settimeout(.5)
+                            probe.connect(str(socket_file))
+                        break
+                    except OSError:
+                        time.sleep(.1)
+                else:
+                    raise AssertionError("Xray did not restore its private listener")
+                assert taint_file.read_bytes()==taint_disk
+                post_restart=request_fence(socket_file,EMAIL_A,revocation_id,
+                                           expected_status=409)
+                assert b"late Xray StatsService counter mutation" in post_restart,post_restart
+                old_a=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
+                try:
+                    assert not probe_echo(old_a),"Reboot reopened revoked A despite taint"
+                finally:
+                    old_a.close()
+                # B must still authenticate and send data after the real
+                # Xray process restart.
+                deadline=time.monotonic()+12
+                b_recovered=False
+                while time.monotonic()<deadline and not b_recovered:
+                    fresh_b=None
+                    try:
+                        fresh_b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
+                        b_recovered=probe_echo(fresh_b)
+                    except (OSError,AssertionError,TimeoutError):
+                        pass
+                    finally:
+                        if fresh_b is not None:
+                            fresh_b.close()
+                    if not b_recovered:
+                        time.sleep(.2)
+                assert b_recovered,"Reboot blocked unrelated user B"
+                server.terminate()
+                server.wait(timeout=5)
+                assert taint_file.read_bytes()==taint_disk
             report={
                 "patchedXray":"a4a3dff5b20c2faae567b742c172c7b95e75c083",
                 "testedTransport":transport,
@@ -447,6 +522,10 @@ def run(xray, transport):
                 "userABeforeFenceBytes":before_a,"userAAfterFenceBytes":after_a,
                 "userBAfterFenceBytes":after_b,
                 "boundedPostDrainMainCDNBytesStable":True,
+                "realStatsServiceResetDurablyTainted":True,
+                "realStatsServiceResetReplayDenied":True,
+                "realStatsServiceTaintSurvivedExit":True,
+                "realXrayRestartRestoresTaint":transport=="tcp",
                 "boundedStabilityStillNotTerminalMeter":True,
                 "observedJournalFsynced":True,
                 "observedJournalSurvivedProcessExit":True,
