@@ -200,7 +200,7 @@ class StopChainTests(unittest.TestCase):
         original["payload"]["durableAbsoluteFloorBytes"] = 0
         original["signature"] = observed.sign_bytes(
             self.key, observed.DOMAIN + observed.canonical(original["payload"]))
-        bad_bytes = observed.canonical(original) + b"\\n"
+        bad_bytes = observed.canonical(original) + b"\n"
         path = self.observed / observed.receipt_name(self.cp)
         path.write_bytes(bad_bytes)
         probe = None
