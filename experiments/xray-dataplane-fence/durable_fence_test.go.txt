@@ -11,6 +11,31 @@ import (
     "testing"
 )
 
+func TestCanonicalUserDenyRecoveredAcrossSignedInboundAliases(t *testing.T) {
+    main := "xmesh-u101--vless-share"
+    cdn := "xmesh-u101--vless-cdn"
+    if durableFencePath("/tmp",main) != durableFencePath("/tmp",cdn) ||
+        checkpointPath("/tmp",main) != checkpointPath("/tmp",cdn) {
+        t.Fatal("one signed user can create separate main and CDN revocation slots")
+    }
+    dir,_ := setupCheckpoint(t,main)
+    // setupCheckpoint persists the primary email's signed-scope fence.
+    before,err := readDurableFence(durableFencePath(dir,main))
+    if err!=nil || before.Email!=main {t.Fatalf("untrusted durable fence: %v",err)}
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    if err:=Register(ctx(901),cdn,func(){});!errors.Is(err,errFenced){
+        t.Fatalf("restarted Xray admitted same user via alternate CDN email: %v",err)
+    }
+    if err:=Register(ctx(902),"xmesh-u102--vless-cdn",func(){});err!=nil{
+        t.Fatalf("unrelated billing user was blocked: %v",err)
+    }
+    altered:=testScope(cdn,testRevocation)
+    if err:=commitDurableFence(altered);err==nil{
+        t.Fatal("different CDN email overwrote a stable user fence")
+    }
+}
+
 func TestDurableFenceRecoveredBeforeAdmission(t *testing.T) {
     dir,_:=setupCheckpoint(t,"persistent")
     scope:=testScope("persistent",testRevocation)
