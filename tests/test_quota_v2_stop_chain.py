@@ -131,7 +131,7 @@ class StopChainTests(unittest.TestCase):
             probe.close()
             raise
 
-    def complete(self, bound, state=None, **overrides):
+    def complete(self, bound, **overrides):
         # The pidfd comes from an actual now-exited subprocess, while Docker
         # identity is deliberately mocked to exercise adversarial races.
         with patch.object(attestor, "inspect_managed",
@@ -194,6 +194,25 @@ class StopChainTests(unittest.TestCase):
                         probe, self.cp, self.observed, 10, self.pub)
         self.assertEqual(list(self.stopped.iterdir()), [])
 
+    def test_direct_pid_fixture_with_no_signed_durable_floor_refused(self):
+        original = observed.strict_json(self.original)
+        original["payload"]["monotonicLedgerFloorVerified"] = False
+        original["payload"]["durableAbsoluteFloorBytes"] = 0
+        original["signature"] = observed.sign_bytes(
+            self.key, observed.DOMAIN + observed.canonical(original["payload"]))
+        bad_bytes = observed.canonical(original) + b"\\n"
+        path = self.observed / observed.receipt_name(self.cp)
+        path.write_bytes(bad_bytes)
+        probe = None
+        with patch.object(attestor, "inspect_managed",
+                          side_effect=[self.before, self.before]):
+            probe = attestor.begin_old_xray_probe()
+        with probe, patch.object(attestor, "inspect_managed",
+                                 return_value=self.before):
+            with self.assertRaisesRegex(ValueError, "incomplete signed"):
+                stop_chain.prepare_old_process_stop(
+                    probe, self.cp, self.observed, NODE_ID, self.pub)
+
     def test_observation_tamper_before_stop_publication_refused(self):
         probe, bound = self.bound()
         with probe:
@@ -205,13 +224,11 @@ class StopChainTests(unittest.TestCase):
         self.assertEqual(list(self.stopped.iterdir()), [])
 
     def test_swapped_or_restarted_docker_after_stop_refused(self):
-        for name in ("different-container", "restarted"):
-            with self.subTest(name=name):
-                if self.child.poll() is not None:
-                    break
-                probe, bound = self.bound()
-                with probe:
-                    self.stop_child()
+        probe, bound = self.bound()
+        with probe:
+            self.stop_child()
+            for name in ("different-container", "restarted"):
+                with self.subTest(name=name):
                     wrong = copy.deepcopy(self.after)
                     if name == "different-container":
                         wrong["Id"] = "b" * 64
@@ -220,7 +237,7 @@ class StopChainTests(unittest.TestCase):
                         wrong["State"]["Pid"] = 999999
                     with self.assertRaises(ValueError):
                         self.complete(bound, inspections=[wrong] * 3)
-                self.assertEqual(list(self.stopped.iterdir()), [])
+            self.assertEqual(list(self.stopped.iterdir()), [])
 
     def test_marker_disappears_before_chain_publication(self):
         probe, bound = self.bound()
