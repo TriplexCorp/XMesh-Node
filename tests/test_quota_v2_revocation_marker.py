@@ -3,7 +3,6 @@
 import importlib.util
 import os
 from pathlib import Path
-import shutil
 import stat
 import subprocess
 import sys
@@ -95,7 +94,7 @@ class DurableRevocationMarkerTests(unittest.TestCase):
     def test_link_publication_failure_cannot_acknowledge_revocation(self):
         with mock.patch.object(marker.os, "link", side_effect=OSError("disk/link error")):
             with self.assertRaises(OSError):
-                marker.main_for_test("arm", self.state)
+                marker.operate("arm", self.state)
         self.assertFalse((self.state / marker.MARKER).exists())
         self.assertEqual(list(self.state.glob(".quota-v2-intent-*")), [])
 
@@ -107,7 +106,7 @@ class DurableRevocationMarkerTests(unittest.TestCase):
             return original_fsync(fd)
         with mock.patch.object(marker.os, "fsync", side_effect=fail_dir_sync):
             with self.assertRaisesRegex(OSError, "directory fsync failure"):
-                marker.main_for_test("arm", self.state)
+                marker.operate("arm", self.state)
         # A visible unacknowledged link is conservative; a retry MUST fsync
         # the existing directory and not replace the previously linked file.
         path = self.state / marker.MARKER
@@ -120,7 +119,7 @@ class DurableRevocationMarkerTests(unittest.TestCase):
     def test_short_or_failed_write_never_creates_denial(self):
         with mock.patch.object(marker.os, "write", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                marker.main_for_test("arm", self.state)
+                marker.operate("arm", self.state)
         self.assertFalse((self.state / marker.MARKER).exists())
         self.assertEqual(list(self.state.glob(".quota-v2-intent-*")), [])
 
