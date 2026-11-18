@@ -87,7 +87,7 @@ func configureObservedCheckpoint(directory string) error {
 func BindStatsManager(manager stats.Manager) {
     if !enabled { return }
     audited, ok := manager.(interface {
-        SetExperimentalCounterMutationAudit(func(string, func() int64) int64) error
+        SetExperimentalCounterMutationAudit(func(string, bool, func() int64) int64) error
     })
     if !ok { panic("experimental StatsService missing mandatory counter audit") }
     if err := audited.SetExperimentalCounterMutationAudit(AuditRawCounterMutation); err != nil {
@@ -260,7 +260,7 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     }
     if !drained { return empty,errors.New("cannot sample undrained user") }
     if u.lateCounterMutation {
-        return empty,errors.New("late Xray StatsService counter mutation after fence")
+        return empty,errors.New("unsafe Xray StatsService counter mutation or reset")
     }
     if len(seenEmails)==0 || len(seenEmails)>16 {
         return empty,errors.New("missing or unbounded observed inbound identities")

@@ -6,7 +6,9 @@ on:
       - 'experiments/xray-dataplane-fence/**'
       - '.github/workflows/xray-dataplane-fence-experiment.yml'
   push:
-    branches: [main]
+    # Test sensitive Xray changes on every pushed branch, even when a PR
+    # created by an automation token does not emit a pull_request workflow.
+    branches: ['**']
     paths:
       - 'experiments/xray-dataplane-fence/**'
       - '.github/workflows/xray-dataplane-fence-experiment.yml'

@@ -314,14 +314,14 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
         """type Counter struct {
     value int64
     experimentalName string
-    experimentalAudit func(string, func() int64) int64
+    experimentalAudit func(string, bool, func() int64) int64
 }""",
     )
     counter = replace_once(
         counter,
         "return atomic.SwapInt64(&c.value, newValue)",
         """if c.experimentalAudit != nil {
-        return c.experimentalAudit(c.experimentalName, func() int64 {
+        return c.experimentalAudit(c.experimentalName, true, func() int64 {
             return atomic.SwapInt64(&c.value, newValue)
         })
     }
@@ -331,7 +331,7 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
         counter,
         "return atomic.AddInt64(&c.value, delta)",
         """if c.experimentalAudit != nil && delta != 0 {
-        return c.experimentalAudit(c.experimentalName, func() int64 {
+        return c.experimentalAudit(c.experimentalName, delta < 0, func() int64 {
             return atomic.AddInt64(&c.value, delta)
         })
     }
@@ -344,14 +344,14 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     manager = replace_once(
         manager,
         "\tcounters   map[string]*Counter\n",
-        "\tcounters   map[string]*Counter\n\tcounterAudit func(string, func() int64) int64\n",
+        "\tcounters   map[string]*Counter\n\tcounterAudit func(string, bool, func() int64) int64\n",
     )
     manager = replace_once(
         manager,
         "// RegisterCounter implements stats.Manager.",
         """// Refuse binding after user counters have begun accumulating bytes.
 func (m *Manager) SetExperimentalCounterMutationAudit(
-    audit func(string, func() int64) int64,
+    audit func(string, bool, func() int64) int64,
 ) error {
     m.access.Lock()
     defer m.access.Unlock()
@@ -363,6 +363,27 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
 }
 
 // RegisterCounter implements stats.Manager.""",
+    )
+    manager = replace_once(
+        manager,
+        '\t"sync"\n',
+        '\t"sync"\n\t"strings"\n',
+    )
+    manager = replace_once(
+        manager,
+        'func (m *Manager) UnregisterCounter(name string) error {\n\tm.access.Lock()\n\tdefer m.access.Unlock()\n',
+        """func (m *Manager) UnregisterCounter(name string) error {
+    m.access.Lock()
+    defer m.access.Unlock()
+    // Never discard/replace a raw per-user byte counter in the audited
+    // experimental runtime. A new counter with the same name starts at 0
+    // and would make a stable sampled meter silently undercount earlier use.
+    if m.counterAudit != nil && strings.HasPrefix(name, "user>>>") &&
+        (strings.HasSuffix(name, ">>>traffic>>>uplink") ||
+         strings.HasSuffix(name, ">>>traffic>>>downlink")) {
+        return errors.New("experimental Xray user byte counter cannot be unregistered")
+    }
+""",
     )
     if manager.count("\tc := new(Counter)\n") != 2:
         raise ValueError("Pinned StatsService changed counter registration paths")
