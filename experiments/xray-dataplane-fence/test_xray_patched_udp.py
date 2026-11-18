@@ -225,7 +225,7 @@ def run(xray, xudp):
             observation = proof["observedCheckpoint"]
             assert observation["refundableBytes"] == 0
             assert observation["revocationId"] == revocation_id
-            assert observation["schemaVersion"] == 2
+            assert observation["schemaVersion"] == 3
             for key,value in test_lease_scope(EMAIL_A,revocation_id).items():
                 assert observation[key] == value
             assert observation["uplinkBytes"] + observation["downlinkBytes"] >= before_a
