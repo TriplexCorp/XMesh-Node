@@ -80,8 +80,12 @@ def verify_monotonic_meter_floor(ledger, checkpoint, managed_runtime):
         current_down = unsigned_byte(row["downlinkBytes"], "observed downlink")
         prior_up = unsigned_byte(floor.get("lastUp"), "inbound uplink floor")
         prior_down = unsigned_byte(floor.get("lastDown"), "inbound downlink floor")
-        unsigned_byte(floor.get("totalUp"), "inbound cumulative uplink")
-        unsigned_byte(floor.get("totalDown"), "inbound cumulative downlink")
+        cumulative_up = unsigned_byte(
+            floor.get("totalUp"), "inbound cumulative uplink")
+        cumulative_down = unsigned_byte(
+            floor.get("totalDown"), "inbound cumulative downlink")
+        if cumulative_up < prior_up or cumulative_down < prior_down:
+            raise ValueError("durable inbound cumulative bytes below current raw floor")
         if current_up < prior_up or current_down < prior_down:
             raise ValueError("Xray inbound counter regressed below durable Node floor")
         up += current_up
