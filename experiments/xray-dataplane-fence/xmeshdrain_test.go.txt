@@ -110,6 +110,7 @@ func resetGate() {
     defer gate.Unlock()
     gate.users = map[string]*userState{}
     gate.sessions = map[uint64]*trackedSession{}
+    gate.journalDir = ""
 }
 
 func ctx(id uint32) context.Context {

@@ -58,6 +58,14 @@ def run(root: Path):
         NODE_ROOT / "experiments/xray-dataplane-fence/durable_fence_test.go.txt",
         shared / "durable_fence_test.go",
     )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/durable_counter_taint.go.txt",
+        shared / "durable_counter_taint.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/durable_counter_taint_test.go.txt",
+        shared / "durable_counter_taint_test.go",
+    )
 
     dispatcher_file = root / "app/dispatcher/default.go"
     source = dispatcher_file.read_text(encoding="utf-8")
@@ -439,6 +447,8 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
          str(shared / "observed_checkpoint_test.go"),
          str(shared / "durable_fence.go"),
          str(shared / "durable_fence_test.go"),
+         str(shared / "durable_counter_taint.go"),
+         str(shared / "durable_counter_taint_test.go"),
          str(dispatcher_file), str(worker_file), str(mux_file),
          str(meter_writer_file), str(counter_file), str(manager_file),
          str(reader_file),

@@ -1,0 +1,156 @@
+package xmeshdrain
+
+import (
+    "context"
+    "errors"
+    "os"
+    "path/filepath"
+    "testing"
+    xstats "github.com/xtls/xray-core/app/stats"
+)
+
+func TestPostFenceRawCounterTaintSurvivesCrashRestoreAndABA(t *testing.T){
+    email:="xmesh-u101--vless-main"
+    dir,_:=setupCheckpoint(t,email,310,140)
+    path:=durableCounterTaintPath(dir,canonicalMeterUser(email))
+    c:=observed.manager.GetCounter("user>>>"+email+">>>traffic>>>uplink")
+    before:=c.Value()
+    c.Add(25)
+    c.Set(before)
+    marker,err:=readDurableCounterTaint(path)
+    if err!=nil || marker.CanonicalUser!=canonicalMeterUser(email){
+        t.Fatalf("late ABA was not durably tainted: %+v %v",marker,err)
+    }
+    if _,err=persistObservedCheckpoint(testScope(email,testRevocation));err==nil{
+        t.Fatal("post-fence ABA was accepted before restart")
+    }
+    resetGate() // Simulate loss of every volatile audit flag.
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    manager,err:=xstats.NewManager(context.Background(),&xstats.Config{})
+    if err!=nil{t.Fatal(err)}
+    BindStatsManager(manager)
+    restored:=gate.users[canonicalMeterUser(email)]
+    if restored==nil || !restored.fenced || !restored.lateCounterMutation{
+        t.Fatal("Xray lost durable post-fence discontinuity after restart")
+    }
+    if _,err=persistObservedCheckpoint(testScope(email,testRevocation));err==nil{
+        t.Fatal("old raw counter ABA became an accepted checkpoint after restart")
+    }
+    if _,err=os.Lstat(checkpointPath(dir,email));!errors.Is(err,os.ErrNotExist){
+        t.Fatal("recovery published a tainted observed meter")
+    }
+}
+
+func TestCounterTaintAfterFsyncCannotRestoreCleanCheckpoint(t *testing.T){
+    email:="xmesh-u101--vless-main"
+    dir,_:=setupCheckpoint(t,email,200,180)
+    scope:=testScope(email,testRevocation)
+    if _,err:=persistObservedCheckpoint(scope);err!=nil{t.Fatal(err)}
+    c:=observed.manager.GetCounter("user>>>"+email+">>>traffic>>>uplink")
+    c.Add(2)
+    c.Set(200)
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    manager,err:=xstats.NewManager(context.Background(),&xstats.Config{})
+    if err!=nil{t.Fatal(err)}
+    BindStatsManager(manager)
+    if _,err=persistObservedCheckpoint(scope);err==nil{
+        t.Fatal("fsynced NONFINAL checkpoint replay allowed after durable taint")
+    }
+}
+
+func TestUnrelatedUserTaintKeepsOwnCheckpointAvailable(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    _,_ = setupCheckpoint(t,email,30,10)
+    unrelated,err:=observed.manager.GetOrRegisterCounter(
+        "user>>>xmesh-u102--vless-cdn>>>traffic>>>uplink")
+    if err!=nil{t.Fatal(err)}
+    unrelated.Add(5)
+    if _,err=persistObservedCheckpoint(testScope(email,testRevocation));err!=nil{
+        t.Fatalf("unrelated user destroyed target A checkpoint: %v",err)
+    }
+}
+
+func TestCounterTaintPendingCrashRecovery(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    for _,kind:=range []string{"unpublished","linked","forged-inode","symlink","malformed"}{
+        t.Run(kind,func(t *testing.T){
+            dir,_:=setupCheckpoint(t,email,1,2)
+            marker:=durableCounterTaint{SchemaVersion:1,CanonicalUser:canonicalMeterUser(email)}
+            if err:=commitDurableCounterTaint(dir,marker.CanonicalUser);err!=nil{t.Fatal(err)}
+            final:=durableCounterTaintPath(dir,marker.CanonicalUser)
+            pending:=filepath.Join(dir,".taint-pending-test")
+            switch kind{
+            case "unpublished":
+                if err:=os.Link(final,pending);err!=nil{t.Fatal(err)}
+                if err:=os.Remove(final);err!=nil{t.Fatal(err)}
+            case "linked":
+                if err:=os.Link(final,pending);err!=nil{t.Fatal(err)}
+            case "forged-inode":
+                raw,err:=os.ReadFile(final)
+                if err!=nil{t.Fatal(err)}
+                if err:=os.WriteFile(pending,raw,0600);err!=nil{t.Fatal(err)}
+            case "symlink":
+                if err:=os.Symlink(final,pending);err!=nil{t.Fatal(err)}
+            case "malformed":
+                if err:=os.WriteFile(pending,[]byte(`{"schemaVersion":1,"canonicalUser":"xmesh-u101","canonicalUser":"xmesh-u101"}`+"\n"),0600);err!=nil{t.Fatal(err)}
+            }
+            resetGate()
+            err:=configureObservedCheckpoint(dir)
+            if kind=="linked" {
+                if err!=nil{t.Fatalf("genuine post-link crash did not recover: %v",err)}
+                if _,err:=os.Lstat(pending);!errors.Is(err,os.ErrNotExist){t.Fatalf("pending hardlink left behind: %v",err)}
+                if !gate.users[canonicalMeterUser(email)].lateCounterMutation {
+                    t.Fatal("recovered linked marker did not taint revoked user")
+                }
+                return
+            }
+            if err==nil{t.Fatalf("unsafe %s raw taint was silently accepted",kind)}
+        })
+    }
+}
+
+func TestCounterTaintRefusesOrphanAndUntrustedFile(t *testing.T) {
+    for _,kind:=range []string{"orphan-fence","bad-identity","group-readable"}{
+        t.Run(kind,func(t *testing.T){
+            email:="xmesh-u101--vless-main"
+            dir,_:=setupCheckpoint(t,email,5,7)
+            path:=durableCounterTaintPath(dir,canonicalMeterUser(email))
+            if err:=commitDurableCounterTaint(dir,canonicalMeterUser(email));err!=nil{t.Fatal(err)}
+            switch kind {
+            case "orphan-fence":
+                if err:=os.Remove(durableFencePath(dir,email));err!=nil{t.Fatal(err)}
+            case "bad-identity":
+                raw,err:=os.ReadFile(path)
+                if err!=nil{t.Fatal(err)}
+                wrong:=append([]byte{},raw...)
+                wrong[1]='X'
+                if err:=os.WriteFile(path,wrong,0600);err!=nil{t.Fatal(err)}
+            case "group-readable":
+                if err:=os.Chmod(path,0644);err!=nil{t.Fatal(err)}
+            }
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatalf("unsafe %s taint was accepted at restart",kind)
+            }
+        })
+    }
+}
+
+func TestRawCounterTaintPersistenceFailurePanicsBeforeMutation(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    dir,_:=setupCheckpoint(t,email,10,12)
+    c:=observed.manager.GetCounter("user>>>"+email+">>>traffic>>>uplink")
+    before:=c.Value()
+    if err:=os.Chmod(dir,0755);err!=nil{t.Fatal(err)}
+    defer os.Chmod(dir,0700)
+    func(){
+        defer func(){if recover()==nil {t.Error("unjournaled raw mutation did not fail closed")}}()
+        c.Add(123)
+    }()
+    if c.Value()!=before{t.Fatal("unsafe raw counter was modified before durability")}
+    if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+    if _,err:=persistObservedCheckpoint(testScope(email,testRevocation));err==nil{
+        t.Fatal("failed taint persistence left an unpoisoned volatile checkpoint")
+    }
+}
