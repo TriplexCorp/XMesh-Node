@@ -277,24 +277,38 @@ def verify_envelope(document, state_dir, node_id, *, first_contact=False, now_ms
 def get_counters():
     """Return user totals, runtime identity and raw per-inbound Xray counters."""
     try:
-        container = subprocess.run(["docker", "inspect", "-f",
-                                    "{{.Id}} {{.State.StartedAt}}", "xmesh-managed-xray"],
-                                   capture_output=True, text=True, timeout=5, check=True)
+        inspect = ["docker", "inspect", "-f",
+                   "{{.Id}} {{.State.StartedAt}}", "xmesh-managed-xray"]
+        container = subprocess.run(inspect, capture_output=True, text=True,
+                                   timeout=5, check=True)
         runtime_id = container.stdout.strip()
         result = subprocess.run(["docker", "exec", "xmesh-managed-xray", "xray", "api",
                                  "statsquery", "--server=127.0.0.1:10085",
                                  "-pattern", "user>>>xmesh-u"],
                                 capture_output=True, text=True, timeout=7, check=True)
+        # A replacement between inspect and statsquery can attribute a fresh
+        # zero-based counter to the OLD process, silently losing usage. The
+        # observation is invalid if the managed runtime changed mid-sample.
+        after = subprocess.run(inspect, capture_output=True, text=True,
+                               timeout=5, check=True)
+        if not runtime_id or runtime_id != after.stdout.strip():
+            raise ValueError("Xray runtime changed during StatsService read")
         payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid Xray StatsService response")
         stats = payload.get("stat", [])
         if not isinstance(stats, list) or len(stats) > 12000:
             raise ValueError("Invalid Xray counters")
         inbound = {}
+        seen_metrics = set()
         for row in stats:
-            if not isinstance(row, dict):
-                continue
-            match = USER_PATTERN.fullmatch(row.get("name", ""))
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                raise ValueError("Malformed Xray StatsService row")
+            name = row["name"]
+            match = USER_PATTERN.fullmatch(name)
             if match is None:
+                if name.startswith("user>>>xmesh-u"):
+                    raise ValueError("Unparseable XMesh user counter")
                 continue
             raw_value = row.get("value")
             if type(raw_value) is int:
@@ -302,13 +316,17 @@ def get_counters():
             elif isinstance(raw_value, str) and re.fullmatch(r"[0-9]{1,19}", raw_value):
                 val = int(raw_value)
             else:
-                continue
+                raise ValueError("Malformed Xray traffic counter value")
             if not 0 <= val <= (1 << 63) - 1:
-                continue
+                raise ValueError("Out-of-range Xray traffic counter")
             user_id, tag, direction = match.groups()
             tag = unquote(tag, encoding="utf-8", errors="strict")
             if not tag or len(tag) > 128 or any(ord(c) < 32 for c in tag):
-                continue
+                raise ValueError("Invalid Xray inbound traffic tag")
+            metric = (user_id, tag, direction)
+            if metric in seen_metrics:
+                raise ValueError("Duplicate Xray traffic counter")
+            seen_metrics.add(metric)
             raw = inbound.setdefault((user_id, tag), {"uplink": 0, "downlink": 0})
             raw[direction] = val
         if len(inbound) > MAX_USERS:
@@ -316,6 +334,8 @@ def get_counters():
         grouped = {}
         for (user_id, _), values in inbound.items():
             grouped[user_id] = grouped.get(user_id, 0) + sum(values.values())
+            if grouped[user_id] >= 1 << 63:
+                raise ValueError("Xray user total counter overflow")
         return grouped, runtime_id, inbound
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"XMesh StatsService unavailable ({type(exc).__name__}); user traffic cannot be verified", file=sys.stderr)
@@ -645,6 +665,43 @@ def sample_before_xray_replace(state_dir, node_id, now_ms=None):
                 identity[1] not in scope.get(int(identity[0]), set())):
             raise ValueError("Old Xray sample includes inbound outside committed signed scope")
     ledger = load_json(ledger_file)
+    # A silent Xray restart, reset or omitted user/inbound is an unknown
+    # metering interval. Never turn such a partial sample into a durable
+    # observation that may later be mistaken for refund evidence.
+    if not isinstance(ledger, dict) or ledger.get("runtimeId") != runtime_id:
+        raise ValueError("Old Xray runtime does not match durable quota journal")
+    previous = ledger.get("users")
+    if not isinstance(previous, dict):
+        raise ValueError("Missing durable user counter history")
+    missing_users = {str(uid) for uid in revoked_ids} - set(counters)
+    if missing_users:
+        raise ValueError("Old Xray sample missing revoked user counters")
+    required_pairs = {(str(uid), tag) for uid in revoked_ids for tag in scope[uid]}
+    if not required_pairs.issubset(inbound_counters):
+        raise ValueError("Old Xray sample missing revoked inbound counters")
+    for uid in revoked_ids:
+        key = str(uid)
+        record = previous.get(key)
+        if not isinstance(record, dict) or type(record.get("last")) is not int or (
+                record["last"] < 0 or counters[key] < record["last"]):
+            raise ValueError("Old Xray user counter regressed or lost history")
+        if counters[key] != sum(
+                values["uplink"] + values["downlink"]
+                for (user_id, _), values in inbound_counters.items()
+                if user_id == key):
+            raise ValueError("Old Xray user/inbound totals disagree")
+    history = ledger.get("inbounds", {})
+    if not isinstance(history, dict):
+        raise ValueError("Invalid durable inbound counter history")
+    for (user_id, tag), values in inbound_counters.items():
+        entry = history.get(json.dumps([int(user_id), tag], separators=(",", ":")))
+        if entry is None:
+            continue
+        if not isinstance(entry, dict) or any(
+                type(entry.get("last" + suffix)) is not int or
+                entry["last" + suffix] < 0 or values[direction] < entry["last" + suffix]
+                for direction, suffix in (("uplink", "Up"), ("downlink", "Down"))):
+            raise ValueError("Old Xray inbound counter regressed or lost history")
     timestamp = int(time.time() * 1000) if now_ms is None else now_ms
     ledger = integrate_counters(ledger, counters, runtime_id, timestamp, inbound_counters)
     # Persist exact monotonic old-runtime readings BEFORE replacing Xray.

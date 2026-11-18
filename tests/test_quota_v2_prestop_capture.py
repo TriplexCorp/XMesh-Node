@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("prestop_guard", ROOT / "deploy/xmesh-policy-guard-base.py")
@@ -88,6 +88,78 @@ class PreStopCaptureTests(unittest.TestCase):
         # Empty scope is deliberately rejected for users that require the
         # pre-stop sample; no unauthorised telemetry is published.
         self.assertEqual(self.journal.read_bytes(), old_bytes)
+
+    def test_missing_user_or_inbound_counters_fail_closed(self):
+        before = self.journal.read_bytes()
+        with self.assertRaisesRegex(ValueError, "missing revoked user counters"):
+            self.capture(({}, "old-xray", {}))
+        with self.assertRaisesRegex(ValueError, "missing revoked inbound counters"):
+            self.capture(({"1": 0}, "old-xray", {}))
+        self.assertEqual(self.journal.read_bytes(), before)
+
+    def test_partial_or_regressed_runtime_counters_fail_closed(self):
+        before = self.journal.read_bytes()
+        sample = ({"1": 15}, "old-xray",
+                  {("1", "MAIN"): {"uplink": 15, "downlink": 0}})
+        with self.assertRaisesRegex(ValueError, "runtime does not match"):
+            self.capture((sample[0], "new-xray", sample[2]))
+        with self.assertRaisesRegex(ValueError, "totals disagree"):
+            self.capture(({"1": 16}, "old-xray", sample[2]))
+        with self.assertRaisesRegex(ValueError, "user counter regressed"):
+            self.capture(({"1": 9}, "old-xray",
+                          {("1", "MAIN"): {"uplink": 9, "downlink": 0}}))
+        self.assertEqual(self.journal.read_bytes(), before)
+
+    def test_inbound_counter_rollback_fails_closed(self):
+        document = json.loads(self.journal.read_text())
+        document["inbounds"] = {'[1,"MAIN"]': {
+            "lastUp": 25, "lastDown": 1,
+            "totalUp": 25, "totalDown": 1,
+        }}
+        self.journal.write_text(json.dumps(document))
+        before = self.journal.read_bytes()
+        with self.assertRaisesRegex(ValueError, "inbound counter regressed"):
+            self.capture(({"1": 21}, "old-xray",
+                          {("1", "MAIN"): {"uplink": 20, "downlink": 1}}))
+        self.assertEqual(self.journal.read_bytes(), before)
+
+    def test_missing_secondary_signed_inbound_fails_closed(self):
+        before = self.journal.read_bytes()
+        with self.assertRaisesRegex(ValueError, "missing revoked inbound counters"):
+            self.capture(({"1": 15}, "old-xray",
+                          {("1", "MAIN"): {"uplink": 15, "downlink": 0}}),
+                         scope={1: {"MAIN", "CDN"}})
+        self.assertEqual(self.journal.read_bytes(), before)
+
+    def test_xray_runtime_replacement_during_statsquery_is_rejected(self):
+        before = self.journal.read_bytes()
+        responses = [
+            Mock(stdout="container-A 2026-11-18T00:00:00Z"),
+            Mock(stdout='{"stat":[{"name":"user>>>xmesh-u1--MAIN>>>traffic>>>uplink","value":"15"}]}'),
+            Mock(stdout="container-B 2026-11-18T00:00:01Z"),
+        ]
+        with patch.object(guard.subprocess, "run", side_effect=responses) as run:
+            counters, runtime_id, inbound = guard.get_counters()
+        self.assertIsNone(counters)
+        self.assertIsNone(runtime_id)
+        self.assertIsNone(inbound)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(self.journal.read_bytes(), before)
+
+    def test_duplicate_or_malformed_xray_stats_fail_closed(self):
+        name = "user>>>xmesh-u1--MAIN>>>traffic>>>uplink"
+        for rows in (
+            [{"name": name, "value": 15}, {"name": name, "value": 16}],
+            [{"name": name, "value": "garbage"}],
+        ):
+            responses = [
+                Mock(stdout="container-A 2026-11-18T00:00:00Z"),
+                Mock(stdout=json.dumps({"stat": rows})),
+                Mock(stdout="container-A 2026-11-18T00:00:00Z"),
+            ]
+            with self.subTest(rows=rows), patch.object(
+                    guard.subprocess, "run", side_effect=responses):
+                self.assertEqual(guard.get_counters(), (None, None, None))
 
     def test_no_revocation_does_not_query_live_stats(self):
         empty = {"users": [{"userId": 1}]}
