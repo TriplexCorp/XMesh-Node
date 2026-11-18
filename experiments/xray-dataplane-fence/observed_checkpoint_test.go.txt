@@ -119,7 +119,7 @@ func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
     add(100,230)
     record,err:=persistObservedCheckpoint(testScope("alice",testRevocation))
     if err!=nil{t.Fatal(err)}
-    if record.SchemaVersion!=2||record.checkpointScope!=testScope("alice",testRevocation)||
+    if record.SchemaVersion!=3||record.checkpointScope!=testScope("alice",testRevocation)||
        record.UplinkBytes!=100||record.DownlinkBytes!=230||!record.Drained||
        record.FinalMeterVerified||record.RefundableBytes!=0{
         t.Fatalf("invalid observed-only record: %+v",record)
