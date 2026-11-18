@@ -77,6 +77,13 @@ func reconcilePendingJournal(dir,name string) error {
         if !reflect.DeepEqual(committed,partial) {
             return errors.New("pending observed meter conflicts with published scope")
         }
+    }else if strings.HasPrefix(name,".taint-pending-") {
+        partial,err:=readDurableCounterTaint(pending)
+        if err!=nil{return fmt.Errorf("untrusted pending counter taint: %w",err)}
+        final=durableCounterTaintPath(dir,partial.CanonicalUser)
+        committed,err:=readDurableCounterTaint(final)
+        if err!=nil{return fmt.Errorf("unpublished counter taint; deny Xray restart: %w",err)}
+        if committed!=partial{return errors.New("pending counter taint differs from published taint")}
     }else{return nil}
     before,err:=os.Lstat(pending)
     if err!=nil{return err}
@@ -103,7 +110,8 @@ func restoreDurableFences(dir string) error {
     for _,entry:=range entries {
         name:=entry.Name()
         if strings.HasPrefix(name,".fence-pending-") ||
-            strings.HasPrefix(name,".observed-pending-") {
+            strings.HasPrefix(name,".observed-pending-") ||
+            strings.HasPrefix(name,".taint-pending-") {
             if err:=reconcilePendingJournal(dir,name);err!=nil{
                 return fmt.Errorf("unsafe crash-interrupted Xray journal %q: %w",name,err)
             }
@@ -137,6 +145,25 @@ func restoreDurableFences(dir string) error {
             return errors.New("orphaned or scope-conflicting observed meter; refuse Xray startup")
         }
     }
+    // Recover crash-persistent raw counter discontinuities. A taint must
+    // belong to an independently existing durable user-denial scope.
+    // Never accept a second account's taint or a forged filename.
+    tainted:=map[string]struct{}{}
+    for _,entry:=range entries {
+        name:=entry.Name()
+        if !strings.HasPrefix(name,"taint-") || !strings.HasSuffix(name,".json"){continue}
+        marker,err:=readDurableCounterTaint(filepath.Join(dir,name))
+        if err!=nil{return fmt.Errorf("invalid durable counter taint %q: %w",name,err)}
+        if name!=filepath.Base(durableCounterTaintPath(dir,marker.CanonicalUser)){
+            return errors.New("counter taint filename differs from canonical user")
+        }
+        matched:=false
+        for _,scope:=range scopes {
+            if canonicalMeterUser(scope.Email)==marker.CanonicalUser {matched=true;break}
+        }
+        if !matched{return errors.New("orphaned raw counter taint without durable user fence")}
+        tainted[marker.CanonicalUser]=struct{}{}
+    }
     // A previously linked but not fsynced marker is made durable again
     // before any recovered user denial is considered established.
     if err:=syncFenceDirectory(dir);err!=nil{return err}
@@ -145,10 +172,15 @@ func restoreDurableFences(dir string) error {
     if len(gate.sessions)!=0 {
         return errors.New("cannot restore fences while authenticated sessions live")
     }
+    gate.journalDir=dir
     for email:=range scopes {
         u:=ensureUser(canonicalMeterUser(email))
         u.fenced=true
         completeUserIfIdleLocked(u)
+    }
+    for email:=range tainted {
+        u:=ensureUser(email)
+        u.lateCounterMutation=true
     }
     return nil
 }

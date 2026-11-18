@@ -131,6 +131,8 @@ var gate = struct {
     sync.Mutex
     users map[string]*userState
     sessions map[uint64]*trackedSession
+    // Root-private, fsynced journal selected before the Xray listener starts.
+    journalDir string
 }{users: map[string]*userState{}, sessions: map[uint64]*trackedSession{}}
 
 func ensureUser(email string) *userState {
@@ -202,11 +204,16 @@ func AuditRawCounterMutation(name string, mutate func() int64) int64 {
     }
     gate.Lock()
     defer gate.Unlock()
-    value := mutate()
     if u := gate.users[canonicalMeterUser(email)]; u != nil && u.fenced {
+        // The marker MUST survive a crash that happens immediately after
+        // this mutation. Persist before allowing Counter.Add/Set to run.
+        // An unjournaled mutation is strictly worse than a failed process.
         u.lateCounterMutation = true
+        if err := commitDurableCounterTaint(gate.journalDir, canonicalMeterUser(email)); err != nil {
+            panic(fmt.Sprintf("experimental Xray counter taint cannot be persisted; deny: %v", err))
+        }
     }
-    return value
+    return mutate()
 }
 
 // BeginMeterWrite starts one tracked, billable writer operation. It must

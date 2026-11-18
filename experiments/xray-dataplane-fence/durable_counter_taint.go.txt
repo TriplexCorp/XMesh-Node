@@ -1,0 +1,121 @@
+// CI-ONLY Xray durable raw StatsService discontinuity journal.
+// This is a sticky FAIL-CLOSED hint, NOT an authoritative terminal meter or
+// refundable settlement. Never deploy this experimental instrumented Xray.
+package xmeshdrain
+
+import (
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "os"
+    "path/filepath"
+    "strings"
+    "syscall"
+)
+
+type durableCounterTaint struct {
+    SchemaVersion int `json:"schemaVersion"`
+    CanonicalUser string `json:"canonicalUser"`
+}
+
+func validCounterTaintUser(email string) bool {
+    if email=="" || len(email)>128 || canonicalMeterUser(email)!=email {return false}
+    for _,c:=range email {
+        if c<33 || c==127 || c=='>' {return false}
+    }
+    return true
+}
+
+func durableCounterTaintPath(dir,user string) string {
+    digest:=sha256.Sum256([]byte(canonicalMeterUser(user)))
+    return filepath.Join(dir,"taint-"+hex.EncodeToString(digest[:])+".json")
+}
+
+// Read canonical, private and same-UID bytes. Duplicate JSON fields and
+// arbitrary comments cannot silently alter a crash-restored deny decision.
+func readDurableCounterTaint(path string) (durableCounterTaint,error) {
+    var marker durableCounterTaint
+    info,err:=os.Lstat(path)
+    if err!=nil {return marker,err}
+    stat,ok:=info.Sys().(*syscall.Stat_t)
+    if !ok || !info.Mode().IsRegular() || info.Mode().Perm()!=0600 ||
+       stat.Uid!=uint32(os.Geteuid()) || info.Size()<1 || info.Size()>4096 {
+        return marker,errors.New("unsafe durable raw counter taint")
+    }
+    raw,err:=os.ReadFile(path)
+    if err!=nil{return marker,err}
+    if err=json.Unmarshal(raw,&marker);err!=nil{return marker,err}
+    if marker.SchemaVersion!=1 || !validCounterTaintUser(marker.CanonicalUser){
+        return marker,errors.New("invalid raw counter taint identity")
+    }
+    expected,err:=json.Marshal(marker)
+    if err!=nil{return marker,err}
+    if string(raw)!=string(append(expected,'\n')){
+        return marker,errors.New("noncanonical or duplicate raw counter taint fields")
+    }
+    return marker,nil
+}
+
+// Called ONLY while the per-user gate mutex is held, before any post-fence
+// raw StatsService Counter.Add/Set. If ANY durability step fails the hook
+// panics before mutation: the process must never continue with untracked bytes.
+// Crash after fsynced pending but before final hardlink is denied at startup.
+func commitDurableCounterTaint(dir,user string) error {
+    if dir=="" || !filepath.IsAbs(dir) || !validCounterTaintUser(user){
+        return errors.New("invalid raw counter taint journal scope")
+    }
+    stat,err:=os.Lstat(dir)
+    if err!=nil || !stat.IsDir() || stat.Mode().Perm()&0077!=0 {
+        return errors.New("raw counter taint journal directory not private")
+    }
+    path:=durableCounterTaintPath(dir,user)
+    marker:=durableCounterTaint{SchemaVersion:1,CanonicalUser:user}
+    if old,err:=readDurableCounterTaint(path);err==nil{
+        if old!=marker{return errors.New("counter taint scope mismatch")}
+        return syncFenceDirectory(dir)
+    }else if !os.IsNotExist(err) {
+        return fmt.Errorf("unsafe persisted counter taint: %w",err)
+    }
+    data,err:=json.Marshal(marker)
+    if err!=nil{return err}
+    pending,err:=os.CreateTemp(dir,".taint-pending-")
+    if err!=nil{return err}
+    name:=pending.Name()
+    defer os.Remove(name)
+    if _,err=pending.Write(append(data,'\n'));err!=nil{
+        _=pending.Close()
+        return err
+    }
+    if err=pending.Sync();err!=nil{_ = pending.Close();return err}
+    if err=pending.Close();err!=nil{return err}
+    // No rename or overwrite: a conflicting immutable taint must block.
+    if err=os.Link(name,path);err!=nil{return fmt.Errorf("unsafe taint link: %w",err)}
+    if err=syncFenceDirectory(dir);err!=nil{return err}
+    if err=os.Remove(name);err!=nil{return err}
+    return syncFenceDirectory(dir)
+}
+
+// Preserve already validated inode on a post-link/pre-cleanup crash; an
+// orphan, forged, symlinked or changed pending marker refuses Xray startup.
+func reconcilePendingCounterTaint(dir,pendingName string) error {
+    if !strings.HasPrefix(pendingName,".taint-pending-"){
+        return errors.New("unrecognized pending taint")
+    }
+    pending:=filepath.Join(dir,pendingName)
+    marker,err:=readDurableCounterTaint(pending)
+    if err!=nil{return err}
+    committed:=durableCounterTaintPath(dir,marker.CanonicalUser)
+    live,err:=readDurableCounterTaint(committed)
+    if err!=nil{return fmt.Errorf("unpublished counter taint: %w",err)}
+    if live!=marker{return errors.New("pending counter taint disagrees with committed marker")}
+    p,err:=os.Lstat(pending)
+    if err!=nil{return err}
+    c,err:=os.Lstat(committed)
+    if err!=nil{return err}
+    if !os.SameFile(p,c){return errors.New("pending counter taint not same inode as published marker")}
+    if err=syncFenceDirectory(dir);err!=nil{return err}
+    if err=os.Remove(pending);err!=nil{return err}
+    return syncFenceDirectory(dir)
+}
