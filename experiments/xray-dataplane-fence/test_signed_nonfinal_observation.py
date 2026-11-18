@@ -78,6 +78,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         valid = evidence.verify_envelope(signed, 7, self.pub)
         self.assertEqual(valid["checkpoint"], cp)
         self.assertFalse(valid["finalMeterVerified"])
+        self.assertTrue(valid["completeSignedInboundScopeObserved"])
         self.assertFalse(valid["settlementEligible"])
         self.assertEqual(valid["refundableBytes"], 0)
         target = self.output / evidence.receipt_name(cp)
@@ -154,6 +155,32 @@ class SignedNonfinalObservationTests(unittest.TestCase):
             changer(altered)
             with self.assertRaises(ValueError):
                 evidence.verify_envelope(altered, 7, self.pub)
+
+    def test_signed_envelope_never_accepts_incomplete_inbound_row_data(self):
+        good = self.create()
+        for mutator in (
+            lambda x: x["payload"]["checkpoint"]["inboundMeters"].clear(),
+            lambda x: x["payload"]["checkpoint"]["inboundMeters"][0].update(
+                uplinkBytes=92),
+            lambda x: x["payload"].update(
+                completeSignedInboundScopeObserved=False),
+            lambda x: x["payload"]["checkpoint"]["inboundMeters"].append(
+                copy.deepcopy(x["payload"]["checkpoint"]["inboundMeters"][0])),
+        ):
+            altered = copy.deepcopy(good)
+            mutator(altered)
+            with self.subTest(mutator=mutator), self.assertRaises(ValueError):
+                evidence.verify_envelope(altered, 7, self.pub)
+
+    def test_guard_must_confirm_complete_signed_scope_before_signing(self):
+        partial = {
+            "scopeBoundToSignedPolicy": True,
+            "completeSignedInboundScopeObserved": False,
+            "finalMeterVerified": False, "refundableBytes": 0,
+        }
+        with self.assertRaisesRegex(ValueError, "safely bound"):
+            self.create(binding=partial)
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_wrong_node_public_key_cannot_verify(self):
         signed = self.create()
