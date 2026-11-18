@@ -1,0 +1,63 @@
+// Package xmeshdrain: verifiable Linux process identity for CI-only Xray.
+//
+// No finality claim: this only binds a NONFINAL observation to one running
+// kernel process, executable inode and PID namespace. The Node must obtain
+// the host PID independently from trusted container management; the claimed
+// runtime hash itself is not an authentication credential.
+package xmeshdrain
+
+import (
+    "crypto/sha256"
+    "encoding/hex"
+    "errors"
+    "fmt"
+    "os"
+    "strconv"
+    "strings"
+    "syscall"
+)
+
+const runtimeIdentityDomain = "XMESH_XRAY_RUNTIME_PROC_V1\x00"
+
+func currentRuntimeIdentity() (string,error) {
+    bootBytes,err:=os.ReadFile("/proc/sys/kernel/random/boot_id")
+    if err!=nil{return "",fmt.Errorf("Linux boot ID unavailable: %w",err)}
+    boot:=strings.TrimSpace(string(bootBytes))
+    if len(boot)!=36{return "",errors.New("invalid Linux boot ID")}
+    namespace,err:=os.Readlink("/proc/self/ns/pid")
+    if err!=nil{return "",fmt.Errorf("Linux PID namespace unavailable: %w",err)}
+    if !strings.HasPrefix(namespace,"pid:[") || !strings.HasSuffix(namespace,"]") {
+        return "",errors.New("invalid Linux PID namespace")
+    }
+    procBytes,err:=os.ReadFile("/proc/self/stat")
+    if err!=nil{return "",fmt.Errorf("Linux process start ticks unavailable: %w",err)}
+    proc:=string(procBytes)
+    end:=strings.LastIndex(proc,")")
+    if end<0 || end+2>=len(proc) {
+        return "",errors.New("invalid Linux process stat")
+    }
+    fields:=strings.Fields(proc[end+2:])
+    // The tail begins with Linux /proc/<pid>/stat field 3 (state);
+    // field 22 (starttime) is therefore zero-based tail index 19.
+    if len(fields)<=19 {
+        return "",errors.New("Linux process stat omitted starttime")
+    }
+    ticks,err:=strconv.ParseUint(fields[19],10,64)
+    if err!=nil || ticks==0{return "",errors.New("invalid process start ticks")}
+    executable,err:=os.Stat("/proc/self/exe")
+    if err!=nil{return "",fmt.Errorf("Linux process executable unavailable: %w",err)}
+    info,ok:=executable.Sys().(*syscall.Stat_t)
+    if !ok || !executable.Mode().IsRegular() {
+        return "",errors.New("invalid Linux executable identity")
+    }
+    // Inside a container os.Getpid() is the INNERMOST NSpid; an independent
+    // host verifier reads the last NSpid field from /proc/<hostpid>/status.
+    parts:=[]string{
+        boot,namespace,strconv.Itoa(os.Getpid()),strconv.FormatUint(ticks,10),
+        strconv.FormatUint(uint64(info.Dev),10),
+        strconv.FormatUint(uint64(info.Ino),10),
+    }
+    payload:=runtimeIdentityDomain+strings.Join(parts,"\n")
+    digest:=sha256.Sum256([]byte(payload))
+    return hex.EncodeToString(digest[:]),nil
+}
