@@ -32,40 +32,7 @@ var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
 // Every user-bearing inbound must be enumerated. A single-inbound fence
 // cannot protect a second CDN/secondary listener carrying the same identity.
 var trackedInboundTags = map[string]struct{}{"vless-share": {}}
-var signedUserEmail = regexp.MustCompile(`^xmesh-u([1-9][0-9]{0,18})--([A-Za-z0-9_-]{1,64})// Package xmeshdrain is a CI-ONLY experiment injected into an exact pinned
-// upstream Xray source tree. It does not verify leases, persist final meters,
-// create signed evidence, or authorize any refundable bytes.
-package xmeshdrain
-
-import (
-    "context"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "net"
-    "net/http"
-    "os"
-    "path/filepath"
-    "regexp"
-    "strings"
-    "sync"
-    "time"
-    "syscall"
-
-    c "github.com/xtls/xray-core/common/ctx"
-    "github.com/xtls/xray-core/common/session"
-)
-
-var errFenced = errors.New("experimental xmesh drain: user is fenced")
-var errNoSessionID = errors.New("experimental xmesh drain: missing session ID")
-var errNoUserID = errors.New("experimental xmesh drain: missing authenticated user email")
-var errDuplicateSession = errors.New("experimental xmesh drain: duplicate live session ID")
-var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
-    os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1"
-
-// Every user-bearing inbound must be enumerated. A single-inbound fence
-// cannot protect a second CDN/secondary listener carrying the same identity.
-)
+var signedUserEmail = regexp.MustCompile(`^xmesh-u([1-9][0-9]{0,18})--([A-Za-z0-9_-]{1,64})$`)
 
 // A signed policy emits distinct per-inbound emails for the same billing
 // user. Always fence the stable account identity, not the individual tag.
