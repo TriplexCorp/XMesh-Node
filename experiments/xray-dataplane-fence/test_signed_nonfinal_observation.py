@@ -193,6 +193,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         self.assertEqual(len(list(self.output.iterdir())), 1)
 
     def test_managed_container_swapped_before_publication_cannot_sign(self):
+        self.write_managed_ledger()
         cp = checkpoint()
         first = ("a" * 64, "2026-11-18T12:00:00Z", os.getpid())
         replacement = ("b" * 64, "2026-11-18T12:00:01Z", os.getpid())
