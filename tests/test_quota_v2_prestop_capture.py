@@ -113,8 +113,8 @@ class PreStopCaptureTests(unittest.TestCase):
     def test_inbound_counter_rollback_fails_closed(self):
         document = json.loads(self.journal.read_text())
         document["inbounds"] = {'[1,"MAIN"]': {
-            "lastUp": 20, "lastDown": 1,
-            "totalUp": 20, "totalDown": 1,
+            "lastUp": 25, "lastDown": 1,
+            "totalUp": 25, "totalDown": 1,
         }}
         self.journal.write_text(json.dumps(document))
         before = self.journal.read_bytes()
