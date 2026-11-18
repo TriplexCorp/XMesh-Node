@@ -82,6 +82,9 @@ func restoreDurableFences(dir string) error {
             return errors.New("orphaned or scope-conflicting observed meter; refuse Xray startup")
         }
     }
+    // A previously linked but not fsynced marker is made durable again
+    // before any recovered user denial is considered established.
+    if err:=syncFenceDirectory(dir);err!=nil{return err}
     gate.Lock()
     defer gate.Unlock()
     if len(gate.sessions)!=0 {
@@ -93,6 +96,15 @@ func restoreDurableFences(dir string) error {
         completeUserIfIdleLocked(u)
     }
     return nil
+}
+
+func syncFenceDirectory(dir string) error {
+    directory,err:=os.Open(dir)
+    if err!=nil{return err}
+    syncErr:=directory.Sync()
+    closeErr:=directory.Close()
+    if syncErr!=nil{return syncErr}
+    return closeErr
 }
 
 func commitDurableFence(scope checkpointScope) error {
@@ -110,7 +122,9 @@ func commitDurableFence(scope checkpointScope) error {
         if existing.checkpointScope!=scope {
             return errors.New("durable fence scope mismatch")
         }
-        return nil
+        // A crash may leave the hard link visible but not directory-fsynced.
+        // Do not acknowledge an idempotent retry until durable publication.
+        return syncFenceDirectory(dir)
     } else if !os.IsNotExist(err) {
         return fmt.Errorf("unsafe existing durable fence: %w",err)
     }
@@ -132,13 +146,7 @@ func commitDurableFence(scope checkpointScope) error {
     if err=file.Close();err!=nil{return err}
     // Publish with an exclusive hard link: never replace another revocation.
     if err=os.Link(name,path);err!=nil{return err}
-    directory,err:=os.Open(dir)
-    if err!=nil{return err}
-    syncErr:=directory.Sync()
-    closeErr:=directory.Close()
-    if syncErr!=nil{return syncErr}
-    if closeErr!=nil{return closeErr}
-    return nil
+    return syncFenceDirectory(dir)
 }
 
 func fenceScoped(ctx context.Context,scope checkpointScope) (result,error) {
