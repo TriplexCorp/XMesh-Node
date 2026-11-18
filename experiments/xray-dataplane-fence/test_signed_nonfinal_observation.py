@@ -27,7 +27,7 @@ def checkpoint(node=7):
         "reservationId": "33333333-3333-4333-8333-333333333333",
         "revision": 4,
         "revocationId": "44444444-4444-4444-8444-444444444444",
-        "runtimeId": "a" * 64, "uplinkBytes": 90, "downlinkBytes": 20,
+        "runtimeId": evidence.trusted_runtime_identity(os.getpid()), "uplinkBytes": 90, "downlinkBytes": 20,
         "inboundMeters": [{"email": "xmesh-u1--MAIN", "uplinkBytes": 90,
                           "downlinkBytes": 20}],
         "drained": True, "finalMeterVerified": False,
@@ -68,7 +68,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         with patch.object(evidence.guard, "verify_committed_observed_checkpoint",
                           return_value=binding) as bound:
             result = evidence.create_observation(
-                self.state, 7, cp, self.key, self.output)
+                self.state, 7, cp, self.key, self.output, os.getpid())
         bound.assert_called_once()
         return result
 
@@ -78,6 +78,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         valid = evidence.verify_envelope(signed, 7, self.pub)
         self.assertEqual(valid["checkpoint"], cp)
         self.assertFalse(valid["finalMeterVerified"])
+        self.assertTrue(valid["liveRuntimeIndependentlyVerified"])
         self.assertTrue(valid["completeSignedInboundScopeObserved"])
         self.assertFalse(valid["settlementEligible"])
         self.assertEqual(valid["refundableBytes"], 0)
@@ -90,6 +91,32 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         self.assertEqual(self.create(cp), signed)
         self.assertEqual(target.stat().st_ino, inode)
         self.assertEqual(target.read_bytes(), before)
+
+    def test_signer_rejects_wrong_running_pid_or_forged_runtime(self):
+        cp = checkpoint()
+        forged = dict(cp, runtimeId="a"*64)
+        with self.assertRaisesRegex(ValueError, "not the independently verified"):
+            self.create(forged)
+        self.assertEqual(list(self.output.iterdir()), [])
+        # A process with a different start tick / executable cannot borrow
+        # this Node's live identity, even though it exists and is runnable.
+        other = subprocess.Popen(
+            ["python3", "-c", "import time; time.sleep(10)"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            with patch.object(evidence.guard, "verify_committed_observed_checkpoint",
+                              return_value=self.valid_binding):
+                with self.assertRaisesRegex(ValueError, "not the independently"):
+                    evidence.create_observation(
+                        self.state, 7, cp, self.key, self.output, other.pid)
+        finally:
+            other.terminate()
+            other.wait(timeout=5)
+        self.assertEqual(list(self.output.iterdir()), [])
+        with self.assertRaises((ValueError, OSError)):
+            evidence.verify_live_runtime(cp, other.pid)
+        with self.assertRaises(ValueError):
+            evidence.verify_live_runtime(cp, "7")
 
     def test_conflicting_meter_never_overwrites(self):
         cp = checkpoint()
@@ -137,7 +164,8 @@ class SignedNonfinalObservationTests(unittest.TestCase):
                           side_effect=ValueError("Missing committed signed policy")):
             with self.assertRaisesRegex(ValueError, "Missing committed"):
                 evidence.create_observation(
-                    self.state, 7, checkpoint(), self.key, self.output)
+                    self.state, 7, checkpoint(), self.key, self.output,
+                    os.getpid())
         self.assertEqual(list(self.output.iterdir()), [])
 
     def test_cross_node_identity_and_signature_tampering(self):
@@ -148,6 +176,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
             lambda s: s["payload"].update(refundableBytes=1),
             lambda s: s["payload"].update(settlementEligible=True),
             lambda s: s["payload"].update(finalMeterVerified=True),
+            lambda s: s["payload"].update(liveRuntimeIndependentlyVerified=False),
             lambda s: s["payload"]["checkpoint"].update(downlinkBytes=19),
             lambda s: s.update(signature="0"*128),
         ):
@@ -210,7 +239,8 @@ class SignedNonfinalObservationTests(unittest.TestCase):
             with patch.object(evidence.guard, "verify_committed_observed_checkpoint",
                               return_value=self.valid_binding):
                 evidence.create_observation(
-                    self.state, 7, cp, alias, self.output)
+                    self.state, 7, cp, alias, self.output,
+                    os.getpid())
 
     def test_corrupted_or_linked_evidence_does_not_mutate(self):
         cp = checkpoint()
