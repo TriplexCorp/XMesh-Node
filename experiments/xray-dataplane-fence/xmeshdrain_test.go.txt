@@ -21,6 +21,16 @@ func TestMain(m *testing.M) {
 }
 
 
+func TestRuntimeFingerprintStableForSameLiveKernelProcess(t *testing.T) {
+    first,err:=currentRuntimeIdentity()
+    if err!=nil{t.Fatal(err)}
+    second,err:=currentRuntimeIdentity()
+    if err!=nil{t.Fatal(err)}
+    if len(first)!=64 || first!=second {
+        t.Fatalf("Linux process identity changed between same-process reads: %q %q",first,second)
+    }
+}
+
 func TestMultiInboundCoverageIsStrictAndIncludesBlankUserEmails(t *testing.T) {
     original := trackedInboundTags
     defer func() { trackedInboundTags = original }()
