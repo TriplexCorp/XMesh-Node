@@ -32,7 +32,7 @@ var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
 // Every user-bearing inbound must be enumerated. A single-inbound fence
 // cannot protect a second CDN/secondary listener carrying the same identity.
 var trackedInboundTags = map[string]struct{}{"vless-share": {}}
-var signedUserEmail = regexp.MustCompile(`^xmesh-u([1-9][0-9]{0,18})--([A-Za-z0-9_-]{1,64})$`)
+var signedUserEmail = regexp.MustCompile(`^xmesh-u([1-9][0-9]{0,18})--([^\x00-\x20>]{1,128})$`)
 
 // A signed policy emits distinct per-inbound emails for the same billing
 // user. Always fence the stable account identity, not the individual tag.
