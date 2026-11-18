@@ -320,9 +320,11 @@ def run(xray, transport):
             for k, v in test_lease_scope(EMAIL_A,revocation_id).items():
                 assert observation[k] == v, (k,observation)
             assert len(observation["runtimeId"]) == 64
-            assert observation["schemaVersion"] == 2
+            assert observation["schemaVersion"] == 3
             assert observation["drained"] and not observation["finalMeterVerified"]
             assert observation["refundableBytes"] == 0
+            assert [m["email"] for m in observation["inboundMeters"]] == sorted(
+                [EMAIL_A, EMAIL_A_CDN]), observation
             assert (observation["uplinkBytes"] + observation["downlinkBytes"]) >= before_a + before_cdn, (
                 "Observed checkpoint silently omitted the independently billed CDN email", observation,
                 before_a, before_cdn

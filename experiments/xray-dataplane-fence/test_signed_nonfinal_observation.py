@@ -20,7 +20,7 @@ SPEC.loader.exec_module(evidence)
 
 def checkpoint(node=7):
     return {
-        "schemaVersion": 2, "email": "xmesh-u1--MAIN",
+        "schemaVersion": 3, "email": "xmesh-u1--MAIN",
         "nodeId": node, "userId": 1,
         "epoch": "11111111-1111-4111-8111-111111111111",
         "meterEpoch": "22222222-2222-4222-8222-222222222222",
@@ -28,6 +28,8 @@ def checkpoint(node=7):
         "revision": 4,
         "revocationId": "44444444-4444-4444-8444-444444444444",
         "runtimeId": "a" * 64, "uplinkBytes": 90, "downlinkBytes": 20,
+        "inboundMeters": [{"email": "xmesh-u1--MAIN", "uplinkBytes": 90,
+                          "downlinkBytes": 20}],
         "drained": True, "finalMeterVerified": False,
         "refundableBytes": 0,
     }
@@ -54,6 +56,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
                        capture_output=True)
         self.valid_binding = {
             "scopeBoundToSignedPolicy": True,
+            "completeSignedInboundScopeObserved": True,
             "finalMeterVerified": False, "refundableBytes": 0,
         }
 
@@ -75,6 +78,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         valid = evidence.verify_envelope(signed, 7, self.pub)
         self.assertEqual(valid["checkpoint"], cp)
         self.assertFalse(valid["finalMeterVerified"])
+        self.assertTrue(valid["completeSignedInboundScopeObserved"])
         self.assertFalse(valid["settlementEligible"])
         self.assertEqual(valid["refundableBytes"], 0)
         target = self.output / evidence.receipt_name(cp)
@@ -151,6 +155,32 @@ class SignedNonfinalObservationTests(unittest.TestCase):
             changer(altered)
             with self.assertRaises(ValueError):
                 evidence.verify_envelope(altered, 7, self.pub)
+
+    def test_signed_envelope_never_accepts_incomplete_inbound_row_data(self):
+        good = self.create()
+        for mutator in (
+            lambda x: x["payload"]["checkpoint"]["inboundMeters"].clear(),
+            lambda x: x["payload"]["checkpoint"]["inboundMeters"][0].update(
+                uplinkBytes=92),
+            lambda x: x["payload"].update(
+                completeSignedInboundScopeObserved=False),
+            lambda x: x["payload"]["checkpoint"]["inboundMeters"].append(
+                copy.deepcopy(x["payload"]["checkpoint"]["inboundMeters"][0])),
+        ):
+            altered = copy.deepcopy(good)
+            mutator(altered)
+            with self.subTest(mutator=mutator), self.assertRaises(ValueError):
+                evidence.verify_envelope(altered, 7, self.pub)
+
+    def test_guard_must_confirm_complete_signed_scope_before_signing(self):
+        partial = {
+            "scopeBoundToSignedPolicy": True,
+            "completeSignedInboundScopeObserved": False,
+            "finalMeterVerified": False, "refundableBytes": 0,
+        }
+        with self.assertRaisesRegex(ValueError, "safely bound"):
+            self.create(binding=partial)
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_wrong_node_public_key_cannot_verify(self):
         signed = self.create()

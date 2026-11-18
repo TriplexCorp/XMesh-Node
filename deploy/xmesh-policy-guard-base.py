@@ -407,11 +407,11 @@ def verify_committed_observed_checkpoint(state_dir, node_id, checkpoint, ledger)
     keys = {
         "schemaVersion", "email", "nodeId", "userId", "epoch", "meterEpoch",
         "reservationId", "revision", "revocationId", "runtimeId",
-        "uplinkBytes", "downlinkBytes", "drained", "finalMeterVerified",
-        "refundableBytes",
+        "uplinkBytes", "downlinkBytes", "inboundMeters",
+        "drained", "finalMeterVerified", "refundableBytes",
     }
     if set(checkpoint) != keys or type(checkpoint.get("schemaVersion")) is not int or (
-            checkpoint["schemaVersion"] != 2):
+            checkpoint["schemaVersion"] != 3):
         raise ValueError("Invalid Xray observed checkpoint schema")
     if checkpoint["drained"] is not True or checkpoint["finalMeterVerified"] is not False or (
             type(checkpoint["refundableBytes"]) is not int or checkpoint["refundableBytes"] != 0):
@@ -470,7 +470,9 @@ def verify_committed_observed_checkpoint(state_dir, node_id, checkpoint, ledger)
     # still shows which authenticated Xray email belongs to this user.
     signed_config = policy_doc.get("config", {})
     identities = {u["userId"]: u["xrayId"] for u in policy["users"]}
-    matched = False
+    # The signed COMMITTED policy is authoritative for EVERY inbound
+    # credential of this user, including signed but idle CDN listeners.
+    expected_emails = set()
     for inbound in signed_config.get("inbounds", []):
         if inbound.get("tag") == "xmesh_stats_in":
             continue
@@ -479,15 +481,49 @@ def verify_committed_observed_checkpoint(state_dir, node_id, checkpoint, ledger)
         scoped["_protocol"] = inbound["protocol"]
         scoped["_method"] = inbound["settings"].get("method", "")
         for account in accounts:
-            if (account.get("email") == email and
-                    account_uuid(account, credential_key, scoped) == user["xrayId"]):
-                matched = True
-    if not matched:
-        raise ValueError("Xray observed email does not match signed user credential")
+            if account_uuid(account, credential_key, scoped) != user["xrayId"]:
+                continue
+            signed_email = account.get("email")
+            if not isinstance(signed_email, str) or not signed_email or (
+                    len(signed_email.encode("utf-8")) > 128 or
+                    signed_email in expected_emails):
+                raise ValueError("Duplicate or missing signed inbound meter identity")
+            expected_emails.add(signed_email)
+    if email not in expected_emails or not 0 < len(expected_emails) <= 16:
+        raise ValueError("Xray observed email does not match complete signed scope")
+    meters = checkpoint["inboundMeters"]
+    if not isinstance(meters, list) or len(meters) != len(expected_emails):
+        raise ValueError("Missing signed inbound meter rows")
+    meter_emails = []
+    total_up = total_down = 0
+    for row in meters:
+        if not isinstance(row, dict) or set(row) != {
+                "email", "uplinkBytes", "downlinkBytes"}:
+            raise ValueError("Malformed signed inbound meter row")
+        alias = row["email"]
+        if not isinstance(alias, str) or alias not in expected_emails:
+            raise ValueError("Unexpected unsigned Xray inbound meter identity")
+        meter_emails.append(alias)
+        for direction in ("uplinkBytes", "downlinkBytes"):
+            value = row[direction]
+            if type(value) is not int or not 0 <= value < 2**63:
+                raise ValueError("Invalid per-inbound Xray traffic counter")
+        total_up += row["uplinkBytes"]
+        total_down += row["downlinkBytes"]
+        if total_up + total_down >= 2**63:
+            raise ValueError("Xray inbound meter overflow")
+    if meter_emails != sorted(expected_emails):
+        raise ValueError("Incomplete, duplicate or unordered signed inbound meter")
+    if (total_up != checkpoint["uplinkBytes"] or
+            total_down != checkpoint["downlinkBytes"]):
+        raise ValueError("Signed inbound meter totals do not match checkpoint")
     return {
         "scopeBoundToSignedPolicy": True, "userId": checkpoint["userId"],
         "nodeId": node_id, "revocationId": checkpoint["revocationId"],
-        "runtimeId": runtime_id, "observedRawBytes": (
+        "runtimeId": runtime_id,
+        "completeSignedInboundScopeObserved": True,
+        "signedInboundCount": len(expected_emails),
+        "observedRawBytes": (
             checkpoint["uplinkBytes"] + checkpoint["downlinkBytes"]),
         "finalMeterVerified": False, "refundableBytes": 0,
     }

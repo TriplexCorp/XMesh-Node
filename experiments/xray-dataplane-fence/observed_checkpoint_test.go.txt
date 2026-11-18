@@ -6,6 +6,7 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "reflect"
     "sync"
     "testing"
 
@@ -103,7 +104,7 @@ func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T
                 t.Fatalf("observed main/CDN bytes are not summed or were declared final: %+v",observed)
             }
             reread,err:=persistObservedCheckpoint(scope)
-            if err!=nil||reread!=observed {
+            if err!=nil||!reflect.DeepEqual(reread,observed) {
                 t.Fatalf("multi-inbound replay changed immutable observation: %+v %v",reread,err)
             }
             // An alias may not mint a second per-user observed slot.
@@ -119,7 +120,7 @@ func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
     add(100,230)
     record,err:=persistObservedCheckpoint(testScope("alice",testRevocation))
     if err!=nil{t.Fatal(err)}
-    if record.SchemaVersion!=2||record.checkpointScope!=testScope("alice",testRevocation)||
+    if record.SchemaVersion!=3||record.checkpointScope!=testScope("alice",testRevocation)||
        record.UplinkBytes!=100||record.DownlinkBytes!=230||!record.Drained||
        record.FinalMeterVerified||record.RefundableBytes!=0{
         t.Fatalf("invalid observed-only record: %+v",record)
@@ -131,7 +132,7 @@ func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
     contents,err:=os.ReadFile(file)
     if err!=nil{t.Fatal(err)}
     repeat,err:=persistObservedCheckpoint(testScope("alice",testRevocation))
-    if err!=nil||repeat!=record{t.Fatalf("non-idempotent retry: %+v %v",repeat,err)}
+    if err!=nil||!reflect.DeepEqual(repeat,record){t.Fatalf("non-idempotent retry: %+v %v",repeat,err)}
     add(1,0)
     if _,err:=persistObservedCheckpoint(testScope("alice",testRevocation));err==nil{
         t.Fatal("late counter growth silently accepted immutable observation")
@@ -230,7 +231,7 @@ func TestObservedLeaseScopeFailClosed(t *testing.T){
             t.Fatalf("replayed checkpoint with substituted %s",name)
         }
         actual,err:=loadCheckpoint(checkpointPath(dir,valid.Email))
-        if err!=nil || actual!=saved {
+        if err!=nil || !reflect.DeepEqual(actual,saved) {
             t.Fatalf("original journal was changed: %+v %v",actual,err)
         }
     }
