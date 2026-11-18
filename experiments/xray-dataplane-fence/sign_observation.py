@@ -107,12 +107,14 @@ def verify_envelope(envelope, node_id, public_key_path):
     p = envelope["payload"]
     if not isinstance(p, dict) or set(p) != {
             "schemaVersion", "kind", "nodeId", "checkpoint",
-            "checkpointSha256", "boundToCommittedPolicy", "finalMeterVerified",
+            "checkpointSha256", "boundToCommittedPolicy",
+            "completeSignedInboundScopeObserved", "finalMeterVerified",
             "settlementEligible", "refundableBytes"} or (
             type(p["schemaVersion"]) is not int or p["schemaVersion"] != 1 or
             p["kind"] != KIND or type(p["nodeId"]) is not int or
             p["nodeId"] != node_id or node_id <= 0 or
             p["boundToCommittedPolicy"] is not True or
+            p["completeSignedInboundScopeObserved"] is not True or
             p["finalMeterVerified"] is not False or
             p["settlementEligible"] is not False or
             type(p["refundableBytes"]) is not int or p["refundableBytes"] != 0):
@@ -126,6 +128,32 @@ def verify_envelope(envelope, node_id, public_key_path):
             checkpoint["refundableBytes"] != 0 or
             checkpoint.get("drained") is not True):
         raise ValueError("invalid nonfinal Xray checkpoint")
+    rows = checkpoint.get("inboundMeters")
+    if not isinstance(rows, list) or not 0 < len(rows) <= 16:
+        raise ValueError("missing signed inbound meter rows")
+    prev = ""
+    up = down = 0
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+                "email", "uplinkBytes", "downlinkBytes"}:
+            raise ValueError("malformed signed inbound meter row")
+        alias = row["email"]
+        if not isinstance(alias, str) or not alias or alias <= prev or (
+                len(alias.encode("utf-8")) > 128):
+            raise ValueError("unordered or duplicate signed inbound email")
+        prev = alias
+        for direction in ("uplinkBytes", "downlinkBytes"):
+            value = row[direction]
+            if type(value) is not int or not 0 <= value < 2**63:
+                raise ValueError("invalid signed inbound counter")
+        up += row["uplinkBytes"]
+        down += row["downlinkBytes"]
+        if up + down >= 2**63:
+            raise ValueError("signed inbound counter overflow")
+    if (not any(row["email"] == checkpoint.get("email") for row in rows) or
+            up != checkpoint.get("uplinkBytes") or
+            down != checkpoint.get("downlinkBytes")):
+        raise ValueError("signed inbound totals or request identity mismatch")
     if p["checkpointSha256"] != hashlib.sha256(canonical(checkpoint)).hexdigest():
         raise ValueError("signed Xray checkpoint digest mismatch")
     message = DOMAIN + canonical(p)
@@ -232,6 +260,7 @@ def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir):
         "checkpoint": checkpoint,
         "checkpointSha256": hashlib.sha256(canonical(checkpoint)).hexdigest(),
         "boundToCommittedPolicy": True,
+        "completeSignedInboundScopeObserved": True,
         "finalMeterVerified": False, "settlementEligible": False,
         "refundableBytes": 0,
     }
