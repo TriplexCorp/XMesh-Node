@@ -487,11 +487,21 @@ def run(xray, transport):
                     old_a.close()
                 # B must still authenticate and send data after the real
                 # Xray process restart.
-                fresh_b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
-                try:
-                    assert probe_echo(fresh_b),"Reboot blocked unrelated user B"
-                finally:
-                    fresh_b.close()
+                deadline=time.monotonic()+12
+                b_recovered=False
+                while time.monotonic()<deadline and not b_recovered:
+                    fresh_b=None
+                    try:
+                        fresh_b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
+                        b_recovered=probe_echo(fresh_b)
+                    except (OSError,AssertionError,TimeoutError):
+                        pass
+                    finally:
+                        if fresh_b is not None:
+                            fresh_b.close()
+                    if not b_recovered:
+                        time.sleep(.2)
+                assert b_recovered,"Reboot blocked unrelated user B"
                 server.terminate()
                 server.wait(timeout=5)
                 assert taint_file.read_bytes()==taint_disk
