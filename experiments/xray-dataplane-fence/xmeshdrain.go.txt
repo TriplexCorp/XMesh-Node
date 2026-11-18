@@ -192,9 +192,11 @@ func ScopedEmail(ctx context.Context) string {
 
 // AuditRawCounterMutation interlocks ALL experimental StatsService raw user
 // byte mutations with the fence and snapshot journal, even when called outside
-// known transport wrappers. A post-fence Add+Set ABA poisons the observation.
-// This is NONFINAL experimental detection, never a refundable meter.
-func AuditRawCounterMutation(name string, mutate func() int64) int64 {
+// known transport wrappers. Any Set() or negative Add() taints the user EVEN
+// BEFORE the fence: otherwise a pre-stop reset could erase legitimate bytes
+// without being detected by stable post-drain observations. Every Add() after
+// the fence is also tainted. This remains NONFINAL, never a refundable meter.
+func AuditRawCounterMutation(name string, preFenceUnsafe bool, mutate func() int64) int64 {
     if !enabled { return mutate() }
     raw, ok := strings.CutPrefix(name, "user>>>")
     if !ok { return mutate() }
@@ -204,12 +206,20 @@ func AuditRawCounterMutation(name string, mutate func() int64) int64 {
     }
     gate.Lock()
     defer gate.Unlock()
-    if u := gate.users[canonicalMeterUser(email)]; u != nil && u.fenced {
-        // The marker MUST survive a crash that happens immediately after
-        // this mutation. Persist before allowing Counter.Add/Set to run.
-        // An unjournaled mutation is strictly worse than a failed process.
+    userKey := canonicalMeterUser(email)
+    u := gate.users[userKey]
+    if preFenceUnsafe && u == nil {
+        // Even a previously unseen user byte counter cannot silently reset
+        // before the first tracked authenticated session is registered.
+        u = ensureUser(userKey)
+    }
+    if u != nil && (u.fenced || preFenceUnsafe) {
+        // Crash-durable marker MUST precede the counter mutation, including
+        // zero-value Set() and negative Add() before a revocation request.
+        // A pre-fence orphan marker prevents unsafe Xray restart until
+        // trusted operator recovery, rather than reopening a lost meter.
         u.lateCounterMutation = true
-        if err := commitDurableCounterTaint(gate.journalDir, canonicalMeterUser(email)); err != nil {
+        if err := commitDurableCounterTaint(gate.journalDir, userKey); err != nil {
             panic(fmt.Sprintf("experimental Xray counter taint cannot be persisted; deny: %v", err))
         }
     }

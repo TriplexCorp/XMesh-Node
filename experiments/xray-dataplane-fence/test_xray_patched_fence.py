@@ -445,7 +445,7 @@ def run(xray, transport):
             assert taint_file.read_bytes()==taint_disk
             poisoned=request_fence(socket_file,EMAIL_A,revocation_id,
                                    expected_status=409)
-            assert b"late Xray StatsService counter mutation" in poisoned,poisoned
+            assert b"unsafe Xray StatsService counter mutation or reset" in poisoned,poisoned
             assert json.loads(journal_file.read_text())==observation
             # User B has a different accounting identity, and remains served.
             assert probe_echo(b),"Raw StatsService reset for A blocked unrelated user B"
@@ -479,7 +479,7 @@ def run(xray, transport):
                 assert taint_file.read_bytes()==taint_disk
                 post_restart=request_fence(socket_file,EMAIL_A,revocation_id,
                                            expected_status=409)
-                assert b"late Xray StatsService counter mutation" in post_restart,post_restart
+                assert b"unsafe Xray StatsService counter mutation or reset" in post_restart,post_restart
                 old_a=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
                 try:
                     assert not probe_echo(old_a),"Reboot reopened revoked A despite taint"
@@ -502,9 +502,58 @@ def run(xray, transport):
                     if not b_recovered:
                         time.sleep(.2)
                 assert b_recovered,"Reboot blocked unrelated user B"
+                # Real Reset_=true on B runs BEFORE B is fenced. Stable
+                # after-fence reads alone cannot recover the erased bytes.
+                # Verify this second account is tainted without affecting A.
+                b_name=f"user>>>{EMAIL_B}>>>traffic>>>uplink"
+                b_prior=command(xray,"api","stats",
+                                f"--server=127.0.0.1:{api_port}",
+                                "-name",b_name,"-reset")
+                b_stat=json.loads(b_prior.stdout)["stat"]
+                assert b_stat["name"]==b_name and int(b_stat["value"])>0,b_stat
+                b_key="xmesh-u102"
+                b_taint=root/("taint-"+hashlib.sha256(b_key.encode()).hexdigest()+".json")
+                assert b_taint.is_file() and b_taint.stat().st_mode&0o077==0
+                b_taint_disk=b_taint.read_bytes()
+                assert json.loads(b_taint_disk)=={
+                    "schemaVersion":1,"canonicalUser":b_key},b_taint_disk
+                assert probe_echo(b),"B connection died before its requested fence"
+                b_revoke=str(uuid.uuid4())
+                b_refusal=request_fence(socket_file,EMAIL_B,b_revoke,
+                                        expected_status=409,
+                                        scope_override={"userId":102})
+                assert b"unsafe Xray StatsService counter mutation or reset" in b_refusal,b_refusal
+                b_observed=root/("observed-"+hashlib.sha256(b_key.encode()).hexdigest()+".json")
+                assert not b_observed.exists(),"B received a forged post-reset observed meter"
+                assert taint_file.read_bytes()==taint_disk
                 server.terminate()
                 server.wait(timeout=5)
                 assert taint_file.read_bytes()==taint_disk
+                assert b_taint.read_bytes()==b_taint_disk
+                # A second real Linux Xray incarnation must restore BOTH
+                # independent fenced users and B's pre-fence taint.
+                server=subprocess.Popen([xray,"run","-config",str(server_json)],
+                                        stdout=log_a,stderr=subprocess.STDOUT,env=env)
+                deadline=time.monotonic()+15
+                while time.monotonic()<deadline:
+                    if server.poll() is not None:
+                        raise AssertionError("Xray lost crash-safe pre-fence B taint")
+                    try:
+                        with socket.socket(socket.AF_UNIX) as probe:
+                            probe.settimeout(.5)
+                            probe.connect(str(socket_file))
+                        break
+                    except OSError:
+                        time.sleep(.1)
+                else:
+                    raise AssertionError("Xray did not restore both users' durable fences")
+                b_restart=request_fence(socket_file,EMAIL_B,b_revoke,
+                                        expected_status=409,
+                                        scope_override={"userId":102})
+                assert b"unsafe Xray StatsService counter mutation or reset" in b_restart,b_restart
+                assert b_taint.read_bytes()==b_taint_disk
+                server.terminate()
+                server.wait(timeout=5)
             report={
                 "patchedXray":"a4a3dff5b20c2faae567b742c172c7b95e75c083",
                 "testedTransport":transport,
@@ -526,6 +575,7 @@ def run(xray, transport):
                 "realStatsServiceResetReplayDenied":True,
                 "realStatsServiceTaintSurvivedExit":True,
                 "realXrayRestartRestoresTaint":transport=="tcp",
+                "realPreFenceStatsResetAndRestartFailClosed":transport=="tcp",
                 "boundedStabilityStillNotTerminalMeter":True,
                 "observedJournalFsynced":True,
                 "observedJournalSurvivedProcessExit":True,

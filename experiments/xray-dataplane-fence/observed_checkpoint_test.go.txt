@@ -319,6 +319,104 @@ func TestUnrelatedRawCounterMutationCannotPoisonUser(t *testing.T) {
     }
 }
 
+func TestAuditedStatsServiceRejectsCounterRemovalAndReplacement(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    _,_ = setupCheckpoint(t,email,42,18)
+    name:="user>>>"+email+">>>traffic>>>uplink"
+    manager:=observed.manager
+    original:=manager.GetCounter(name)
+    if original==nil {t.Fatal("missing real user meter")}
+    if err:=manager.UnregisterCounter(name);err==nil {
+        t.Fatal("Xray accepted deletion of an audited per-user byte meter")
+    }
+    if manager.GetCounter(name)!=original || original.Value()!=42 {
+        t.Fatal("refused unregister still reset the raw byte counter")
+    }
+    if _,err:=manager.RegisterCounter(name);err==nil {
+        t.Fatal("Xray replaced an existing audited counter with a new zero value")
+    }
+    if err:=manager.UnregisterCounter("inbound>>>test-api>>>traffic>>>uplink");err!=nil {
+        t.Fatalf("unrelated management-only counter was denied: %v",err)
+    }
+    if _,err:=persistObservedCheckpoint(testScope(email,testRevocation));err!=nil {
+        t.Fatalf("harmless refused removal changed immutable nonfinal accounting: %v",err)
+    }
+}
+
+func TestPreFenceStatsServiceResetAndNegativeAddFailClosed(t *testing.T) {
+    for _,kind:=range []string{"Set","NegativeAdd"}{
+        t.Run(kind,func(t *testing.T){
+            resetGate()
+            observed.Lock()
+            observed.manager=nil
+            observed.directory=""
+            observed.runtimeID=""
+            observed.Unlock()
+            dir:=t.TempDir()
+            if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+            if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+            manager,err:=xstats.NewManager(context.Background(),&xstats.Config{})
+            if err!=nil{t.Fatal(err)}
+            BindStatsManager(manager)
+            email:="xmesh-u101--vless-main"
+            up,err:=manager.RegisterCounter("user>>>"+email+">>>traffic>>>uplink")
+            if err!=nil{t.Fatal(err)}
+            down,err:=manager.RegisterCounter("user>>>"+email+">>>traffic>>>downlink")
+            if err!=nil{t.Fatal(err)}
+            up.Add(100)
+            down.Add(50)
+            s:=ctx(2201)
+            if err:=Register(s,email,func(){Finish(s);RouteFinish(s)});err!=nil{t.Fatal(err)}
+            // This is BEFORE any durable fence or Xray session cancellation.
+            if kind=="Set"{up.Set(0)}else{up.Add(-7)}
+            taint:=durableCounterTaintPath(dir,canonicalMeterUser(email))
+            if _,err:=readDurableCounterTaint(taint);err!=nil {
+                t.Fatalf("pre-fence %s lost its fsynced taint: %v",kind,err)
+            }
+            // A crash before the fence is published must not restart Xray
+            // with untrusted reset user traffic and freshly zeroed counters.
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatal("Xray restarted after a pre-fence reset with no durable deny scope")
+            }
+            // Reestablish original in-memory state to finish the fixture's
+            // user-scoped fence, then verify a tainted meter cannot publish.
+            resetGate()
+            if err:=os.Remove(taint);err!=nil{t.Fatal(err)}
+            if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+            manager2,err:=xstats.NewManager(context.Background(),&xstats.Config{})
+            if err!=nil{t.Fatal(err)}
+            BindStatsManager(manager2)
+            uplink,err:=manager2.RegisterCounter("user>>>"+email+">>>traffic>>>uplink")
+            if err!=nil{t.Fatal(err)}
+            downlink,err:=manager2.RegisterCounter("user>>>"+email+">>>traffic>>>downlink")
+            if err!=nil{t.Fatal(err)}
+            uplink.Add(100)
+            downlink.Add(50)
+            s2:=ctx(2202)
+            if err:=Register(s2,email,func(){Finish(s2);RouteFinish(s2)});err!=nil{t.Fatal(err)}
+            // Test another unsafe pre-fence Set while the authorized
+            // traffic stream is live, followed by a valid durable fence.
+            uplink.Set(0)
+            scope:=testScope(email,testRevocation)
+            result,err:=fenceScoped(context.Background(),scope)
+            if err!=nil||!result.Drained{t.Fatalf("fence failed: %+v %v",result,err)}
+            if _,err:=persistObservedCheckpoint(scope);err==nil {
+                t.Fatal("pre-fence reset yielded an accepted observed checkpoint")
+            }
+            if _,err:=os.Lstat(checkpointPath(dir,email));!errors.Is(err,os.ErrNotExist) {
+                t.Fatalf("published false clean bytes after pre-fence reset: %v",err)
+            }
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err!=nil {t.Fatal(err)}
+            recovered:=gate.users[canonicalMeterUser(email)]
+            if recovered==nil || !recovered.fenced || !recovered.lateCounterMutation{
+                t.Fatal("pre-fence raw reset was forgotten after durable fence and restart")
+            }
+        })
+    }
+}
+
 func TestObservedLeaseScopeFailClosed(t *testing.T){
     dir,_:=setupCheckpoint(t,"scoped",0,0)
     valid:=testScope("scoped",testRevocation)
