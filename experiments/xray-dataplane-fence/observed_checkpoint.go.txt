@@ -68,6 +68,7 @@ func configureObservedCheckpoint(directory string) error {
     observed.Lock()
     defer observed.Unlock()
     observed.directory = directory
+    observed.manager = nil // An old in-memory Xray process meter is never recoverable.
     observed.runtimeID = hex.EncodeToString(bytes[:])
     return nil
 }
