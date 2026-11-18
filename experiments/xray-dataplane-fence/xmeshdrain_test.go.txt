@@ -98,8 +98,13 @@ func TestSignedUserIdentityAcrossMainAndCDNEmailsCannotBypassFence(t *testing.T)
         canonicalMeterUser(mainEmail) != "xmesh-u101" {
         t.Fatal("signed same-user accounting identities not combined")
     }
+    for _, tag := range []string{"xmesh-u101--PL%2FCDN", "xmesh-u101--🇵🇱CDN"} {
+        if canonicalMeterUser(tag) != "xmesh-u101" {
+            t.Fatalf("signed encoded transport tag escaped user fence: %s",tag)
+        }
+    }
     for _, malformed := range []string{"xmesh-u01--vless-main", "xmesh-u0--cdn",
-        "xmesh-u101--", "xmesh-u101--invalid/tag", "xmesh-u102--cdn"} {
+        "xmesh-u101--", "xmesh-u101--invalid>tag", "xmesh-u102--cdn"} {
         if canonicalMeterUser(malformed) == canonicalMeterUser(mainEmail) {
             t.Fatalf("an unrelated or invalid identity was merged: %s",malformed)
         }
