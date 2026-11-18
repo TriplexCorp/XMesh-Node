@@ -29,12 +29,15 @@ from test_xray_patched_fence import (
 )
 
 
-def wait_replaced_socket(path, prior_inode, process):
+def wait_replaced_socket(path, process):
     deadline=time.monotonic()+15
     while time.monotonic()<deadline:
         if process.poll() is not None:
             raise AssertionError("Xray failed to restore durable fence")
-        if path.exists() and path.stat().st_ino!=prior_inode:
+        # A freshly bound Unix socket may reuse the deleted endpoint's
+        # inode immediately. A successful connection after the old PID was
+        # confirmed dead is the reliable live-listener check, not inode != old.
+        if path.exists():
             try:
                 with socket.socket(socket.AF_UNIX) as probe:
                     probe.settimeout(.5)
@@ -146,7 +149,6 @@ def run(xray):
             server=subprocess.Popen([xray,"run","-config",str(server_json)],
                                     stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
             await_socket(control,server)
-            initial_socket_inode=control.stat().st_ino
             client=subprocess.Popen([xray,"run","-config",str(client_json)],
                                     stdout=log_client,stderr=subprocess.STDOUT,env=client_env)
             a=connect_socks(socks_a,echo_port,"127.0.0.1")
@@ -179,7 +181,7 @@ def run(xray):
             server_env.pop("XMESH_EXPERIMENTAL_CRASH_AFTER_DRAIN")
             server2=subprocess.Popen([xray,"run","-config",str(server_json)],
                                      stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
-            wait_replaced_socket(control,initial_socket_inode,server2)
+            wait_replaced_socket(control,server2)
             retry_socks_echo(socks_a,echo_port,False)
             retry_socks_echo(socks_b,echo_port,True)
             refusal=request_fence(control,EMAIL_A,revocation,expected_status=409)
