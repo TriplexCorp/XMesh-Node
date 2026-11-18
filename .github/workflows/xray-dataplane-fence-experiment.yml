@@ -30,6 +30,10 @@ jobs:
           python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_fence.py
           python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_udp.py
           python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_crash.py
+      - name: Prove immutable Node-signed nonterminal evidence fails closed
+        run: |
+          python3 -m py_compile experiments/xray-dataplane-fence/sign_observation.py experiments/xray-dataplane-fence/test_signed_nonfinal_observation.py
+          python3 experiments/xray-dataplane-fence/test_signed_nonfinal_observation.py
       - name: Checkout EXACT official Xray v26.10.31 commit
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/XTLS/Xray-core.git .experimental-xray
