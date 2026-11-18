@@ -25,8 +25,11 @@ from test_quota_v2_xray_user_inbound_drain import (  # noqa: E402
     probe_echo,
 )
 
-EMAIL_A = "xmesh-experiment-a"
-EMAIL_B = "xmesh-experiment-b"
+EMAIL_A = "xmesh-u101--vless-share"
+EMAIL_A_CDN = "xmesh-u101--vless-cdn"
+EMAIL_A_UNSAFE = "xmesh-u101--vless-unsafe"
+EMAIL_A_USER_KEY = "xmesh-u101"
+EMAIL_B = "xmesh-u102--vless-share"
 # Run a real patched-Xray process per transport. Production remains untouched.
 TRANSPORTS = ("tcp", "ws", "xhttp", "xhttp-stream-up",
               "xhttp-stream-one", "mux-tcp")
@@ -154,7 +157,7 @@ def run(xray, transport):
         socket_file = root / "drain.sock"
         revocation_id = str(uuid.uuid4())
         journal_file = root / ("observed-" +
-                               hashlib.sha256(EMAIL_A.encode()).hexdigest() + ".json")
+                               hashlib.sha256(EMAIL_A_USER_KEY.encode()).hexdigest() + ".json")
         echo = EchoServer(("127.0.0.1",0),EchoHandler)
         threading.Thread(target=echo.serve_forever,daemon=True).start()
         api_port, vless_port, cdn_port, unsafe_port, socks_a, socks_cdn, socks_unsafe, socks_b, socks_blank = (
@@ -184,14 +187,14 @@ def run(xray, transport):
                 {"tag":"vless-cdn","listen":"127.0.0.1","port":cdn_port,
                  "protocol":"vless",
                  "settings":{"decryption":"none","clients":[
-                     {"id":identity_a,"email":EMAIL_A,"level":0}]},
+                     {"id":identity_a,"email":EMAIL_A_CDN,"level":0}]},
                  "streamSettings":{"network":"tcp","security":"none"}},
                 # This third live Xray listener is intentionally absent
                 # from the declared billable allowlist; it must reject A.
                 {"tag":"vless-unsafe","listen":"127.0.0.1","port":unsafe_port,
                  "protocol":"vless",
                  "settings":{"decryption":"none","clients":[
-                     {"id":identity_a,"email":EMAIL_A,"level":0}]},
+                     {"id":identity_a,"email":EMAIL_A_UNSAFE,"level":0}]},
                  "streamSettings":{"network":"tcp","security":"none"}},
                 {"tag":"xmesh_stats_in","listen":"127.0.0.1","port":api_port,
                  "protocol":"dokodemo-door","settings":{
@@ -280,6 +283,8 @@ def run(xray, transport):
             b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             echo_bytes(a,8192)
             echo_bytes(cdn,8192)
+            before_cdn = wait_counter(xray, api_port, EMAIL_A_CDN)
+            assert before_cdn > 0, "CDN per-inbound email was not billed"
             # The private StatsService remains available alongside both
             # metered inbounds and the deliberately unlisted third listener.
             before_unlisted = wait_counter(xray, api_port, EMAIL_A)
@@ -352,6 +357,8 @@ def run(xray, transport):
             finally:
                 fresh_b.close()
             after_a=wait_counter(xray,api_port,EMAIL_A,before_a)
+            after_cdn=wait_counter(xray,api_port,EMAIL_A_CDN,before_cdn)
+            assert after_cdn >= before_cdn
             after_b=wait_counter(xray,api_port,EMAIL_B,before_b+1)
             repeat=request_fence(socket_file,EMAIL_A,revocation_id)
             assert repeat["fenced"] and repeat["drained"] and repeat["active"]==0
@@ -382,6 +389,8 @@ def run(xray, transport):
                 "userAFenced":True,"existingUserAStreamEnded":True,
                 "newUserAStreamsRejected":True,
                 "secondaryCDNInboundRevoked":True,
+                "distinctSignedInboundEmailsShareUserFence":True,
+                "observedSnapshotStillNonfinalAndDoesNotAggregateCDN":True,
                 "unlistedBillableInboundDenied":True,
                 "blankVlessEmailRejected":True,
                 "existingUserBStreamSurvived":True,"newUserBStreamsAccepted":True,
