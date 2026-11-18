@@ -81,8 +81,7 @@ def run(root: Path):
         source,
         '\tif user != nil && len(user.Email) > 0 {\n\t\tp := d.policy.ForLevel(user.Level)',
         '''    // Account-bearing VLESS user admission precedes ALL counter wrapping.
-    if sessionInbound != nil && sessionInbound.User != nil &&
-        sessionInbound.Tag == "vless-share" {
+    if xmeshdrain.IsTrackedInbound(ctx) {
         stopStream := func() {
             if sessionInbound.Conn != nil { _ = sessionInbound.Conn.Close() }
             common.Close(inboundLink.Writer)
@@ -117,8 +116,7 @@ def run(root: Path):
         '''// Experimental link dispatch path: admission must be confirmed
     // BEFORE installing user stats wrappers. Otherwise a late UDP/XUDP
     // packet can increment the counter even when Register rejects it.
-    if subject := session.InboundFromContext(ctx); subject != nil &&
-        subject.User != nil && subject.Tag == "vless-share" {
+    if subject := session.InboundFromContext(ctx); xmeshdrain.IsTrackedInbound(ctx) {
         stopStream := func() {
             if subject.Conn != nil { _ = subject.Conn.Close() }
             common.Close(outbound.Writer)
