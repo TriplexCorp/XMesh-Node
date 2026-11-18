@@ -12,6 +12,7 @@ import (
     "net/http"
     "os"
     "path/filepath"
+    "strings"
     "sync"
     "time"
     "syscall"
@@ -26,6 +27,48 @@ var errNoUserID = errors.New("experimental xmesh drain: missing authenticated us
 var errDuplicateSession = errors.New("experimental xmesh drain: duplicate live session ID")
 var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
     os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1"
+
+// Every user-bearing inbound must be enumerated. A single-inbound fence
+// cannot protect a second CDN/secondary listener carrying the same identity.
+var trackedInboundTags = map[string]struct{}{"vless-share": {}}
+
+func parseTrackedInboundTags(raw string) (map[string]struct{}, error) {
+    if raw == "" {
+        return map[string]struct{}{"vless-share": {}}, nil
+    }
+    parts := strings.Split(raw, ",")
+    if len(parts) == 0 || len(parts) > 16 {
+        return nil, errors.New("invalid experimental inbound coverage count")
+    }
+    allowed := make(map[string]struct{}, len(parts))
+    for _, tag := range parts {
+        if len(tag) == 0 || len(tag) > 64 {
+            return nil, errors.New("empty or oversized tracked inbound")
+        }
+        for _, c := range tag {
+            if !((c >= 'a' && c <= 'z') ||
+                 (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_') {
+                return nil, errors.New("unsafe experimental inbound tag")
+            }
+        }
+        if _, exists := allowed[tag]; exists {
+            return nil, errors.New("duplicate tracked inbound tag")
+        }
+        allowed[tag] = struct{}{}
+    }
+    return allowed, nil
+}
+
+// Reject a blank email on an explicitly covered inbound, not just nonblank
+// emails. Otherwise an authenticated connection could skip Register.
+func IsTrackedInbound(ctx context.Context) bool {
+    if !enabled { return false }
+    subject := session.InboundFromContext(ctx)
+    if subject == nil || subject.User == nil { return false }
+    _, ok := trackedInboundTags[subject.Tag]
+    return ok
+}
 
 type trackedSession struct {
     email string
@@ -99,15 +142,11 @@ func Register(ctx context.Context, email string, stop func()) error {
     return nil
 }
 
-// ScopedEmail returns a billable identity only for the explicitly targeted
-// disposable VLESS inbound. Never gate Xray management or unrelated inbounds.
+// ScopedEmail returns the billable identity of every explicitly covered
+// disposable inbound. Never affect the management or unrelated listeners.
 func ScopedEmail(ctx context.Context) string {
-    if !enabled { return "" }
-    subject:=session.InboundFromContext(ctx)
-    if subject==nil || subject.User==nil || subject.Tag!="vless-share" {
-        return ""
-    }
-    return subject.User.Email
+    if !IsTrackedInbound(ctx) { return "" }
+    return session.InboundFromContext(ctx).User.Email
 }
 
 // BeginMeterWrite starts one tracked, billable writer operation. It must
@@ -305,6 +344,10 @@ func init() {
     if !enabled {
         return
     }
+    coverage, err := parseTrackedInboundTags(
+        os.Getenv("XMESH_EXPERIMENTAL_SCOPED_INBOUNDS"))
+    if err != nil { panic(err) }
+    trackedInboundTags = coverage
     // This experiment never runs without a durable, private *observed*
     // journal. The file still does not authorize refunds.
     dir:=os.Getenv("XMESH_EXPERIMENTAL_OBSERVED_DIR")
