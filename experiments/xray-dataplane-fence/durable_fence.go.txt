@@ -15,6 +15,7 @@ import (
     "net"
     "os"
     "path/filepath"
+    "reflect"
     "strings"
     "syscall"
     "time"
@@ -52,11 +53,65 @@ func readDurableFence(path string) (durableFenceRecord,error) {
     return record,nil
 }
 
+// A crash between fsync(temp) and link(final) leaves a durable pending
+// revocation WITHOUT the final marker. Ignoring that file would re-open an
+// account on restart. Fail closed unless the pending inode is ALREADY
+// exclusively linked to the validated final marker; that case is a safe
+// post-link/pre-unlink crash which can be repaired with directory fsyncs.
+func reconcilePendingJournal(dir,name string) error {
+    pending:=filepath.Join(dir,name)
+    var final string
+    if strings.HasPrefix(name,".fence-pending-") {
+        intent,err:=readDurableFence(pending)
+        if err!=nil{return fmt.Errorf("untrusted pending fence: %w",err)}
+        final=durableFencePath(dir,intent.Email)
+        committed,err:=readDurableFence(final)
+        if err!=nil{return fmt.Errorf("unpublished pending fence; deny Xray restart: %w",err)}
+        if committed!=intent{return errors.New("pending fence conflicts with published scope")}
+    }else if strings.HasPrefix(name,".observed-pending-") {
+        partial,err:=loadCheckpoint(pending)
+        if err!=nil{return fmt.Errorf("untrusted pending observed meter: %w",err)}
+        final=checkpointPath(dir,partial.Email)
+        committed,err:=loadCheckpoint(final)
+        if err!=nil{return fmt.Errorf("unpublished pending observed meter; deny Xray restart: %w",err)}
+        if !reflect.DeepEqual(committed,partial) {
+            return errors.New("pending observed meter conflicts with published scope")
+        }
+    }else{return nil}
+    before,err:=os.Lstat(pending)
+    if err!=nil{return err}
+    linked,err:=os.Lstat(final)
+    if err!=nil{return err}
+    if !before.Mode().IsRegular() || before.Mode().Perm()!=0600 ||
+        !os.SameFile(before,linked) {
+        return errors.New("pending journal is not the same private inode as committed marker")
+    }
+    // A visible hardlink not yet fsynced at crash time is made persistent
+    // BEFORE deleting the pending filename. Crash between these fsyncs only
+    // causes a safe, repeatable reconciliation.
+    if err:=syncFenceDirectory(dir);err!=nil{return err}
+    if err:=os.Remove(pending);err!=nil{return err}
+    return syncFenceDirectory(dir)
+}
+
 // Recover fences before Xray can accept a connection. Any old observation
 // without an associated durable denial is a legacy/unverifiable state: refuse
 // startup rather than silently allowing traffic under an unsettled lease.
 func restoreDurableFences(dir string) error {
     entries,err:=os.ReadDir(dir)
+    if err!=nil{return err}
+    for _,entry:=range entries {
+        name:=entry.Name()
+        if strings.HasPrefix(name,".fence-pending-") ||
+            strings.HasPrefix(name,".observed-pending-") {
+            if err:=reconcilePendingJournal(dir,name);err!=nil{
+                return fmt.Errorf("unsafe crash-interrupted Xray journal %q: %w",name,err)
+            }
+        }
+    }
+    // Re-read after removing validated post-link crash remnants. Any
+    // uncommitted pending fence has already stopped startup above.
+    entries,err=os.ReadDir(dir)
     if err!=nil{return err}
     scopes:=map[string]checkpointScope{}
     for _,entry:=range entries {
