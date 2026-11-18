@@ -80,14 +80,20 @@ def key_descriptor(key_path):
 def sign_bytes(key_path, message):
     key_fd = key_descriptor(key_path)
     try:
-        proc = subprocess.run(
-            ["openssl", "pkeyutl", "-sign", "-rawin",
-             "-inkey", "/proc/self/fd/" + str(key_fd)],
-            input=message, capture_output=True, timeout=10, check=False,
-            pass_fds=(key_fd,))
-        if proc.returncode != 0 or len(proc.stdout) != 64:
-            raise ValueError("Node Ed25519 signing failed")
-        return proc.stdout.hex()
+        # Ed25519 pkeyutl uses one-shot signing and needs a seekable input,
+        # not an anonymous stdin stream.
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="xmesh-observation-sign-") as root:
+            input_file = Path(root) / "message"
+            input_file.write_bytes(message)
+            proc = subprocess.run(
+                ["openssl", "pkeyutl", "-sign", "-rawin", "-in",
+                 str(input_file), "-inkey", "/proc/self/fd/" + str(key_fd)],
+                capture_output=True, timeout=10, check=False,
+                pass_fds=(key_fd,))
+            if proc.returncode != 0 or len(proc.stdout) != 64:
+                raise ValueError("Node Ed25519 signing failed")
+            return proc.stdout.hex()
     finally:
         os.close(key_fd)
 
@@ -129,10 +135,13 @@ def verify_envelope(envelope, node_id, public_key_path):
     with tempfile.TemporaryDirectory(prefix="xmesh-observation-verify-") as root:
         signature = Path(root) / "sig"
         signature.write_bytes(bytes.fromhex(envelope["signature"]))
+        message_file = Path(root) / "message"
+        message_file.write_bytes(message)
         proc = subprocess.run(
-            ["openssl", "pkeyutl", "-verify", "-rawin", "-pubin",
-             "-inkey", str(public_key_path), "-sigfile", str(signature)],
-            input=message, capture_output=True, timeout=10, check=False)
+            ["openssl", "pkeyutl", "-verify", "-rawin", "-in",
+             str(message_file), "-pubin", "-inkey", str(public_key_path),
+             "-sigfile", str(signature)],
+            capture_output=True, timeout=10, check=False)
         if proc.returncode != 0:
             raise ValueError("Node Ed25519 observation signature mismatch")
     return p
