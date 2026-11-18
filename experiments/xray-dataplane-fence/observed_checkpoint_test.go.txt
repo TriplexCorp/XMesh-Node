@@ -25,7 +25,7 @@ func testScope(email,revocation string) checkpointScope {
     }
 }
 
-func setupCheckpoint(t *testing.T,email string) (string,func(int64,int64)) {
+func setupCheckpoint(t *testing.T,email string,initialUp,initialDown int64) (string,func(int64,int64)) {
     t.Helper()
     resetGate()
     observed.Lock()
@@ -44,6 +44,10 @@ func setupCheckpoint(t *testing.T,email string) (string,func(int64,int64)) {
     if err!=nil{t.Fatal(err)}
     down,err:=manager.RegisterCounter("user>>>"+email+">>>traffic>>>downlink")
     if err!=nil{t.Fatal(err)}
+    // Genuine initial usage precedes revocation; a post-fence increment is
+    // now a violation, including if a later Set restores the same total.
+    up.Add(initialUp)
+    down.Add(initialDown)
     s:=ctx(666)
     if err:=Register(s,email,func(){});err!=nil{t.Fatal(err)}
     Finish(s)
@@ -176,8 +180,7 @@ func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T
 }
 
 func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
-    dir,add:=setupCheckpoint(t,"alice")
-    add(100,230)
+    dir,add:=setupCheckpoint(t,"alice",100,230)
     record,err:=persistObservedCheckpoint(testScope("alice",testRevocation))
     if err!=nil{t.Fatal(err)}
     if record.SchemaVersion!=3||record.checkpointScope!=testScope("alice",testRevocation)||
@@ -210,7 +213,7 @@ func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
 }
 
 func TestObservedScopeMissingStatsAndInvalidIdentity(t *testing.T){
-    dir,_:=setupCheckpoint(t,"bob")
+    dir,_:=setupCheckpoint(t,"bob",0,0)
     if _,err:=persistObservedCheckpoint(testScope("bob","bad-request"));err==nil{
         t.Fatal("accepted malformed revocation identity")
     }
@@ -228,8 +231,7 @@ func TestObservedScopeMissingStatsAndInvalidIdentity(t *testing.T){
 }
 
 func TestObservedSymlinkRefusedAndNoVictimOverwrite(t *testing.T){
-    dir,add:=setupCheckpoint(t,"carol")
-    add(5,10)
+    dir,_:=setupCheckpoint(t,"carol",5,10)
     victim:=filepath.Join(dir,"victim")
     if err:=os.WriteFile(victim,[]byte("UNCHANGED"),0600);err!=nil{t.Fatal(err)}
     if err:=os.Symlink(victim,checkpointPath(dir,"carol"));err!=nil{t.Fatal(err)}
@@ -241,8 +243,7 @@ func TestObservedSymlinkRefusedAndNoVictimOverwrite(t *testing.T){
 }
 
 func TestConcurrentObservedRetryDoesNotReplace(t *testing.T) {
-    dir,add:=setupCheckpoint(t,"dave")
-    add(123,456)
+    dir,_:=setupCheckpoint(t,"dave",123,456)
     var wg sync.WaitGroup
     var mu sync.Mutex
     failed:=0
@@ -261,8 +262,65 @@ func TestConcurrentObservedRetryDoesNotReplace(t *testing.T) {
     if _,err:=os.Lstat(checkpointPath(dir,"dave"));err!=nil{t.Fatal(err)}
 }
 
+
+func TestDirectRawCounterABAAfterFenceRefusesNonfinalCheckpoint(t *testing.T) {
+    email:="xmesh-u101--vless-share"
+    dir,_:=setupCheckpoint(t,email,100,230)
+    c:=observed.manager.GetCounter("user>>>"+email+">>>traffic>>>uplink")
+    if c==nil{t.Fatal("missing real Xray StatsService counter")}
+    value:=c.Value()
+    c.Add(91)
+    c.Set(value)
+    if c.Value()!=value{t.Fatal("the ABA fixture did not restore original bytes")}
+    if _,err:=persistObservedCheckpoint(testScope(email,testRevocation));err==nil{
+        t.Fatal("Add+Set after fence silently produced a clean observed meter")
+    }
+    if _,err:=os.Lstat(checkpointPath(dir,email));!errors.Is(err,os.ErrNotExist){
+        t.Fatalf("tainted nonfinal checkpoint was committed: %v",err)
+    }
+}
+
+func TestDirectRawCounterABAAfterFsyncRefusesReplay(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    dir,_:=setupCheckpoint(t,email,400,200)
+    scope:=testScope(email,testRevocation)
+    initial,err:=persistObservedCheckpoint(scope)
+    if err!=nil{t.Fatal(err)}
+    path:=checkpointPath(dir,email)
+    original,err:=os.ReadFile(path)
+    if err!=nil{t.Fatal(err)}
+    c:=observed.manager.GetCounter("user>>>"+email+">>>traffic>>>downlink")
+    if c==nil{t.Fatal("missing real StatsService downlink")}
+    before:=c.Value()
+    c.Add(7)
+    c.Set(before)
+    if _,err:=persistObservedCheckpoint(scope);err==nil {
+        t.Fatal("published snapshot was replayed despite direct Add+Set ABA")
+    }
+    actual,err:=os.ReadFile(path)
+    if err!=nil||string(original)!=string(actual) {
+        t.Fatalf("immutable observed bytes were modified: %v",err)
+    }
+    if initial.FinalMeterVerified || initial.RefundableBytes!=0 {
+        t.Fatal("nonfinal checkpoint permitted settlement")
+    }
+}
+
+func TestUnrelatedRawCounterMutationCannotPoisonUser(t *testing.T) {
+    email:="xmesh-u101--vless-share"
+    _,_ = setupCheckpoint(t,email,14,15)
+    unrelated,err:=observed.manager.GetOrRegisterCounter(
+        "user>>>xmesh-u102--vless-cdn>>>traffic>>>uplink")
+    if err!=nil{t.Fatal(err)}
+    unrelated.Add(10)
+    unrelated.Set(3)
+    if _,err:=persistObservedCheckpoint(testScope(email,testRevocation));err!=nil {
+        t.Fatalf("other user mutated A's independent observed meter: %v",err)
+    }
+}
+
 func TestObservedLeaseScopeFailClosed(t *testing.T){
-    dir,_:=setupCheckpoint(t,"scoped")
+    dir,_:=setupCheckpoint(t,"scoped",0,0)
     valid:=testScope("scoped",testRevocation)
     if !validScope(valid) { t.Fatal("valid lease scope was rejected") }
     wrong:=[]checkpointScope{}

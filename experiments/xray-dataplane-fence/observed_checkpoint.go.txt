@@ -86,6 +86,13 @@ func configureObservedCheckpoint(directory string) error {
 
 func BindStatsManager(manager stats.Manager) {
     if !enabled { return }
+    audited, ok := manager.(interface {
+        SetExperimentalCounterMutationAudit(func(string, func() int64) int64) error
+    })
+    if !ok { panic("experimental StatsService missing mandatory counter audit") }
+    if err := audited.SetExperimentalCounterMutationAudit(AuditRawCounterMutation); err != nil {
+        panic(err)
+    }
     observed.Lock()
     defer observed.Unlock()
     observed.manager = manager
@@ -241,15 +248,20 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     }
     // The fencing gate is independent of this manager lock. Recheck the
     // post-drain state, but never interpret it as final byte accounting.
+    // Hold across both StatsService read passes and exclusive fsynced journal
+    // publication: raw Counter.Add/Set cannot race into the snapshot gap.
     gate.Lock()
+    defer gate.Unlock()
     u:=gate.users[canonicalMeterUser(email)]
     drained:=u!=nil && u.fenced && u.closed && len(u.active)==0 && u.writes==0 && u.reads==0
     var seenEmails []string
     if u!=nil {
         for alias:=range u.emails { seenEmails=append(seenEmails,alias) }
     }
-    gate.Unlock()
     if !drained { return empty,errors.New("cannot sample undrained user") }
+    if u.lateCounterMutation {
+        return empty,errors.New("late Xray StatsService counter mutation after fence")
+    }
     if len(seenEmails)==0 || len(seenEmails)>16 {
         return empty,errors.New("missing or unbounded observed inbound identities")
     }
