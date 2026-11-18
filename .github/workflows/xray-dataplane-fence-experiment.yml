@@ -29,6 +29,7 @@ jobs:
           python3 -m py_compile experiments/xray-dataplane-fence/apply-experiment.py
           python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_fence.py
           python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_udp.py
+          python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_crash.py
       - name: Checkout EXACT official Xray v26.10.31 commit
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/XTLS/Xray-core.git .experimental-xray
@@ -51,3 +52,7 @@ jobs:
         env:
           XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: "1"
         run: python3 experiments/xray-dataplane-fence/test_xray_patched_udp.py /tmp/xmesh-xray-fence-experiment
+      - name: Verify SIGKILL durability, denied-user restart, and corrupt fence fail-closed
+        env:
+          XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: "1"
+        run: python3 experiments/xray-dataplane-fence/test_xray_patched_crash.py /tmp/xmesh-xray-fence-experiment

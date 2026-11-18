@@ -48,7 +48,7 @@ func setupCheckpoint(t *testing.T,email string) (string,func(int64,int64)) {
     RouteFinish(s)
     fenceCtx,cancel:=context.WithCancel(context.Background())
     defer cancel()
-    result,err:=fence(fenceCtx,email)
+    result,err:=fenceScoped(fenceCtx,testScope(email,testRevocation))
     if err!=nil||!result.Drained{t.Fatalf("not drained: %+v %v",result,err)}
     return dir,func(a,b int64){up.Add(a);down.Add(b)}
 }

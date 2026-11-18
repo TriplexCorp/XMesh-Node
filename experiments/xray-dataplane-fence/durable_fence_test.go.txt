@@ -1,0 +1,153 @@
+package xmeshdrain
+
+import (
+    "context"
+    "encoding/json"
+    "errors"
+    "net"
+    "os"
+    "path/filepath"
+    "strings"
+    "testing"
+)
+
+func TestDurableFenceRecoveredBeforeAdmission(t *testing.T) {
+    dir,_:=setupCheckpoint(t,"persistent")
+    scope:=testScope("persistent",testRevocation)
+    path:=durableFencePath(dir,scope.Email)
+    disk,err:=readDurableFence(path)
+    if err!=nil||disk.checkpointScope!=scope||disk.SchemaVersion!=1 {
+        t.Fatalf("bad durable scope: %+v %v",disk,err)
+    }
+    if stat,err:=os.Lstat(path);err!=nil||stat.Mode().Perm()&0077!=0 {
+        t.Fatalf("unsafe durable marker perms: %v %v",stat,err)
+    }
+    resetGate()
+    // Simulate the Xray process boundary. Any old in-memory gate is gone.
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    if err:=Register(ctx(172),"persistent",func(){});!errors.Is(err,errFenced) {
+        t.Fatalf("recovered revoked user admitted: %v",err)
+    }
+    if err:=Register(ctx(173),"unrelated",func(){});err!=nil {
+        t.Fatalf("unrelated user incorrectly denied: %v",err)
+    }
+    if err:=commitDurableFence(scope);err!=nil{
+        t.Fatalf("identical replay incorrectly rejected: %v",err)
+    }
+    altered:=scope
+    altered.Revision++
+    if err:=commitDurableFence(altered);err==nil{
+        t.Fatal("cross-revision replay overwrote an immutable fence")
+    }
+    got,err:=readDurableFence(path)
+    if err!=nil||got!=disk{t.Fatalf("durable scope mutated: %+v %v",got,err)}
+}
+
+func TestDurableFenceRefusesUnsignedOrphanObservedJournal(t *testing.T) {
+    dir,add:=setupCheckpoint(t,"orphaned")
+    add(13,29)
+    record,err:=persistObservedCheckpoint(testScope("orphaned",testRevocation))
+    if err!=nil{t.Fatal(err)}
+    if record.FinalMeterVerified||record.RefundableBytes!=0{
+        t.Fatalf("unsafe snapshot: %+v",record)
+    }
+    marker:=durableFencePath(dir,"orphaned")
+    if err:=os.Remove(marker);err!=nil{t.Fatal(err)}
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err==nil {
+        t.Fatal("Xray restarted with observed journal but no durable admission denial")
+    }
+}
+
+func TestDurableFenceRejectsInvalidSymlinkAndTamperedScopes(t *testing.T) {
+    for _,kind:=range []string{"symlink","world-readable","wrong-name","wrong-schema"} {
+        t.Run(kind,func(t *testing.T){
+            resetGate()
+            dir:=t.TempDir()
+            if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+            record:=durableFenceRecord{
+                checkpointScope:testScope("x",testRevocation),
+                SchemaVersion:1,
+            }
+            data,err:=json.Marshal(record)
+            if err!=nil{t.Fatal(err)}
+            path:=durableFencePath(dir,"x")
+            switch kind {
+            case "symlink":
+                victim:=filepath.Join(dir,"victim")
+                if err:=os.WriteFile(victim,data,0600);err!=nil{t.Fatal(err)}
+                if err:=os.Symlink(victim,path);err!=nil{t.Fatal(err)}
+            case "world-readable":
+                if err:=os.WriteFile(path,data,0644);err!=nil{t.Fatal(err)}
+            case "wrong-name":
+                path=filepath.Join(dir,"fence-"+strings.Repeat("0",64)+".json")
+                if err:=os.WriteFile(path,data,0600);err!=nil{t.Fatal(err)}
+            case "wrong-schema":
+                record.SchemaVersion=3
+                data,err=json.Marshal(record)
+                if err!=nil{t.Fatal(err)}
+                if err:=os.WriteFile(path,data,0600);err!=nil{t.Fatal(err)}
+            }
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatalf("recovered invalid %s tombstone",kind)
+            }
+        })
+    }
+}
+
+func TestDurableFencePersistenceFailureNeverStopsAsAcknowledged(t *testing.T) {
+    resetGate()
+    dir:=t.TempDir()
+    if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    scope:=testScope("denied-on-error",testRevocation)
+    id:=ctx(742)
+    if err:=Register(id,scope.Email,func(){});err!=nil{t.Fatal(err)}
+    if err:=os.Chmod(dir,0755);err!=nil{t.Fatal(err)}
+    _,err:=fenceScoped(context.Background(),scope)
+    if err==nil {t.Fatal("unsafe dir returned an acknowledged fence")}
+    gate.Lock()
+    u:=gate.users[scope.Email]
+    fenced:=u.fenced
+    gate.Unlock()
+    if fenced {t.Fatal("fence was claimed after durability precondition failed")}
+    if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+    Finish(id)
+    RouteFinish(id)
+}
+
+func TestRuntimeLockAndStaleSocketSafety(t *testing.T) {
+    dir:=t.TempDir()
+    if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+    if err:=lockExperimentalInstance(dir);err!=nil{t.Fatal(err)}
+    defer func(){
+        if instanceLock!=nil{
+            _=instanceLock.Close()
+            instanceLock=nil
+        }
+    }()
+    if err:=lockExperimentalInstance(dir);err==nil {
+        t.Fatal("multiple live Xray processes can acquire the same private journal")
+    }
+    endpoint:=filepath.Join(dir,"control.sock")
+    listener,err:=net.Listen("unix",endpoint)
+    if err!=nil{t.Fatal(err)}
+    if err:=recoverStaleUnixSocket(endpoint);err==nil {
+        _=listener.Close()
+        t.Fatal("would unlink a live privileged control socket")
+    }
+    if unix,ok:=listener.(*net.UnixListener);ok {
+        unix.SetUnlinkOnClose(false)
+    }
+    if err:=listener.Close();err!=nil{t.Fatal(err)}
+    if err:=recoverStaleUnixSocket(endpoint);err!=nil{
+        t.Fatalf("SIGKILL-style stale socket was not recoverable: %v",err)
+    }
+    if _,err:=os.Lstat(endpoint);!errors.Is(err,os.ErrNotExist){
+        t.Fatalf("stale control socket not unlinked: %v",err)
+    }
+    if err:=os.Symlink("victim",endpoint);err!=nil{t.Fatal(err)}
+    if err:=recoverStaleUnixSocket(endpoint);err==nil {
+        t.Fatal("unsafe socket symlink was removed")
+    }
+}

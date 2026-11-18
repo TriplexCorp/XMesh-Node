@@ -307,7 +307,7 @@ def run(xray, transport):
             assert not repeat["refundable"] and not repeat["finalMeterVerified"]
             conflicting=request_fence(socket_file,EMAIL_A,str(uuid.uuid4()),
                                       expected_status=409)
-            assert b"checkpoint" in conflicting,conflicting
+            assert b"durable fence" in conflicting,conflicting
             for wrong in ({"nodeId": 999}, {"userId": 777},
                           {"epoch": "44444444-4444-4444-8444-444444444444"},
                           {"meterEpoch": "55555555-5555-4555-8555-555555555555"},
@@ -315,7 +315,7 @@ def run(xray, transport):
                           {"revision": 8}):
                 mismatch = request_fence(socket_file,EMAIL_A,revocation_id,
                                          expected_status=409,scope_override=wrong)
-                assert b"checkpoint" in mismatch, (wrong,mismatch)
+                assert b"durable fence" in mismatch, (wrong,mismatch)
             assert json.loads(journal_file.read_text())==observation
             assert server.poll() is None,"Xray server exited during selective fence"
             # Data remains after shutting down the Xray process: this

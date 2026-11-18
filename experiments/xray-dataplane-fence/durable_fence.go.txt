@@ -1,0 +1,200 @@
+// Experimental Xray CI-only durable admission deny-list.
+// A fence intent is persisted and directory-fsynced BEFORE any user-specific
+// process closure. A failed fsync, conflicting scope or corrupt journal must
+// fail closed. This does NOT produce authoritative metering or refund proof.
+package xmeshdrain
+
+import (
+    "context"
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "net"
+    "os"
+    "path/filepath"
+    "strings"
+    "syscall"
+    "time"
+)
+
+type durableFenceRecord struct {
+    checkpointScope
+    SchemaVersion int `json:"schemaVersion"`
+}
+
+func durableFencePath(dir,email string) string {
+    digest:=sha256.Sum256([]byte(email))
+    return filepath.Join(dir,"fence-"+hex.EncodeToString(digest[:])+".json")
+}
+
+func readDurableFence(path string) (durableFenceRecord,error) {
+    var record durableFenceRecord
+    info,err:=os.Lstat(path)
+    if err!=nil {return record,err}
+    if !info.Mode().IsRegular() || info.Mode().Perm()&0077!=0 ||
+        info.Size()<1 || info.Size()>4096 {
+        return record,errors.New("unsafe durable fence file")
+    }
+    data,err:=os.ReadFile(path)
+    if err!=nil{return record,err}
+    dec:=json.NewDecoder(strings.NewReader(string(data)))
+    dec.DisallowUnknownFields()
+    if err=dec.Decode(&record);err!=nil{return record,err}
+    if err=dec.Decode(new(any));!errors.Is(err,io.EOF) {
+        return record,errors.New("durable fence has trailing JSON")
+    }
+    if record.SchemaVersion!=1 || !validScope(record.checkpointScope) {
+        return record,errors.New("invalid durable fence scope")
+    }
+    return record,nil
+}
+
+// Recover fences before Xray can accept a connection. Any old observation
+// without an associated durable denial is a legacy/unverifiable state: refuse
+// startup rather than silently allowing traffic under an unsettled lease.
+func restoreDurableFences(dir string) error {
+    entries,err:=os.ReadDir(dir)
+    if err!=nil{return err}
+    scopes:=map[string]checkpointScope{}
+    for _,entry:=range entries {
+        name:=entry.Name()
+        if !strings.HasPrefix(name,"fence-") || !strings.HasSuffix(name,".json"){continue}
+        record,err:=readDurableFence(filepath.Join(dir,name))
+        if err!=nil{return fmt.Errorf("untrusted persisted fence %q: %w",name,err)}
+        if name!=filepath.Base(durableFencePath(dir,record.Email)) {
+            return errors.New("durable fence filename differs from user")
+        }
+        if _,duplicate:=scopes[record.Email];duplicate {
+            return errors.New("duplicate durable fence scope")
+        }
+        scopes[record.Email]=record.checkpointScope
+    }
+    for _,entry:=range entries {
+        name:=entry.Name()
+        if !strings.HasPrefix(name,"observed-") || !strings.HasSuffix(name,".json"){continue}
+        checkpoint,err:=loadCheckpoint(filepath.Join(dir,name))
+        if err!=nil {return fmt.Errorf("unsafe prior observation %q: %w",name,err)}
+        if name!=filepath.Base(checkpointPath(dir,checkpoint.Email)) ||
+            scopes[checkpoint.Email]!=checkpoint.checkpointScope {
+            return errors.New("orphaned or scope-conflicting observed meter; refuse Xray startup")
+        }
+    }
+    // A previously linked but not fsynced marker is made durable again
+    // before any recovered user denial is considered established.
+    if err:=syncFenceDirectory(dir);err!=nil{return err}
+    gate.Lock()
+    defer gate.Unlock()
+    if len(gate.sessions)!=0 {
+        return errors.New("cannot restore fences while authenticated sessions live")
+    }
+    for email:=range scopes {
+        u:=ensureUser(email)
+        u.fenced=true
+        completeUserIfIdleLocked(u)
+    }
+    return nil
+}
+
+func syncFenceDirectory(dir string) error {
+    directory,err:=os.Open(dir)
+    if err!=nil{return err}
+    syncErr:=directory.Sync()
+    closeErr:=directory.Close()
+    if syncErr!=nil{return syncErr}
+    return closeErr
+}
+
+func commitDurableFence(scope checkpointScope) error {
+    if !validScope(scope){return errors.New("invalid durable fence scope")}
+    observed.Lock()
+    defer observed.Unlock()
+    dir:=observed.directory
+    if dir==""{return errors.New("durable fence journal unavailable")}
+    info,err:=os.Lstat(dir)
+    if err!=nil||!info.IsDir()||info.Mode().Perm()&0077!=0 {
+        return errors.New("durable fence directory is not private")
+    }
+    path:=durableFencePath(dir,scope.Email)
+    if existing,err:=readDurableFence(path);err==nil {
+        if existing.checkpointScope!=scope {
+            return errors.New("durable fence scope mismatch")
+        }
+        // A crash may leave the hard link visible but not directory-fsynced.
+        // Do not acknowledge an idempotent retry until durable publication.
+        return syncFenceDirectory(dir)
+    } else if !os.IsNotExist(err) {
+        return fmt.Errorf("unsafe existing durable fence: %w",err)
+    }
+    record:=durableFenceRecord{checkpointScope:scope,SchemaVersion:1}
+    data,err:=json.Marshal(record)
+    if err!=nil{return err}
+    file,err:=os.CreateTemp(dir,".fence-pending-")
+    if err!=nil{return err}
+    name:=file.Name()
+    defer os.Remove(name)
+    if _,err=file.Write(append(data,byte(10)));err!=nil {
+        _=file.Close()
+        return err
+    }
+    if err=file.Sync();err!=nil{
+        _=file.Close()
+        return err
+    }
+    if err=file.Close();err!=nil{return err}
+    // Publish with an exclusive hard link: never replace another revocation.
+    if err=os.Link(name,path);err!=nil{return err}
+    return syncFenceDirectory(dir)
+}
+
+func fenceScoped(ctx context.Context,scope checkpointScope) (result,error) {
+    if err:=commitDurableFence(scope);err!=nil{return result{},err}
+    return fence(ctx,scope.Email)
+}
+
+var instanceLock *os.File
+
+// Acquire a lifetime-long kernel lock before trusting a previously crashed
+// runtime's lock/socket files. Flock is released automatically by SIGKILL,
+// unlike unlinking a stale Unix socket. Only exact-path private regular files
+// are accepted, without following symlinks.
+func lockExperimentalInstance(dir string) error {
+    path:=filepath.Join(dir,"xray-instance.lock")
+    fd,err:=syscall.Open(path,syscall.O_RDWR|syscall.O_CREAT|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0600)
+    if err!=nil{return err}
+    file:=os.NewFile(uintptr(fd),path)
+    var stat syscall.Stat_t
+    if err=syscall.Fstat(fd,&stat);err!=nil{_ = file.Close();return err}
+    if stat.Mode&syscall.S_IFMT!=syscall.S_IFREG || stat.Mode&0077!=0 ||
+       stat.Uid!=uint32(os.Geteuid()) {
+        _=file.Close()
+        return errors.New("unsafe Xray runtime lock file")
+    }
+    if err=syscall.Flock(fd,syscall.LOCK_EX|syscall.LOCK_NB);err!=nil {
+        _=file.Close()
+        return fmt.Errorf("another Xray runtime still holds the journal: %w",err)
+    }
+    instanceLock=file
+    return nil
+}
+
+func recoverStaleUnixSocket(socket string) error {
+    info,err:=os.Lstat(socket)
+    if os.IsNotExist(err){return nil}
+    if err!=nil{return err}
+    st,ok:=info.Sys().(*syscall.Stat_t)
+    if !ok||st.Uid!=uint32(os.Geteuid()) || info.Mode()&os.ModeSocket==0 {
+        return errors.New("refusing non-socket/symlink or foreign Unix endpoint")
+    }
+    conn,err:=net.DialTimeout("unix",socket,150*time.Millisecond)
+    if err==nil{
+        _=conn.Close()
+        return errors.New("refusing to replace live Xray Unix control socket")
+    }
+    if !errors.Is(err,syscall.ECONNREFUSED) && !errors.Is(err,syscall.ENOENT) {
+        return fmt.Errorf("cannot prove stale Xray Unix endpoint: %w",err)
+    }
+    return os.Remove(socket)
+}

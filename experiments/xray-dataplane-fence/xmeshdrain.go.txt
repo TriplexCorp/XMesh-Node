@@ -14,6 +14,7 @@ import (
     "path/filepath"
     "sync"
     "time"
+    "syscall"
 
     c "github.com/xtls/xray-core/common/ctx"
     "github.com/xtls/xray-core/common/session"
@@ -246,11 +247,20 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
     }
     ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
     defer cancel()
-    snapshot, err := fence(ctx, req.Email)
+    snapshot, err := fenceScoped(ctx, req)
     if err != nil {
-        http.Error(w, fmt.Sprintf("incomplete drain: %v", err),
-            http.StatusRequestTimeout)
+        code:=http.StatusConflict
+        if errors.Is(err,context.DeadlineExceeded)||errors.Is(err,context.Canceled) {
+            code=http.StatusRequestTimeout
+        }
+        http.Error(w, fmt.Sprintf("incomplete drain: %v", err),code)
         return
+    }
+    // Controlled SIGKILL only in disposable CI: prove fsynced deny intent
+    // survives a crash BEFORE any observed counter snapshot is committed.
+    if os.Getenv("XMESH_EXPERIMENTAL_CRASH_AFTER_DRAIN")=="1" {
+        _ = syscall.Kill(os.Getpid(),syscall.SIGKILL)
+        panic("SIGKILL did not stop disposable Xray")
     }
     observedRecord, err := persistObservedCheckpoint(req)
     if err != nil {
@@ -269,7 +279,9 @@ func init() {
     }
     // This experiment never runs without a durable, private *observed*
     // journal. The file still does not authorize refunds.
-    if err := configureObservedCheckpoint(os.Getenv("XMESH_EXPERIMENTAL_OBSERVED_DIR")); err != nil {
+    dir:=os.Getenv("XMESH_EXPERIMENTAL_OBSERVED_DIR")
+    if err:=lockExperimentalInstance(dir);err!=nil {panic(err)}
+    if err := configureObservedCheckpoint(dir); err != nil {
         panic(err)
     }
     socket := os.Getenv("XMESH_EXPERIMENTAL_DRAIN_SOCKET")
@@ -280,11 +292,7 @@ func init() {
     if err != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 {
         panic("experimental xmesh drain parent must exist with private permissions")
     }
-    if _, err := os.Lstat(socket); err == nil {
-        panic("experimental xmesh drain refuses preexisting socket/symlink")
-    } else if !os.IsNotExist(err) {
-        panic(err)
-    }
+    if err:=recoverStaleUnixSocket(socket);err!=nil{panic(err)}
     listener, err := net.Listen("unix", socket)
     if err != nil {
         panic(err)
