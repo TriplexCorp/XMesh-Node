@@ -29,7 +29,7 @@ func TestMultiInboundCoverageIsStrictAndIncludesBlankUserEmails(t *testing.T) {
     trackedInboundTags = tags
     scoped := func(tag, email string) context.Context {
         return session.ContextWithInbound(context.Background(), &session.Inbound{
-            Tag: tag, User: &protocol.User{Email: email},
+            Tag: tag, User: &protocol.MemoryUser{Email: email},
         })
     }
     for _, tag := range []string{"vless-share", "vless-cdn"} {
