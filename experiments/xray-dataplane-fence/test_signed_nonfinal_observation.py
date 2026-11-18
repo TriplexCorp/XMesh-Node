@@ -97,6 +97,23 @@ class SignedNonfinalObservationTests(unittest.TestCase):
             self.create(newer)
         self.assertEqual(target.read_bytes(), before)
 
+    def test_changed_revocation_or_revision_cannot_mint_new_reservation_receipt(self):
+        cp = checkpoint()
+        self.create(cp)
+        original_path = self.output / evidence.receipt_name(cp)
+        original = original_path.read_bytes()
+        for edited in (
+            dict(cp, revocationId="55555555-5555-4555-8555-555555555555"),
+            dict(cp, revision=cp["revision"] + 1),
+        ):
+            self.assertEqual(evidence.receipt_name(edited),
+                             evidence.receipt_name(cp))
+            with self.subTest(edited=edited), self.assertRaisesRegex(
+                    ValueError, "conflicting"):
+                self.create(edited)
+        self.assertEqual(sorted(self.output.iterdir()), [original_path])
+        self.assertEqual(original_path.read_bytes(), original)
+
     def test_unverified_or_refundable_guard_result_cannot_sign(self):
         cp = checkpoint()
         for binding in (
