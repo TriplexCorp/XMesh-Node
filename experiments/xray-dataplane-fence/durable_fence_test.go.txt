@@ -36,6 +36,98 @@ func TestCanonicalUserDenyRecoveredAcrossSignedInboundAliases(t *testing.T) {
     }
 }
 
+func TestCrashBeforeFenceHardlinkRefusesRestart(t *testing.T) {
+    dir,_:=setupCheckpoint(t,"power-loss-before-link")
+    marker:=durableFencePath(dir,"power-loss-before-link")
+    data,err:=os.ReadFile(marker)
+    if err!=nil{t.Fatal(err)}
+    // Simulate fsynced .fence-pending-* but NO published fence-*.json.
+    pending:=filepath.Join(dir,".fence-pending-power-loss")
+    if err:=os.WriteFile(pending,data,0600);err!=nil{t.Fatal(err)}
+    if err:=os.Remove(marker);err!=nil{t.Fatal(err)}
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err==nil {
+        t.Fatal("unpublished signed revocation intent was silently forgotten at restart")
+    }
+    if _,err:=os.Lstat(pending);err!=nil{
+        t.Fatalf("orphan pending fence was silently discarded: %v",err)
+    }
+}
+
+func TestCrashAfterFenceHardlinkRepairsAndRestoresDeny(t *testing.T) {
+    dir,_:=setupCheckpoint(t,"power-loss-after-link")
+    marker:=durableFencePath(dir,"power-loss-after-link")
+    pending:=filepath.Join(dir,".fence-pending-postlink")
+    if err:=os.Link(marker,pending);err!=nil{t.Fatal(err)}
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err!=nil{
+        t.Fatalf("replay of already published hardlink must be recoverable: %v",err)
+    }
+    if _,err:=os.Lstat(pending);!errors.Is(err,os.ErrNotExist){
+        t.Fatalf("reconciled pending hardlink remains after fsync: %v",err)
+    }
+    if _,err:=os.Lstat(marker);err!=nil{t.Fatal(err)}
+    if err:=Register(ctx(202), "power-loss-after-link",func(){});!errors.Is(err,errFenced){
+        t.Fatalf("reconciled tombstone failed to block old user: %v",err)
+    }
+    if err:=Register(ctx(203), "healthy-other-user",func(){});err!=nil {
+        t.Fatalf("reconciliation denied an unrelated user: %v",err)
+    }
+}
+
+func TestCrashObservedCheckpointPendingHardlinkRecovery(t *testing.T) {
+    dir,add:=setupCheckpoint(t,"meter-after-link")
+    add(11,13)
+    scope:=testScope("meter-after-link",testRevocation)
+    if _,err:=persistObservedCheckpoint(scope);err!=nil{t.Fatal(err)}
+    observedMarker:=checkpointPath(dir,scope.Email)
+    pending:=filepath.Join(dir,".observed-pending-crashed")
+    if err:=os.Link(observedMarker,pending);err!=nil{t.Fatal(err)}
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    if _,err:=os.Lstat(pending);!errors.Is(err,os.ErrNotExist){
+        t.Fatalf("orphan observed hardlink was not safely repaired: %v",err)
+    }
+    saved,err:=loadCheckpoint(observedMarker)
+    if err!=nil || saved.FinalMeterVerified || saved.RefundableBytes!=0 {
+        t.Fatalf("recovered observation cannot become terminal: %+v %v",saved,err)
+    }
+    if err:=Register(ctx(204),scope.Email,func(){});!errors.Is(err,errFenced){
+        t.Fatal("recovered old observation reopened revoked user admission")
+    }
+}
+
+func TestUnpublishedOrForgedPendingObservedJournalRefusesRestart(t *testing.T) {
+    for _,scenario:=range []string{"orphaned-observation","different-inode","symlink-pending"} {
+        t.Run(scenario,func(t *testing.T) {
+            dir,add:=setupCheckpoint(t,"meter-pending-"+scenario)
+            add(4,5)
+            scope:=testScope("meter-pending-"+scenario,testRevocation)
+            if _,err:=persistObservedCheckpoint(scope);err!=nil{t.Fatal(err)}
+            original:=checkpointPath(dir,scope.Email)
+            pending:=filepath.Join(dir,".observed-pending-suspicious")
+            switch scenario {
+            case "orphaned-observation":
+                if err:=os.Link(original,pending);err!=nil{t.Fatal(err)}
+                if err:=os.Remove(original);err!=nil{t.Fatal(err)}
+            case "different-inode":
+                b,err:=os.ReadFile(original)
+                if err!=nil{t.Fatal(err)}
+                if err:=os.WriteFile(pending,b,0600);err!=nil{t.Fatal(err)}
+            case "symlink-pending":
+                if err:=os.Symlink(original,pending);err!=nil{t.Fatal(err)}
+            }
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatalf("restarted after unsafe pending journal: %s",scenario)
+            }
+            if _,err:=os.Lstat(pending);err!=nil{
+                t.Fatalf("unsafe pending evidence was silently discarded: %v",err)
+            }
+        })
+    }
+}
+
 func TestDurableFenceRecoveredBeforeAdmission(t *testing.T) {
     dir,_:=setupCheckpoint(t,"persistent")
     scope:=testScope("persistent",testRevocation)

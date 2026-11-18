@@ -133,7 +133,7 @@ def run(xray):
             command(xray,"run","-test","-config",str(p))
         log_server=(root/"server.log").open("w+")
         log_client=(root/"client.log").open("w+")
-        server=server2=server3=client=None
+        server=server2=server3=server4=server5=client=None
         a=b=None
         try:
             server_env=os.environ.copy()
@@ -202,6 +202,31 @@ def run(xray):
                                      stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
             assert server3.wait(timeout=10)!=0,"Xray started despite corrupted durable fence"
             assert not observed.exists()
+
+            # Power loss AFTER fsync(.fence-pending-*) but BEFORE link(final)
+            # leaves no complete durable deny. It MUST NOT silently restart.
+            marker.write_text(json.dumps(persisted))
+            pending=root/".fence-pending-simulated-sigkill"
+            os.link(marker,pending)
+            marker.unlink()
+            server4=subprocess.Popen([xray,"run","-config",str(server_json)],
+                                     stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
+            assert server4.wait(timeout=10)!=0, (
+                "Xray admitted users despite an uncommitted pending revocation")
+            assert pending.exists() and not marker.exists(), (
+                "Recovery silently discarded an uncommitted pending revocation")
+
+            # Simulate publication of that *same* fsynced inode. Recovery must
+            # directory-fsync, remove the crash-leftover temp and restore deny.
+            os.link(pending,marker)
+            server5=subprocess.Popen([xray,"run","-config",str(server_json)],
+                                     stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
+            wait_replaced_socket(control,server5)
+            assert not pending.exists(), "Recovered linked pending file was not reconciled"
+            retry_socks_echo(socks_a,echo_port,False)
+            retry_socks_echo(socks_b,echo_port,True)
+            assert json.loads(marker.read_text())==persisted
+            assert not observed.exists()
             report={
                 "test":"sigkill-after-durable-fence-before-meter",
                 "committedScopeSurvivedSigkill":True,
@@ -210,6 +235,8 @@ def run(xray):
                 "unrelatedUserAliveOnRestart":True,
                 "noMeterOrRefundAfterCrash":True,
                 "tamperedDenialPreventsStartup":True,
+                "unpublishedPendingFencePreventsStartup":True,
+                "postLinkCrashReconcilesWithoutAdmission":True,
                 "finalMeterVerified":False,
                 "refundableBytes":0,
             }
@@ -225,7 +252,7 @@ def run(xray):
             for conn in (a,b):
                 if conn is not None:
                     conn.close()
-            for proc in (server,server2,server3,client):
+            for proc in (server,server2,server3,server4,server5,client):
                 if proc is not None and proc.poll() is None:
                     proc.terminate()
                     try:proc.wait(timeout=5)
