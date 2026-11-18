@@ -18,7 +18,10 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime_identity import trusted_runtime_identity, verify_live_runtime
+from runtime_identity import (
+    inspect_managed_xray, trusted_runtime_identity,
+    verify_live_runtime, verify_managed_xray_runtime,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -250,11 +253,14 @@ def append_only(dfd, name, evidence):
 
 
 def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir,
-                       trusted_xray_host_pid):
-    # Caller MUST resolve this PID from trusted container management rather
-    # than from the Node's untrusted claimed checkpoint. This verification
-    # takes place while Xray is STILL LIVE, before its identity can disappear.
-    # It is explicitly not evidence of writer flush / terminality.
+                       trusted_xray_host_pid=None):
+    # Normal callers obtain the PID from trusted Docker, never the checkpoint.
+    # Explicit host PID is for isolated direct-process tests only.
+    managed_before = None
+    if trusted_xray_host_pid is None:
+        managed_before = inspect_managed_xray()
+        verify_managed_xray_runtime(checkpoint)
+        trusted_xray_host_pid = managed_before[2]
     verify_live_runtime(checkpoint, trusted_xray_host_pid)
     if type(node_id) is not int or node_id <= 0:
         raise ValueError("invalid Node ID")
@@ -278,6 +284,11 @@ def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir,
         "refundableBytes": 0,
     }
     signature = sign_bytes(key_path, DOMAIN + canonical(p))
+    if managed_before is not None:
+        # Refuse a replacement after signing but before disk publication.
+        if inspect_managed_xray() != managed_before:
+            raise ValueError("managed Xray replaced before receipt publication")
+        verify_live_runtime(checkpoint, managed_before[2])
     envelope = {"algorithm": "Ed25519", "payload": p,
                 "signature": signature}
     raw = canonical(envelope) + b"\n"
