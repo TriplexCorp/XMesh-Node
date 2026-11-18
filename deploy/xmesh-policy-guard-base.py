@@ -368,6 +368,111 @@ def committed_snapshot_scope(state_dir, node_id):
     return verified_snapshot_scope(load_json(committed), state_dir, node_id)
 
 
+def verify_committed_observed_checkpoint(state_dir, node_id, checkpoint, ledger):
+    """Validate a DISPOSABLE Xray observation against committed signed scope.
+
+    An authenticated lease/revocation identity is verified here; the Xray
+    raw counter itself and random runtime identifier are NOT authenticated,
+    not terminal and not eligible for refund. No ledger mutation is allowed.
+    Only a committed, signature-verified policy (not a pending prepare)
+    can supply authoritative mapping from Xray email to user and lease.
+    """
+    committed = Path(state_dir) / "policy-envelope.json"
+    if not committed.is_file():
+        raise ValueError("Missing committed signed policy for observed checkpoint")
+    policy_doc = load_json(committed)
+    policy = verify_envelope(policy_doc, Path(state_dir), node_id)
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Invalid Xray observed checkpoint")
+    keys = {
+        "schemaVersion", "email", "nodeId", "userId", "epoch", "meterEpoch",
+        "reservationId", "revision", "revocationId", "runtimeId",
+        "uplinkBytes", "downlinkBytes", "drained", "finalMeterVerified",
+        "refundableBytes",
+    }
+    if set(checkpoint) != keys or type(checkpoint.get("schemaVersion")) is not int or (
+            checkpoint["schemaVersion"] != 2):
+        raise ValueError("Invalid Xray observed checkpoint schema")
+    if checkpoint["drained"] is not True or checkpoint["finalMeterVerified"] is not False or (
+            type(checkpoint["refundableBytes"]) is not int or checkpoint["refundableBytes"] != 0):
+        raise ValueError("Observed Xray checkpoint cannot attest terminal bytes or refunds")
+    if (type(checkpoint["nodeId"]) is not int or checkpoint["nodeId"] != node_id or
+            checkpoint["nodeId"] != policy["nodeId"] or
+            type(checkpoint["userId"]) is not int or checkpoint["userId"] <= 0 or
+            type(checkpoint["revision"]) is not int or checkpoint["revision"] <= 0):
+        raise ValueError("Xray observed checkpoint node/user/revision mismatch")
+    email = checkpoint["email"]
+    runtime_id = checkpoint["runtimeId"]
+    if not isinstance(email, str) or not 0 < len(email.encode("utf-8")) <= 128 or (
+            not isinstance(runtime_id, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_id)
+            or runtime_id == "0" * 64):
+        raise ValueError("Xray observed checkpoint user or runtime identity invalid")
+    uuid_fields = ("epoch", "meterEpoch", "reservationId", "revocationId")
+    for key in uuid_fields:
+        value = checkpoint[key]
+        if not isinstance(value, str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value) or (
+                value == "00000000-0000-0000-0000-000000000000"):
+            raise ValueError("Xray observed checkpoint missing lease identity")
+    for key in ("uplinkBytes", "downlinkBytes"):
+        value = checkpoint[key]
+        if type(value) is not int or not 0 <= value < 2**63:
+            raise ValueError("Xray observed checkpoint has invalid raw traffic")
+    if checkpoint["uplinkBytes"] + checkpoint["downlinkBytes"] >= 2**63:
+        raise ValueError("Xray observed checkpoint traffic overflows signed meter")
+    user = next((row for row in policy["users"]
+                 if row["userId"] == checkpoint["userId"]), None)
+    if user is None or not isinstance(user.get("quotaReservation"), dict) or (
+            not isinstance(user.get("quotaRevocation"), dict)):
+        raise ValueError("Unassigned or unrevoked quota user in signed policy")
+    lease = user["quotaReservation"]
+    revoked = user["quotaRevocation"]
+    expected = {"epoch": lease["epoch"], "meterEpoch": lease["meterEpoch"],
+                "reservationId": lease["reservationId"],
+                "revision": lease["revision"],
+                "revocationId": revoked["requestId"]}
+    for key, value in expected.items():
+        if checkpoint[key] != value:
+            raise ValueError("Xray checkpoint does not match signed quota lease")
+    if any(revoked[key] != lease[key] for key in
+           ("epoch", "meterEpoch", "reservationId")):
+        raise ValueError("Signed revocation cannot change reservation identity")
+    records = ledger.get("users") if isinstance(ledger, dict) else None
+    record = records.get(str(checkpoint["userId"])) if isinstance(records, dict) else None
+    applied = record.get("quotaRevocationApplied") if isinstance(record, dict) else None
+    if (not isinstance(applied, dict) or
+            any(applied.get(key) != value for key, value in {
+                **revoked, "revision": lease["revision"]}.items()) or
+            record.get("quotaReservation") != lease or
+            record.get("quotaRevocation") != revoked):
+        raise ValueError("Xray observation is not bound to committed Node stop")
+    # The old signed config, unlike the effective revocation-denied config,
+    # still shows which authenticated Xray email belongs to this user.
+    signed_config = policy_doc.get("config", {})
+    identities = {u["userId"]: u["xrayId"] for u in policy["users"]}
+    matched = False
+    for inbound in signed_config.get("inbounds", []):
+        if inbound.get("tag") == "xmesh_stats_in":
+            continue
+        accounts, credential_key = configured_accounts(inbound)
+        scoped = dict(identities)
+        scoped["_protocol"] = inbound["protocol"]
+        scoped["_method"] = inbound["settings"].get("method", "")
+        for account in accounts:
+            if (account.get("email") == email and
+                    account_uuid(account, credential_key, scoped) == user["xrayId"]):
+                matched = True
+    if not matched:
+        raise ValueError("Xray observed email does not match signed user credential")
+    return {
+        "scopeBoundToSignedPolicy": True, "userId": checkpoint["userId"],
+        "nodeId": node_id, "revocationId": checkpoint["revocationId"],
+        "runtimeId": runtime_id, "observedRawBytes": (
+            checkpoint["uplinkBytes"] + checkpoint["downlinkBytes"]),
+        "finalMeterVerified": False, "refundableBytes": 0,
+    }
+
+
 def applied_revocation_proofs(policy, effective, ledger):
     """Mark lease-bound stop after the caller has verified Xray deployment.
 
