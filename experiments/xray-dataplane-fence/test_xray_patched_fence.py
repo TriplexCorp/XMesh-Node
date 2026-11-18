@@ -157,8 +157,9 @@ def run(xray, transport):
                                hashlib.sha256(EMAIL_A.encode()).hexdigest() + ".json")
         echo = EchoServer(("127.0.0.1",0),EchoHandler)
         threading.Thread(target=echo.serve_forever,daemon=True).start()
-        api_port, vless_port, socks_a, socks_b, socks_blank = (
-            reserve_port(),reserve_port(),reserve_port(),reserve_port(),reserve_port()
+        api_port, vless_port, cdn_port, socks_a, socks_cdn, socks_b, socks_blank = (
+            reserve_port(),reserve_port(),reserve_port(),reserve_port(),
+            reserve_port(),reserve_port(),reserve_port()
         )
         identity_a, identity_b, identity_blank = (
             str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4())
@@ -178,6 +179,13 @@ def run(xray, transport):
                      {"id":identity_b,"email":EMAIL_B,"level":0},
                      {"id":identity_blank,"level":0}]},
                  "streamSettings":make_stream_settings(transport)},
+                # A second billable inbound carries the SAME authenticated
+                # identity. Both old streams must be stopped by one revocation.
+                {"tag":"vless-cdn","listen":"127.0.0.1","port":cdn_port,
+                 "protocol":"vless",
+                 "settings":{"decryption":"none","clients":[
+                     {"id":identity_a,"email":EMAIL_A,"level":0}]},
+                 "streamSettings":{"network":"tcp","security":"none"}},
                 {"tag":"xmesh_stats_in","listen":"127.0.0.1","port":api_port,
                  "protocol":"dokodemo-door","settings":{
                      "address":"127.0.0.1","port":api_port,"network":"tcp"}},
@@ -190,11 +198,11 @@ def run(xray, transport):
             "routing":{"rules":[{"type":"field","inboundTag":["xmesh_stats_in"],
                                   "outboundTag":"xmesh_stats_api"}]}
         }
-        def outbound(tag, identity):
+        def outbound(tag, identity, *, cdn=False):
             config = {"tag":tag,"protocol":"vless","settings":{"vnext":[{
-                "address":"127.0.0.1","port":vless_port,
+                "address":"127.0.0.1","port":cdn_port if cdn else vless_port,
                 "users":[{"id":identity,"encryption":"none"}]}]},
-                "streamSettings":make_stream_settings(transport)}
+                "streamSettings":make_stream_settings("tcp" if cdn else transport)}
             # Exercise two simultaneous logical streams A on one physical MUX
             # transport, while user B uses a separate physical connection.
             if transport == "mux-tcp" and tag == "user-a":
@@ -205,14 +213,20 @@ def run(xray, transport):
             "inbounds":[
                 {"tag":"socks-a","listen":"127.0.0.1","port":socks_a,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
+                {"tag":"socks-cdn","listen":"127.0.0.1","port":socks_cdn,
+                 "protocol":"socks","settings":{"auth":"noauth","udp":False}},
                 {"tag":"socks-b","listen":"127.0.0.1","port":socks_b,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
                 {"tag":"socks-blank","listen":"127.0.0.1","port":socks_blank,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}}
             ],
-            "outbounds":[outbound("user-a",identity_a),outbound("user-b",identity_b),
+            "outbounds":[outbound("user-a",identity_a),
+                         outbound("user-a-cdn",identity_a,cdn=True),
+                         outbound("user-b",identity_b),
                          outbound("user-blank",identity_blank)],
-            "routing":{"rules":[{"type":"field","inboundTag":["socks-b"],
+            "routing":{"rules":[{"type":"field","inboundTag":["socks-cdn"],
+                                  "outboundTag":"user-a-cdn"},
+                                {"type":"field","inboundTag":["socks-b"],
                                   "outboundTag":"user-b"},
                                 {"type":"field","inboundTag":["socks-blank"],
                                  "outboundTag":"user-blank"}]}
@@ -229,12 +243,14 @@ def run(xray, transport):
         client=None
         a=None
         a2=None
+        cdn=None
         b=None
         try:
             env=os.environ.copy()
             env.update({
                 "GITHUB_ACTIONS":"true",
                 "XMESH_EXPERIMENTAL_DRAIN":"1",
+                "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS":"vless-share,vless-cdn",
                 "XMESH_EXPERIMENTAL_DRAIN_SOCKET":str(socket_file),
                 "XMESH_EXPERIMENTAL_OBSERVED_DIR":str(root),
             })
@@ -247,8 +263,10 @@ def run(xray, transport):
             client=subprocess.Popen([xray,"run","-config",str(client_json)],
                                     stdout=log_b,stderr=subprocess.STDOUT,env=client_env)
             a=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
+            cdn=connect_socks(socks_cdn,echo.server_address[1],"127.0.0.1")
             b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             echo_bytes(a,8192)
+            echo_bytes(cdn,8192)
             if transport == "mux-tcp":
                 # Both A streams coexist before revocation. Reusing the
                 # parent's session ID would reject the second registration.
@@ -278,6 +296,7 @@ def run(xray, transport):
             observed_disk=json.loads(journal_file.read_text())
             assert observed_disk==observation,(observed_disk,observation)
             assert not probe_echo(a),"Old VLESS-A socket survived fenced process-close"
+            assert not probe_echo(cdn),"Old CDN inbound stream survived user fence"
             if a2 is not None:
                 assert not probe_echo(a2),"Second MUX child survived user fence"
             denied=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
@@ -285,6 +304,11 @@ def run(xray, transport):
                 assert not probe_echo(denied),"Fenced user opened new authenticated stream"
             finally:
                 denied.close()
+            denied_cdn=connect_socks(socks_cdn,echo.server_address[1],"127.0.0.1")
+            try:
+                assert not probe_echo(denied_cdn), "Revoked user reopened secondary CDN inbound"
+            finally:
+                denied_cdn.close()
             # The disposable billable VLESS inbound must reject an
             # authenticated user lacking a stable accounting identity.
             # The independent management API inbound must remain usable.
@@ -329,6 +353,7 @@ def run(xray, transport):
                 "simultaneousMuxChildrenStopped":transport == "mux-tcp",
                 "userAFenced":True,"existingUserAStreamEnded":True,
                 "newUserAStreamsRejected":True,
+                "secondaryCDNInboundRevoked":True,
                 "blankVlessEmailRejected":True,
                 "existingUserBStreamSurvived":True,"newUserBStreamsAccepted":True,
                 "statsServiceStillAvailable":True,
@@ -350,7 +375,7 @@ def run(xray, transport):
                       flush=True)
             raise
         finally:
-            for conn in (a,a2,b):
+            for conn in (a,a2,cdn,b):
                 if conn is not None:
                     conn.close()
             for proc in (client,server):
