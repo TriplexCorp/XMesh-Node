@@ -294,21 +294,22 @@ def get_counters():
         if not runtime_id or runtime_id != after.stdout.strip():
             raise ValueError("Xray runtime changed during StatsService read")
         payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid Xray StatsService response")
         stats = payload.get("stat", [])
         if not isinstance(stats, list) or len(stats) > 12000:
             raise ValueError("Invalid Xray counters")
         inbound = {}
         seen_metrics = set()
         for row in stats:
-            if not isinstance(row, dict):
-                continue
-            match = USER_PATTERN.fullmatch(row.get("name", ""))
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                raise ValueError("Malformed Xray StatsService row")
+            name = row["name"]
+            match = USER_PATTERN.fullmatch(name)
             if match is None:
+                if name.startswith("user>>>xmesh-u"):
+                    raise ValueError("Unparseable XMesh user counter")
                 continue
-            metric = row["name"]
-            if metric in seen_metrics:
-                raise ValueError("Duplicate Xray traffic counter")
-            seen_metrics.add(metric)
             raw_value = row.get("value")
             if type(raw_value) is int:
                 val = raw_value
@@ -321,7 +322,11 @@ def get_counters():
             user_id, tag, direction = match.groups()
             tag = unquote(tag, encoding="utf-8", errors="strict")
             if not tag or len(tag) > 128 or any(ord(c) < 32 for c in tag):
-                continue
+                raise ValueError("Invalid Xray inbound traffic tag")
+            metric = (user_id, tag, direction)
+            if metric in seen_metrics:
+                raise ValueError("Duplicate Xray traffic counter")
+            seen_metrics.add(metric)
             raw = inbound.setdefault((user_id, tag), {"uplink": 0, "downlink": 0})
             raw[direction] = val
         if len(inbound) > MAX_USERS:
@@ -329,6 +334,8 @@ def get_counters():
         grouped = {}
         for (user_id, _), values in inbound.items():
             grouped[user_id] = grouped.get(user_id, 0) + sum(values.values())
+            if grouped[user_id] >= 1 << 63:
+                raise ValueError("Xray user total counter overflow")
         return grouped, runtime_id, inbound
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"XMesh StatsService unavailable ({type(exc).__name__}); user traffic cannot be verified", file=sys.stderr)
