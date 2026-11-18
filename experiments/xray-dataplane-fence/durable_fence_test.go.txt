@@ -18,7 +18,7 @@ func TestCanonicalUserDenyRecoveredAcrossSignedInboundAliases(t *testing.T) {
         checkpointPath("/tmp",main) != checkpointPath("/tmp",cdn) {
         t.Fatal("one signed user can create separate main and CDN revocation slots")
     }
-    dir,_ := setupCheckpoint(t,main)
+    dir,_ := setupCheckpoint(t,main,0,0)
     // setupCheckpoint persists the primary email's signed-scope fence.
     before,err := readDurableFence(durableFencePath(dir,main))
     if err!=nil || before.Email!=main {t.Fatalf("untrusted durable fence: %v",err)}
@@ -37,7 +37,7 @@ func TestCanonicalUserDenyRecoveredAcrossSignedInboundAliases(t *testing.T) {
 }
 
 func TestCrashBeforeFenceHardlinkRefusesRestart(t *testing.T) {
-    dir,_:=setupCheckpoint(t,"power-loss-before-link")
+    dir,_:=setupCheckpoint(t,"power-loss-before-link",0,0)
     marker:=durableFencePath(dir,"power-loss-before-link")
     data,err:=os.ReadFile(marker)
     if err!=nil{t.Fatal(err)}
@@ -55,7 +55,7 @@ func TestCrashBeforeFenceHardlinkRefusesRestart(t *testing.T) {
 }
 
 func TestCrashAfterFenceHardlinkRepairsAndRestoresDeny(t *testing.T) {
-    dir,_:=setupCheckpoint(t,"power-loss-after-link")
+    dir,_:=setupCheckpoint(t,"power-loss-after-link",0,0)
     marker:=durableFencePath(dir,"power-loss-after-link")
     pending:=filepath.Join(dir,".fence-pending-postlink")
     if err:=os.Link(marker,pending);err!=nil{t.Fatal(err)}
@@ -76,8 +76,7 @@ func TestCrashAfterFenceHardlinkRepairsAndRestoresDeny(t *testing.T) {
 }
 
 func TestCrashObservedCheckpointPendingHardlinkRecovery(t *testing.T) {
-    dir,add:=setupCheckpoint(t,"meter-after-link")
-    add(11,13)
+    dir,_:=setupCheckpoint(t,"meter-after-link",11,13)
     scope:=testScope("meter-after-link",testRevocation)
     if _,err:=persistObservedCheckpoint(scope);err!=nil{t.Fatal(err)}
     observedMarker:=checkpointPath(dir,scope.Email)
@@ -100,8 +99,7 @@ func TestCrashObservedCheckpointPendingHardlinkRecovery(t *testing.T) {
 func TestUnpublishedOrForgedPendingObservedJournalRefusesRestart(t *testing.T) {
     for _,scenario:=range []string{"orphaned-observation","different-inode","symlink-pending"} {
         t.Run(scenario,func(t *testing.T) {
-            dir,add:=setupCheckpoint(t,"meter-pending-"+scenario)
-            add(4,5)
+            dir,_:=setupCheckpoint(t,"meter-pending-"+scenario,4,5)
             scope:=testScope("meter-pending-"+scenario,testRevocation)
             if _,err:=persistObservedCheckpoint(scope);err!=nil{t.Fatal(err)}
             original:=checkpointPath(dir,scope.Email)
@@ -129,7 +127,7 @@ func TestUnpublishedOrForgedPendingObservedJournalRefusesRestart(t *testing.T) {
 }
 
 func TestDurableFenceRecoveredBeforeAdmission(t *testing.T) {
-    dir,_:=setupCheckpoint(t,"persistent")
+    dir,_:=setupCheckpoint(t,"persistent",0,0)
     scope:=testScope("persistent",testRevocation)
     path:=durableFencePath(dir,scope.Email)
     disk,err:=readDurableFence(path)
@@ -161,8 +159,7 @@ func TestDurableFenceRecoveredBeforeAdmission(t *testing.T) {
 }
 
 func TestDurableFenceRefusesUnsignedOrphanObservedJournal(t *testing.T) {
-    dir,add:=setupCheckpoint(t,"orphaned")
-    add(13,29)
+    dir,_:=setupCheckpoint(t,"orphaned",13,29)
     record,err:=persistObservedCheckpoint(testScope("orphaned",testRevocation))
     if err!=nil{t.Fatal(err)}
     if record.FinalMeterVerified||record.RefundableBytes!=0{
