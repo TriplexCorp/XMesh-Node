@@ -250,8 +250,8 @@ def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir):
     ledger = guard.load_json(Path(state_dir) / "policy-usage.json")
     bound = guard.verify_committed_observed_checkpoint(
         Path(state_dir), node_id, checkpoint, ledger)
-    if bound.get("scopeBoundToSignedPolicy") is not True or
-            bound.get("completeSignedInboundScopeObserved") is not True or (
+    if (bound.get("scopeBoundToSignedPolicy") is not True or
+            bound.get("completeSignedInboundScopeObserved") is not True or
             bound.get("finalMeterVerified") is not False or
             bound.get("refundableBytes") != 0):
         raise ValueError("Xray checkpoint was not safely bound to signed policy")
