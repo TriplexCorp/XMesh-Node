@@ -517,7 +517,13 @@ def run(xray, transport):
                 b_taint_disk=b_taint.read_bytes()
                 assert json.loads(b_taint_disk)=={
                     "schemaVersion":1,"canonicalUser":b_key},b_taint_disk
-                assert probe_echo(b),"B connection died before its requested fence"
+                # The pre-restart B stream is already closed; use a NEW
+                # real SOCKS/VLESS session to prove B is still admitted here.
+                b_pre_fence=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
+                try:
+                    assert probe_echo(b_pre_fence),"B was denied before its requested fence"
+                finally:
+                    b_pre_fence.close()
                 b_revoke=str(uuid.uuid4())
                 b_refusal=request_fence(socket_file,EMAIL_B,b_revoke,
                                         expected_status=409,
