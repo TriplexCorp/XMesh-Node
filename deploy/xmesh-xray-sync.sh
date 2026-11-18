@@ -14,6 +14,10 @@ mkdir -p "$STATE"; chmod 700 "$STATE"
 exec 9>"$STATE/lock"
 flock -n 9 || exit 0
 REVOCATION_MARKER="$STATE/quota-revocation-deny-pending"
+DENY_HELPER=/usr/local/libexec/xmesh-quota-revocation-marker.py
+[[ -f "$DENY_HELPER" && ! -L "$DENY_HELPER" ]] || {
+ echo "Missing production quota-v2 durable denial helper" >&2;exit 1
+}
 REVOCATION_FAIL_CLOSED=false
 stop_managed_xray_for_revocation() {
  # An interrupted signed revocation must not leave the old admission policy
@@ -34,13 +38,15 @@ stop_managed_xray_for_revocation() {
   fi
  fi
 }
-if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then
- [[ -f "$REVOCATION_MARKER" && ! -L "$REVOCATION_MARKER" ]] || {
-  echo "Invalid durable quota revocation marker" >&2;exit 1
- }
- REVOCATION_FAIL_CLOSED=true
- stop_managed_xray_for_revocation || exit 1
-fi
+REVOCATION_STATUS="$(python3 "$DENY_HELPER" status "$STATE")" || exit 1
+case "$REVOCATION_STATUS" in
+ armed)
+  REVOCATION_FAIL_CLOSED=true
+  stop_managed_xray_for_revocation || exit 1
+  ;;
+ clear) ;;
+ *) echo "Invalid quota-v2 denial status" >&2;exit 1 ;;
+esac
 # The signed desired-config request carries the authoritative local guard
 # journal. Only the root-owned, already-persisted totals may become quota-v2
 # acknowledgements; an absent ledger is valid only for first enrollment.
@@ -96,7 +102,7 @@ if [[ "$REVOCATION_FAIL_CLOSED" == true && "$POLICY_ENABLED" != true ]];then
 fi
 OFFLINE_POLICY=false
 GEO_WORKER=/usr/local/libexec/xmesh-geodata-sync.py
-trap 'rc=$?; if [[ -f "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation || echo "CRITICAL: revoked Xray stop requires operator action" >&2;fi; if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"; exit "$rc"' EXIT
+trap 'rc=$?; if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation || echo "CRITICAL: revoked Xray stop requires operator action" >&2;fi; if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"; exit "$rc"' EXIT
 printf 'XMESH1\nPOST\n%s\n%s\n%s\n%s\n%s\n' "$PATH_API" "$XMESH_NODE_ID" "$STAMP" "$NONCE" "$HASH" > "$SIGN_FILE"
 SIG="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$SIGN_FILE" | od -An -tx1 -v | tr -d ' \n')"
 HTTP_STATUS="$(curl --proto '=https' --tlsv1.2 -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
@@ -291,10 +297,9 @@ if [[ "$POLICY_ENABLED" == true ]];then
   case "$PENDING_REVOCATION" in
    true)
     REVOCATION_FAIL_CLOSED=true
-    [[ ! -L "$REVOCATION_MARKER" ]] || { echo "Invalid revocation marker" >&2;exit 1; }
-    printf 'signed-v2-deny\n' > "$REVOCATION_MARKER"
-    chmod 0600 "$REVOCATION_MARKER"
-    sync -f "$REVOCATION_MARKER"
+    # The file AND parent directory must be fsynced before acknowledging
+    # a signed revocation. An incomplete publication refuses reconciliation.
+    python3 "$DENY_HELPER" arm "$STATE" || exit 1
     ;;
    false) ;;
    *) echo "Invalid signed revocation state" >&2;exit 1 ;;
@@ -643,7 +648,10 @@ if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" && "$TLS_MOUNT_OK"
  if [[ "$OFFLINE_POLICY" == false ]];then
  rm -f "$STATE/awaiting-profile"
  # Only after the signed deny is committed and the router is verified.
- rm -f "$REVOCATION_MARKER"
+ python3 "$DENY_HELPER" clear "$STATE" || {
+  echo "CRITICAL: cannot durably remove verified revocation denial" >&2
+  exit 1
+ }
 fi
  echo "Xray configuration unchanged, container healthy, router reconciled."
  exit 0
@@ -722,6 +730,9 @@ if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" commit "$STATE";fi
 if [[ "$OFFLINE_POLICY" == false ]];then
  rm -f "$STATE/awaiting-profile"
  # Only after the signed deny is committed and the router is verified.
- rm -f "$REVOCATION_MARKER"
+ python3 "$DENY_HELPER" clear "$STATE" || {
+  echo "CRITICAL: cannot durably remove verified revocation denial" >&2
+  exit 1
+ }
 fi
 echo "Xray deployed with TCP:$TCP_PORT UDP:$UDP_PORT; router reconciled."
