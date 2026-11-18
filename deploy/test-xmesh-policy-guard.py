@@ -130,12 +130,15 @@ class SignedPolicyTests(unittest.TestCase):
         self.run_guard("prepare", NOW + 1000)
         self.assertEqual(self.num_clients(), 0)
         observation = {
-            "schemaVersion": 2, "nodeId": 12, "userId": 1,
+            "schemaVersion": 3, "nodeId": 12, "userId": 1,
             "email": "xmesh-u1--vless-main",
             "epoch": lease["epoch"], "meterEpoch": lease["meterEpoch"],
             "reservationId": lease["reservationId"], "revision": 2,
             "revocationId": revoke["requestId"], "runtimeId": "a" * 64,
-            "uplinkBytes": 70, "downlinkBytes": 80, "drained": True,
+            "uplinkBytes": 70, "downlinkBytes": 80,
+            "inboundMeters": [{"email": "xmesh-u1--vless-main",
+                              "uplinkBytes": 70, "downlinkBytes": 80}],
+            "drained": True,
             "finalMeterVerified": False, "refundableBytes": 0
         }
         ledger = json.loads((self.state / "policy-usage.json").read_text())
