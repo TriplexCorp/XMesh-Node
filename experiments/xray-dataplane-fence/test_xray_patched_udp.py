@@ -24,7 +24,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_quota_v2_xray_user_inbound_drain import recv_exact, reserve_port  # noqa: E402
 from test_xray_patched_fence import (  # noqa: E402
-    command, await_socket, request_fence, wait_counter, query_counter, EMAIL_A, EMAIL_A_USER_KEY, EMAIL_B,
+    command, await_socket, request_fence, wait_counter, query_counter,
+    query_direction_counters, EMAIL_A, EMAIL_A_CDN, EMAIL_A_USER_KEY, EMAIL_B,
     test_lease_scope,
 )
 
@@ -143,7 +144,8 @@ def run(xray, xudp):
         echo = UDPEcho(("127.0.0.1", 0), UDPReply)
         threading.Thread(target=echo.serve_forever, daemon=True).start()
         echo_port = echo.server_address[1]
-        vless_port, api_port, socks_a, socks_b = (reserve_port() for _ in range(4))
+        vless_port, cdn_port, api_port, socks_a, socks_cdn, socks_b = (
+            reserve_port() for _ in range(6))
         identity_a, identity_b = str(uuid.uuid4()), str(uuid.uuid4())
         server_config = {
             "log": {"loglevel": "warning"},
@@ -156,6 +158,11 @@ def run(xray, xudp):
                      {"id": identity_a, "email": EMAIL_A, "level": 0},
                      {"id": identity_b, "email": EMAIL_B, "level": 0}]},
                  "streamSettings": {"network": "tcp", "security": "none"}},
+                # Separate CDN-tagged listener with independent A counters.
+                {"tag": "vless-cdn", "listen": "127.0.0.1", "port": cdn_port,
+                 "protocol": "vless", "settings": {"decryption": "none", "clients": [
+                     {"id": identity_a, "email": EMAIL_A_CDN, "level": 0}]},
+                 "streamSettings": {"network": "tcp", "security": "none"}},
                 {"tag": "xmesh_stats_in", "listen": "127.0.0.1", "port": api_port,
                  "protocol": "dokodemo-door", "settings": {
                      "address": "127.0.0.1", "port": api_port, "network": "tcp"}}
@@ -166,12 +173,13 @@ def run(xray, xudp):
             "routing": {"rules": [{"type": "field", "inboundTag": ["xmesh_stats_in"],
                                   "outboundTag": "xmesh_stats_api"}]}
         }
-        def outbound(tag, identity):
+        def outbound(tag, identity, *, cdn=False):
             cfg = {"tag": tag, "protocol": "vless", "settings": {
-                "vnext": [{"address": "127.0.0.1", "port": vless_port,
+                "vnext": [{"address": "127.0.0.1",
+                           "port": cdn_port if cdn else vless_port,
                            "users": [{"id": identity, "encryption": "none"}]}]},
                    "streamSettings": {"network": "tcp", "security": "none"}}
-            if xudp and tag == "user-a":
+            if xudp and tag in ("user-a", "user-a-cdn"):
                 # Xray uses the XUDP multiplexer only when this is positive.
                 cfg["mux"] = {"enabled": True, "concurrency": 8,
                               "xudpConcurrency": 8}
@@ -181,11 +189,17 @@ def run(xray, xudp):
             "inbounds": [
                 {"tag": "socks-a", "listen": "127.0.0.1", "port": socks_a,
                  "protocol": "socks", "settings": {"auth": "noauth", "udp": True}},
+                {"tag": "socks-cdn", "listen": "127.0.0.1", "port": socks_cdn,
+                 "protocol": "socks", "settings": {"auth": "noauth", "udp": True}},
                 {"tag": "socks-b", "listen": "127.0.0.1", "port": socks_b,
                  "protocol": "socks", "settings": {"auth": "noauth", "udp": True}},
             ],
-            "outbounds": [outbound("user-a", identity_a), outbound("user-b", identity_b)],
-            "routing": {"rules": [{"type": "field", "inboundTag": ["socks-b"],
+            "outbounds": [outbound("user-a", identity_a),
+                          outbound("user-a-cdn", identity_a, cdn=True),
+                          outbound("user-b", identity_b)],
+            "routing": {"rules": [{"type": "field", "inboundTag": ["socks-cdn"],
+                                  "outboundTag": "user-a-cdn"},
+                                 {"type": "field", "inboundTag": ["socks-b"],
                                   "outboundTag": "user-b"}]}
         }
         server_path, client_path = root / "server.json", root / "client.json"
@@ -202,6 +216,7 @@ def run(xray, xudp):
             env = os.environ.copy()
             env.update({"GITHUB_ACTIONS": "true",
                         "XMESH_EXPERIMENTAL_DRAIN": "1",
+                        "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS": "vless-share,vless-cdn",
                         "XMESH_EXPERIMENTAL_DRAIN_SOCKET": str(control_socket),
                         "XMESH_EXPERIMENTAL_OBSERVED_DIR": str(root)})
             server = subprocess.Popen([xray, "run", "-config", str(server_path)],
@@ -212,13 +227,18 @@ def run(xray, xudp):
             client = subprocess.Popen([xray, "run", "-config", str(client_path)],
                                       stdout=client_log, stderr=subprocess.STDOUT, env=client_env)
             a = socks_udp_associate(socks_a)
+            cdn = socks_udp_associate(socks_cdn)
             b = socks_udp_associate(socks_b)
-            associations.extend((a,b))
-            assert exchange_udp(a, echo_port, True, f"{mode}-A-1")
+            associations.extend((a, cdn, b))
+            assert exchange_udp(a, echo_port, True, f"{mode}-A-main-1")
+            assert exchange_udp(cdn, echo_port, True, f"{mode}-A-cdn-1")
             assert exchange_udp(b, echo_port, True, f"{mode}-B-1")
-            assert exchange_udp(a, echo_port, True, f"{mode}-A-2")
+            assert exchange_udp(a, echo_port, True, f"{mode}-A-main-2")
+            assert exchange_udp(cdn, echo_port, True, f"{mode}-A-cdn-2")
             before_a = wait_counter(xray, api_port, EMAIL_A)
+            before_cdn = wait_counter(xray, api_port, EMAIL_A_CDN)
             before_b = wait_counter(xray, api_port, EMAIL_B)
+            assert before_a > 0 and before_cdn > 0, "Missing real main/CDN UDP meter"
             proof = request_fence(control_socket, EMAIL_A, revocation_id)
             assert proof["fenced"] and proof["drained"] and proof["active"] == 0, proof
             assert not proof["finalMeterVerified"] and not proof["refundable"], proof
@@ -228,17 +248,25 @@ def run(xray, xudp):
             assert observation["schemaVersion"] == 3
             for key,value in test_lease_scope(EMAIL_A,revocation_id).items():
                 assert observation[key] == value
-            assert observation["uplinkBytes"] + observation["downlinkBytes"] >= before_a
+            assert [row["email"] for row in observation["inboundMeters"]] == sorted(
+                [EMAIL_A, EMAIL_A_CDN]), observation
+            assert observation["uplinkBytes"] + observation["downlinkBytes"] >= before_a + before_cdn
             assert checkpoint.is_file()
             assert json.loads(checkpoint.read_text()) == observation
             snapshot_total = observation["uplinkBytes"] + observation["downlinkBytes"]
-            immediately_after_fence = query_counter(xray, api_port, EMAIL_A)
-            exchange_udp(a, echo_port, False, f"{mode}-A-existing")
-            after_old_association = query_counter(xray, api_port, EMAIL_A)
+            def both_meter_totals():
+                return (query_counter(xray, api_port, EMAIL_A) +
+                        query_counter(xray, api_port, EMAIL_A_CDN))
+            immediately_after_fence = both_meter_totals()
+            exchange_udp(a, echo_port, False, f"{mode}-A-existing-main")
+            exchange_udp(cdn, echo_port, False, f"{mode}-A-existing-cdn")
+            after_old_association = both_meter_totals()
             fresh_a = socks_udp_associate(socks_a)
-            associations.append(fresh_a)
-            exchange_udp(fresh_a, echo_port, False, f"{mode}-A-new")
-            after_new_association = query_counter(xray, api_port, EMAIL_A)
+            fresh_cdn = socks_udp_associate(socks_cdn)
+            associations.extend((fresh_a, fresh_cdn))
+            exchange_udp(fresh_a, echo_port, False, f"{mode}-A-new-main")
+            exchange_udp(fresh_cdn, echo_port, False, f"{mode}-A-new-cdn")
+            after_new_association = both_meter_totals()
             print("UDP METER LIFECYCLE DIAGNOSTIC "+json.dumps({
                 "transport": mode,
                 "fsyncedSnapshot": snapshot_total,
@@ -262,7 +290,7 @@ def run(xray, xudp):
                 assert not repeat["finalMeterVerified"] and not repeat["refundable"]
             else:
                 assert b"existing checkpoint mismatch or late counter update" in body
-            late_total = query_counter(xray, api_port, EMAIL_A)
+            late_total = both_meter_totals()
             original_total = observation["uplinkBytes"] + observation["downlinkBytes"]
             # No data may enter either stats wrapper after admission is
             # closed. The prior real UDP/XUDP test observed +1232 bytes in
@@ -271,6 +299,24 @@ def run(xray, xudp):
                 f"{mode}: post-fence user meter changed by "
                 f"{late_total-original_total} bytes")
             assert status == 200, (mode, status, body)
+            # Independently resample BOTH directions for EACH main/CDN alias
+            # while unrelated user B keeps transferring real UDP/XUDP bytes.
+            # Bounded sampling is NONFINAL and can never authorize refunds.
+            expected_meter = {
+                row["email"]: {"uplink": row["uplinkBytes"],
+                               "downlink": row["downlinkBytes"]}
+                for row in observation["inboundMeters"]
+            }
+            assert set(expected_meter) == {EMAIL_A, EMAIL_A_CDN}
+            for sample_index in range(3):
+                assert exchange_udp(b, echo_port, True,
+                                    f"{mode}-B-still-live-{sample_index}")
+                for email in sorted(expected_meter):
+                    actual = query_direction_counters(xray, api_port, email)
+                    assert actual == expected_meter[email], (
+                        "Real Xray post-drain UDP/XUDP meter changed",
+                        mode, sample_index, email, expected_meter[email], actual)
+                time.sleep(.07)
             assert json.loads(checkpoint.read_text()) == observation
             assert server.poll() is None
             server.terminate()
@@ -281,6 +327,8 @@ def run(xray, xudp):
                       "newUserBUDPAllowed": True, "journalFsynced": True,
                       "replayStatus": status,
                       "lateMeterGrowth": late_total - original_total,
+                      "mainAndCdnBothCovered": True,
+                      "stableThreePostDrainSamples": True,
                       "userABeforeFenceBytes": before_a,
                       "userAAfterFenceBytes": after_a,
                       "userBAfterFenceBytes": after_b,
