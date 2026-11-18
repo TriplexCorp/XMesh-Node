@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime_identity import verify_live_runtime
+from runtime_identity import trusted_runtime_identity, verify_live_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
