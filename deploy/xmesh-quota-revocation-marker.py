@@ -85,21 +85,29 @@ def clear(dirfd):
     os.fsync(dirfd)
 
 
+def operate(operation, state_dir):
+    dirfd = open_private_dir(state_dir)
+    try:
+        if operation == "status":
+            return "armed" if verify_marker(dirfd) else "clear"
+        if operation == "arm":
+            arm(dirfd)
+        elif operation == "clear":
+            clear(dirfd)
+        else:
+            raise ValueError("unsupported quota-v2 marker operation")
+    finally:
+        os.close(dirfd)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=("status", "arm", "clear"))
     parser.add_argument("state_dir")
     args = parser.parse_args()
-    dirfd = open_private_dir(args.state_dir)
-    try:
-        if args.operation == "status":
-            print("armed" if verify_marker(dirfd) else "clear")
-        elif args.operation == "arm":
-            arm(dirfd)
-        else:
-            clear(dirfd)
-    finally:
-        os.close(dirfd)
+    result = operate(args.operation, args.state_dir)
+    if args.operation == "status":
+        print(result)
 
 
 if __name__ == "__main__":
