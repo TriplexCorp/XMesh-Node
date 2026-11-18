@@ -92,6 +92,38 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         self.assertEqual(target.stat().st_ino, inode)
         self.assertEqual(target.read_bytes(), before)
 
+    def test_normal_signer_auto_discovers_managed_docker_runtime(self):
+        cp = checkpoint()
+        identity = ("a" * 64, "2026-11-18T12:00:00Z", os.getpid())
+        with patch.object(evidence, "inspect_managed_xray",
+                          side_effect=[identity, identity]) as docker, patch.object(
+                evidence, "verify_managed_xray_runtime",
+                return_value=True) as checked, patch.object(
+                evidence.guard, "verify_committed_observed_checkpoint",
+                return_value=self.valid_binding):
+            receipt = evidence.create_observation(
+                self.state, 7, cp, self.key, self.output)
+        self.assertEqual(docker.call_count, 2)
+        checked.assert_called_once_with(cp)
+        self.assertTrue(evidence.verify_envelope(
+            receipt, 7, self.pub)["liveRuntimeIndependentlyVerified"])
+        self.assertEqual(len(list(self.output.iterdir())), 1)
+
+    def test_managed_container_swapped_before_publication_cannot_sign(self):
+        cp = checkpoint()
+        first = ("a" * 64, "2026-11-18T12:00:00Z", os.getpid())
+        replacement = ("b" * 64, "2026-11-18T12:00:01Z", os.getpid())
+        with patch.object(evidence, "inspect_managed_xray",
+                          side_effect=[first, replacement]), patch.object(
+                evidence, "verify_managed_xray_runtime", return_value=True
+                ), patch.object(
+                evidence.guard, "verify_committed_observed_checkpoint",
+                return_value=self.valid_binding):
+            with self.assertRaisesRegex(ValueError, "replaced"):
+                evidence.create_observation(
+                    self.state, 7, cp, self.key, self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+
     def test_signer_rejects_wrong_running_pid_or_forged_runtime(self):
         cp = checkpoint()
         forged = dict(cp, runtimeId="a"*64)
