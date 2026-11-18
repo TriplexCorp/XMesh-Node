@@ -32,7 +32,8 @@ jobs:
           python3 -m py_compile experiments/xray-dataplane-fence/test_xray_patched_crash.py
       - name: Prove immutable Node-signed nonterminal evidence fails closed
         run: |
-          python3 -m py_compile experiments/xray-dataplane-fence/runtime_identity.py experiments/xray-dataplane-fence/sign_observation.py experiments/xray-dataplane-fence/test_signed_nonfinal_observation.py
+          python3 -m py_compile experiments/xray-dataplane-fence/runtime_identity.py experiments/xray-dataplane-fence/sign_observation.py experiments/xray-dataplane-fence/test_signed_nonfinal_observation.py experiments/xray-dataplane-fence/test_runtime_identity_docker.py
+          python3 experiments/xray-dataplane-fence/test_runtime_identity_docker.py
           python3 experiments/xray-dataplane-fence/test_signed_nonfinal_observation.py
       - name: Checkout EXACT official Xray v26.10.31 commit
         run: |
