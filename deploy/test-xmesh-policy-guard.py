@@ -152,6 +152,42 @@ class SignedPolicyTests(unittest.TestCase):
         self.assertEqual(snapshot["observedRawBytes"], 150)
         self.assertIs(snapshot["finalMeterVerified"], False)
         self.assertEqual(snapshot["refundableBytes"], 0)
+        # Cross the actual verified signed-policy boundary before the
+        # experimental Node signing step: no mocked policy approval here.
+        signed_spec = importlib.util.spec_from_file_location(
+            "xmesh_nonfinal_signer",
+            Path(__file__).resolve().parents[1]
+            / "experiments/xray-dataplane-fence/sign_observation.py")
+        signer = importlib.util.module_from_spec(signed_spec)
+        signed_spec.loader.exec_module(signer)
+        node_key = self.root / "node-identity-key.pem"
+        node_pub = self.root / "node-identity-key.pub"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519",
+                        "-out", str(node_key)], check=True, capture_output=True)
+        os.chmod(node_key, 0o600)
+        subprocess.run(["openssl", "pkey", "-in", str(node_key), "-pubout",
+                        "-out", str(node_pub)], check=True, capture_output=True)
+        signed_dir = self.root / "signed-nonfinal"
+        signed_dir.mkdir(mode=0o700)
+        envelope = signer.create_observation(
+            self.state, 12, observation, node_key, signed_dir)
+        signed = signer.verify_envelope(envelope, 12, node_pub)
+        self.assertFalse(signed["finalMeterVerified"])
+        self.assertFalse(signed["settlementEligible"])
+        self.assertEqual(signed["refundableBytes"], 0)
+        self.assertEqual(signer.create_observation(
+            self.state, 12, observation, node_key, signed_dir), envelope)
+        # Even correctly signed evidence must fail when the policy is forged.
+        original_policy_bytes = (self.state / "policy-envelope.json").read_bytes()
+        counterfeit = json.loads(original_policy_bytes)
+        counterfeit["policy"]["users"][0]["quotaReservation"]["revision"] += 1
+        (self.state / "policy-envelope.json").write_text(json.dumps(counterfeit))
+        try:
+            with self.assertRaises(ValueError):
+                signer.create_observation(
+                    self.state, 12, observation, node_key, signed_dir)
+        finally:
+            (self.state / "policy-envelope.json").write_bytes(original_policy_bytes)
         tests = [
             ("nodeId", 13), ("userId", 2), ("revision", 3),
             ("email", "xmesh-u2--vless-main"), ("revocationId", "5" * 8 + "-5555-4555-8555-" + "5" * 12),
