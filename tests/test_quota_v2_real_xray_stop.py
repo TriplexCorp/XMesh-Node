@@ -7,6 +7,7 @@ already existing managed container. This tests physical revocation safety, not
 statistical finality or refundable bytes.
 """
 import contextlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,12 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "ghcr.io/xtls/xray-core:26.10.31"
 NAME = "xmesh-managed-xray"
+
+STOP_SPEC = importlib.util.spec_from_file_location(
+    "xmesh_quota_physical_stop_attestor",
+    ROOT / "experiments/quota-v2-physical-stop/attestor.py")
+attestor = importlib.util.module_from_spec(STOP_SPEC)
+STOP_SPEC.loader.exec_module(attestor)
 
 
 def cmd(*argv, check=True):
@@ -120,6 +127,7 @@ def run():
         )
         created = False
         session = None
+        stop_probe = None
         try:
             docker(
                 "run", "-d", "--name", NAME, "--restart", "unless-stopped",
@@ -143,6 +151,7 @@ def run():
             assert marker.read_bytes() == b"signed-v2-deny\n"
             marker_inode = marker.stat().st_ino
             assert durable_marker("status").stdout.strip() == "armed"
+            stop_probe = attestor.begin_old_xray_probe()
             script = (
                 "set -Eeuo pipefail\n" + helper +
                 "\nREVOCATION_MARKER=" + str(marker) + "\n" +
@@ -150,6 +159,15 @@ def run():
             )
             done = cmd("bash", "-c", script)
             verify_stopped()
+            physical_stop = attestor.verify_old_xray_physically_stopped(
+                stop_probe, root, production_marker_helper)
+            assert physical_stop["oldPidfdExited"] is True
+            assert physical_stop["managedContainerStopped"] is True
+            assert physical_stop["durableDenyArmed"] is True
+            assert physical_stop["restartDisabled"] is True
+            assert physical_stop["finalMeterVerified"] is False
+            assert physical_stop["settlementEligible"] is False
+            assert physical_stop["refundableBytes"] == 0
             assert marker.is_file(), "Stop must not clear durable revocation intent"
             print("PASS: real Xray stopped, restart policy disabled, marker retained", flush=True)
             # The old established stream must not continue delivering traffic.
@@ -179,6 +197,8 @@ def run():
             print("PASS: old streams terminated, new sessions refused, repeated stop idempotent", flush=True)
             print("NOTE: counters are not terminal; this test never frees reserved quota", flush=True)
         finally:
+            if stop_probe is not None:
+                stop_probe.close()
             if session is not None:
                 session.close()
             if created:
