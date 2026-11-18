@@ -46,6 +46,9 @@ func TestMultiInboundCoverageIsStrictAndIncludesBlankUserEmails(t *testing.T) {
         ScopedEmail(scoped("xmesh_stats_in", "same-account")) != "" {
         t.Fatal("private management StatsService was classified as a user stream")
     }
+    if err := RequireInboundCoverage(scoped("xmesh_stats_in", "management")); err != nil {
+        t.Fatalf("private StatsService must remain accessible: %v", err)
+    }
     if err := RequireInboundCoverage(scoped("vless-cdn", "same-account")); err != nil {
         t.Fatalf("explicit secondary inbound unexpectedly refused: %v", err)
     }
