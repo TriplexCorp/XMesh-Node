@@ -314,6 +314,10 @@ def _append_only_locked(dfd, name, evidence):
         sink.write(evidence)
         sink.flush()
         os.fsync(sink.fileno())
+    # Persist the pending DIRECTORY ENTRY before publishing. fsync(file)
+    # alone cannot guarantee that its filename survives a power failure.
+    # This is done under the exclusive flock, before any new hardlink.
+    os.fsync(dfd)
     # Failures after the durable temp is written MUST leave that file in
     # place. Removing it on a failed hardlink/fsync silently discards crash
     # evidence and could allow conflicting signatures on a retry.
