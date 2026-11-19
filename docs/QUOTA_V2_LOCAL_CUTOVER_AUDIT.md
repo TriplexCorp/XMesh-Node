@@ -3,7 +3,7 @@
 Run from a trusted SSH session on **each enrolled XMesh Node VPS**, from the existing Node source checkout:
 
 ```bash
-sudo python3 /opt/xmesh-node/deploy/xmesh-quota-v2-local-audit.py --json
+sudo python3 /opt/xmesh-node/scripts/quota-v2-local-audit.py --json
 ```
 
 The command is **read-only** and never modifies Xray, Docker, node identity, signed policies, quotas, or PostgreSQL. It reports fixed reason codes only, without user IDs, keys, UUIDs, signed secrets or configs.
