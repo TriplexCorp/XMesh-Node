@@ -164,7 +164,7 @@ then
     --data-binary "$REQUEST" -o "$RESP_FILE" -w '%{http_code}')" || HTTP_STATUS=000
 fi
 if [[ "$HTTP_STATUS" == 000 ]];then
- echo "Panel unavailable; preserving current Xray and checking cached offline policy." >&2
+ echo "Panel unavailable; checking whether cached signed policy can authorize Xray." >&2
  OFFLINE_POLICY=true
 fi
 if [[ "$HTTP_STATUS" == 403 ]];then
@@ -279,8 +279,13 @@ if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true ]];then
  echo "XMesh desired-config returned HTTP $HTTP_STATUS; enforcing last signed offline policy; panel changes NOT applied." >&2
  OFFLINE_POLICY=true
 fi
-if [[ "$HTTP_STATUS" != 200 && "$OFFLINE_POLICY" == false ]]; then
- echo "XMesh desired-config rejected request (HTTP $HTTP_STATUS); existing Xray untouched." >&2
+# Missing or disabled autonomous guard is NEVER an authorization to keep
+# previously issued users online when Nexus cannot deliver a verified policy.
+# In particular HTTP 000 sets OFFLINE_POLICY=true before this check, so testing
+# OFFLINE_POLICY=false here silently bypassed the fail-closed stop.
+if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" != true ]];then
+ echo "CRITICAL: desired-config unavailable and autonomous policy guard absent; denying managed Xray." >&2
+ stop_managed_xray_for_invalid_offline_policy || exit 1
  exit 1
 fi
 # The control agent owns reactivation. Never bypass its forced-stop marker
