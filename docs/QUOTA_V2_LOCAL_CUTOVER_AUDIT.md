@@ -15,3 +15,9 @@ A committed version-1 policy ALWAYS blocks positive local v2 status, even when e
 A `localV2AppliedVerified=true` report confirms only the inspected local **managed** Xray installation, not other Node processes, cloned keys, alternate containers, offline machines, or the whole fleet. Therefore it ALWAYS reports `allLegacyCopiesRetiredVerified=false`, `fleetActivationAuthorized=false`, `finalMeterVerified=false`, `refundableBytes=0`.
 
 This script is a diagnostic aid, **not an automatic activation gate**. Before flipping `XMESH_QUOTA_V2_ENABLED=1`, independently inventory all physical VPS (including disabled and offline nodes), retire every old v1 Xray/Agent and pre-issued signed offline policy, verify release/policy/actual process on each machine, and rehearse staged update and rollback. Do not upload local signed policy files or private identities to support tickets.
+
+## Additional local process and enforcement checks
+
+The scanner also checks a bounded list of **running** Docker containers. It expects exactly `xmesh-node` (edge router) and `xmesh-managed-xray` (signed managed Xray). Any other running container is **red until independently reviewed** because its image/name cannot prove it has no proxy listeners or stale v1 policy. Unknown/unavailable Docker inventory is red. This may conservatively flag unrelated monitoring containers; review them instead of treating a local green result as mandatory availability.
+
+The three systemd timers `xmesh-node-control.timer`, `xmesh-xray-sync.timer`, and `xmesh-node-metrics.timer` must be both **enabled** and **active**. A timer only installed/enabled but not running means the local quota/expiry revocation loop may not execute, so local readiness is red. The script still never starts/stops any unit or Docker container. It does not scan external hosts, arbitrary native processes or cloned identities and **never** authorizes fleet activation or refunds.
