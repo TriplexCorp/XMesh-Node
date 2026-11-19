@@ -11,6 +11,7 @@ import (
     "errors"
     "fmt"
     "os"
+    "strconv"
     "path/filepath"
     "reflect"
     "sort"
@@ -115,6 +116,16 @@ func validateRevocationID(id string) bool {
 func validScope(scope checkpointScope) bool {
     if scope.Email=="" || len(scope.Email)>128 || scope.NodeID<=0 ||
         scope.UserID<=0 || scope.Revision<=0 { return false }
+    // The accounting identity in a real signed-policy email is the billing
+    // User ID, not a client-supplied label. Otherwise a caller could fence
+    // user A's active streams under user B's reservation/revocation scope.
+    // Retain simple non-signed labels ONLY for isolated legacy test fixtures.
+    if strings.HasPrefix(scope.Email,"xmesh-u") {
+        matched:=signedUserEmail.FindStringSubmatch(scope.Email)
+        if matched==nil || matched[1]!=strconv.FormatInt(scope.UserID,10) {
+            return false
+        }
+    }
     ids:=[]string{scope.Epoch,scope.MeterEpoch,scope.ReservationID,scope.RevocationID}
     for _,id:=range ids {
         if !validateRevocationID(id) { return false }
