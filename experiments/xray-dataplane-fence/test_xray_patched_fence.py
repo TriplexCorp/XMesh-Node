@@ -144,6 +144,29 @@ def request_fence(path, email, revocation_id, expected_status=200, *,
     return json.loads(body) if expected_status == 200 else body
 
 
+def send_raw_fence_json(path, payload, expected_status=400):
+    """Send intentionally ambiguous JSON across the real root-only Xray socket."""
+    request=(
+        b"POST /v1/fence HTTP/1.1\r\nHost: localhost\r\n"
+        b"Connection: close\r\nContent-Type: application/json\r\n"
+        + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
+    )
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(9)
+        sock.connect(str(path))
+        sock.sendall(request)
+        result=bytearray()
+        while True:
+            data=sock.recv(4096)
+            if not data:
+                break
+            result.extend(data)
+    response=bytes(result)
+    assert f" {expected_status} ".encode() in response.splitlines()[0], response
+    assert b"invalid scoped request" in response, response
+    return response
+
+
 def await_socket(path, process):
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline:
@@ -320,6 +343,34 @@ def run(xray, transport):
             before_a=wait_counter(xray,api_port,EMAIL_A)
             before_b=wait_counter(xray,api_port,EMAIL_B)
             assert before_a>0 and before_b>0
+            # A JSON parser that accepts duplicate keys could fence real
+            # user A under a forged user B reservation. Invalid requests
+            # must NOT create an on-disk fence, stop either live stream,
+            # or record any pretend final-meter observations.
+            canonical_request=json.dumps(test_lease_scope(
+                EMAIL_A,revocation_id),separators=(",",":")).encode()
+            assert b'"userId":101' in canonical_request
+            assert b'"email":"xmesh-u101--vless-share"' in canonical_request
+            invalid_requests=(
+                canonical_request.replace(
+                    b'"userId":101',b'"userId":102,"userId":101',1),
+                canonical_request.replace(
+                    b'"email":"xmesh-u101--vless-share"',
+                    b'"email":"xmesh-u102--vless-share","email":"xmesh-u101--vless-share"',1),
+                canonical_request.replace(b'"userId":101',b'"userId":102',1),
+                canonical_request + b'{}',
+                canonical_request.replace(b'"revision":7',
+                                          b'"revision":7,"finalMeterVerified":true',1),
+            )
+            pre_fence_path=root/("fence-"+
+                hashlib.sha256(EMAIL_A_USER_KEY.encode()).hexdigest()+".json")
+            for forged in invalid_requests:
+                assert forged!=canonical_request,"invalid request fixture was unchanged"
+                send_raw_fence_json(socket_file,forged)
+                assert not pre_fence_path.exists(), "bad JSON committed durable stop"
+                assert not journal_file.exists(), "bad JSON committed observed meter"
+                assert probe_echo(a) and probe_echo(b), (
+                    "invalid lease scope stopped an active authenticated stream")
             proof=request_fence(socket_file,EMAIL_A,revocation_id)
             assert proof["fenced"] and proof["drained"] and proof["active"]==0,proof
             assert not proof["finalMeterVerified"] and not proof["refundable"],proof
@@ -420,9 +471,11 @@ def run(xray, transport):
                           {"meterEpoch": "55555555-5555-4555-8555-555555555555"},
                           {"reservationId": "66666666-6666-4666-8666-666666666666"},
                           {"revision": 8}):
+                status=400 if "userId" in wrong else 409
                 mismatch = request_fence(socket_file,EMAIL_A,revocation_id,
-                                         expected_status=409,scope_override=wrong)
-                assert b"durable fence" in mismatch, (wrong,mismatch)
+                                         expected_status=status,scope_override=wrong)
+                expected=b"invalid scoped request" if status==400 else b"durable fence"
+                assert expected in mismatch, (wrong,mismatch)
             assert json.loads(journal_file.read_text())==observation
             assert server.poll() is None,"Xray server exited during selective fence"
             # The real upstream StatsService --reset endpoint calls Counter.Set.
