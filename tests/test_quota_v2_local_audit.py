@@ -112,25 +112,24 @@ class TestLocalAudit(unittest.TestCase):
         self.assertIn("enforcement_timer_inventory_unavailable", r["blockers"])
 
     def test_docker_inventory_validates_names_and_rejects_failure(self):
-        from unittest.mock import patch
-        for body, code in (
-            ("xmesh-node\\nxmesh-managed-xray\\n", 0),
-            ("xmesh-node\\nxmesh-node\\n", 0),
-            ("xmesh-node\\nname/invalid\\n", 0),
-            ("", 1),
+        for names, code, should_pass in (
+            (("xmesh-node", "xmesh-managed-xray"), 0, True),
+            (("xmesh-node", "xmesh-node"), 0, False),
+            (("xmesh-node", "name/invalid"), 0, False),
+            ((), 1, False),
         ):
-            with self.subTest(body=body, code=code):
-                response = subprocess.CompletedProcess([], code,
-                    stdout=body.replace("\\\\n", "\\n"), stderr="")
+            with self.subTest(names=names, code=code):
+                response = subprocess.CompletedProcess(
+                    [], code, stdout="\n".join(names) + "\n", stderr="")
                 with patch.object(audit, "run", return_value=response):
-                    if code != 0 or "invalid" in body or body.count("xmesh-node") > 1:
-                        with self.assertRaises(ValueError):
-                            audit.inspect_running_docker_names()
-                    else:
+                    if should_pass:
                         self.assertEqual(
                             audit.inspect_running_docker_names(),
                             frozenset(("xmesh-node", "xmesh-managed-xray")),
                         )
+                    else:
+                        with self.assertRaises(ValueError):
+                            audit.inspect_running_docker_names()
 
     def test_actual_binary_identities_must_match_installed_manifest(self):
         a = "a" * 64
