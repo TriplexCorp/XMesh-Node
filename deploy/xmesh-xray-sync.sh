@@ -3,22 +3,18 @@ set -Eeuo pipefail
 umask 077
 # Signed pull-based reconciliation. Only the explicit XMesh-managed container is touched.
 [[ $EUID -eq 0 ]] || { echo "Run as root" >&2; exit 1; }
-source /etc/xmesh-node-metrics.env
-KEY=/etc/xmesh-node-metrics/node.key
-[[ -r "$KEY" ]] || { echo "Missing Ed25519 node identity" >&2; exit 1; }
-command -v docker >/dev/null
-command -v python3 >/dev/null
-command -v openssl >/dev/null
+# Fixed, root-owned managed state. Establish the physical cutoff before reading
+# identity, counters or helper files: their failure may otherwise leave an old
+# Xray process admitting clients when quotas cannot be enforced.
 STATE=/var/lib/xmesh-xray-sync
-mkdir -p "$STATE"; chmod 700 "$STATE"
-exec 9>"$STATE/lock"
-flock -n 9 || exit 0
 REVOCATION_MARKER="$STATE/quota-revocation-deny-pending"
 DENY_HELPER=/usr/local/libexec/xmesh-quota-revocation-marker.py
-[[ -f "$DENY_HELPER" && ! -L "$DENY_HELPER" ]] || {
- echo "Missing production quota-v2 durable denial helper" >&2;exit 1
-}
 REVOCATION_FAIL_CLOSED=false
+OFFLINE_POLICY=false
+GEO_WORKER=/usr/local/libexec/xmesh-geodata-sync.py
+SIGN_FILE=""
+RESP_FILE=""
+CONFIG_FILE=""
 stop_managed_xray_for_revocation() {
  # An interrupted signed revocation must not leave the old admission policy
  # running or allow Docker's restart policy to resurrect its credentials.
@@ -47,6 +43,31 @@ stop_managed_xray_for_invalid_offline_policy() {
   echo "CRITICAL: failed to confirm managed Xray stopped; operator action required." >&2
   return 1
  fi
+}
+# The exit trap covers ALL reconciliation failures, not just offline paths:
+# corrupt durable counters, missing key/helper/guard, unexpected HTTP states,
+# invalid signed response or failed Xray/router validation. No old profile may
+# continue accepting clients after an unverified transition. It is NOT a final
+# Xray byte receipt and never enables quota refunds.
+trap 'rc=$?; if [[ "$rc" -ne 0 ]];then stop_managed_xray_for_invalid_offline_policy || echo "CRITICAL: failed to confirm Xray cutoff; operator action required" >&2;fi; if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation || echo "CRITICAL: revoked Xray stop requires operator action" >&2;fi; if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; for temp in "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE";do if [[ -n "$temp" ]];then rm -f -- "$temp";fi;done; exit "$rc"' EXIT
+mkdir -p "$STATE"; chmod 700 "$STATE"
+exec 9>"$STATE/lock"
+if flock -n -E 75 9;then
+ : # sole reconciler; lock held until exit
+else
+ rc=$?
+ if [[ "$rc" == 75 ]];then exit 0;fi # another reconciler owns the lock
+ echo "CRITICAL: cannot acquire reconciliation state lock" >&2
+ exit "$rc"
+fi
+source /etc/xmesh-node-metrics.env
+KEY=/etc/xmesh-node-metrics/node.key
+[[ -r "$KEY" ]] || { echo "Missing Ed25519 node identity" >&2; exit 1; }
+command -v docker >/dev/null
+command -v python3 >/dev/null
+command -v openssl >/dev/null
+[[ -f "$DENY_HELPER" && ! -L "$DENY_HELPER" ]] || {
+ echo "Missing production quota-v2 durable denial helper" >&2;exit 1
 }
 REVOCATION_STATUS="$(python3 "$DENY_HELPER" status "$STATE")" || exit 1
 case "$REVOCATION_STATUS" in
@@ -110,13 +131,13 @@ if [[ "$REVOCATION_FAIL_CLOSED" == true && "$POLICY_ENABLED" != true ]];then
  echo "Signed quota revocation pending but policy guard unavailable; preserving denial." >&2
  exit 1
 fi
-OFFLINE_POLICY=false
-GEO_WORKER=/usr/local/libexec/xmesh-geodata-sync.py
-# An offline policy re-evaluation that FAILS at ANY subsequent stage (TLS,
-# GeoData, Docker image/config validation, routing or launch) must not silently
-# retain/restore an older live Xray with revoked or overspent credentials.
-# Never treat this physical stop as a final byte receipt or refund evidence.
-trap 'rc=$?; if [[ "$OFFLINE_POLICY" == true && "$rc" -ne 0 ]];then stop_managed_xray_for_invalid_offline_policy || echo "CRITICAL: offline-policy stop requires operator action" >&2;fi; if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation || echo "CRITICAL: revoked Xray stop requires operator action" >&2;fi; if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"; exit "$rc"' EXIT
+# Never admit even an HTTP 200 response when the mandatory signed quota guard
+# is missing or explicitly disabled. This also removes the old raw-v1-config
+# admission bypass: normal installations must ship the policy guard first.
+if [[ "$POLICY_ENABLED" != true ]];then
+ echo "CRITICAL: autonomous signed policy guard absent; refusing managed Xray admission." >&2
+ exit 1
+fi
 printf 'XMESH1\nPOST\n%s\n%s\n%s\n%s\n%s\n' "$PATH_API" "$XMESH_NODE_ID" "$STAMP" "$NONCE" "$HASH" > "$SIGN_FILE"
 SIG="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$SIGN_FILE" | od -An -tx1 -v | tr -d ' \n')"
 HTTP_STATUS="$(curl --proto '=https' --tlsv1.2 -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
@@ -216,6 +237,7 @@ sys.exit(0 if valid else 1)
 PY
  then
   echo "Unexpected HTTP 202 body; refusing unverified provisioning state." >&2
+  # The EXIT trap physically cuts off any existing managed proxy.
   exit 1
  fi
  if ! docker info >/dev/null 2>&1;then
@@ -292,6 +314,7 @@ fi
 # by recreating a container during ordinary profile reconciliation.
 if [[ -f /var/lib/xmesh-node-control/forced-stop ]];then
  echo "Xray forced-stop marker present; awaiting signed control-agent reactivation." >&2
+ stop_managed_xray_for_invalid_offline_policy || exit 1
  exit 0
 fi
 if [[ -f "$REVOCATION_MARKER" && "$HTTP_STATUS" != 200 ]];then
@@ -426,7 +449,7 @@ PYTLS
 then
  [[ -r "$TLS_WORKER" ]] || { echo "TLS provisioner missing: update node bootstrap." >&2;exit 1; }
  python3 "$TLS_WORKER" "$RESP_FILE" "$CONFIG_FILE" || {
-  echo "Managed TLS prerequisites not satisfied; preserving current Xray." >&2;exit 1;
+  echo "Managed TLS prerequisites not satisfied; refusing continued Xray admission." >&2;exit 1;
  }
 fi
 GEO_BIND=()
@@ -479,7 +502,7 @@ else
 fi
 if ! docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges --entrypoint xray -v "$CONFIG_FILE:/etc/xray/config.json:ro" \
  "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -test -config /etc/xray/config.json;then
- echo "GeoData/config validation failed; keeping previous Xray and files." >&2
+ echo "GeoData/config validation failed; refusing continued Xray admission." >&2
  exit 1
 fi
 NEW_HASH="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
@@ -745,41 +768,21 @@ if ! docker run -d --name xmesh-managed-xray --restart unless-stopped \
  --network host --user 0:0 --read-only --security-opt no-new-privileges \
  --cap-drop ALL -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" \
  "$IMAGE" run -config /etc/xray/config.json;then
- echo "Xray start failed; attempting rollback." >&2
+ echo "Xray start failed; refusing to restore stale admission." >&2
  if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE";fi
- if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then
-  cp "$PREVIOUS" "$ACTIVE"
-  docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
-  docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
-   --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
- fi
  exit 1
 fi
 sleep 2
 if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];then
- echo "New Xray instance exited; attempting rollback." >&2
+ echo "New Xray instance exited; refusing to restore stale admission." >&2
  if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE";fi
  docker logs --tail 20 xmesh-managed-xray >&2 || true
  docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
- if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then
-  cp "$PREVIOUS" "$ACTIVE"
-  docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
-   --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
- fi
  exit 1
 fi
 # The public router must follow the validated local Xray listener.
 if ! reconcile_router_default;then
- echo "CRITICAL: $INBOUND_NETWORK router was not reconciled; rolling Xray back." >&2
- if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then
-  cp "$PREVIOUS" "$ACTIVE"
-  docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
-  docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
-   --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
-   -v "$ACTIVE:/etc/xray/config.json:ro" "${GEO_BIND[@]}" "${TLS_BIND[@]}" "$IMAGE" run -config /etc/xray/config.json || true
- fi
+ echo "CRITICAL: $INBOUND_NETWORK router was not reconciled; stopping Xray." >&2
  exit 1
 fi
 if [[ "$POLICY_ENABLED" == true && "$OFFLINE_POLICY" == false ]];then
