@@ -85,20 +85,35 @@ def verify_binary_manifest():
     return True
 
 
-def inspect_all_docker_names():
-    # Include STOPPED containers as well: an old legacy instance may be
-    # restarted after the cutover, especially with a Docker restart policy.
-    # This still cannot prove absence of deleted images, remote clones or
-    # native processes. Unknown local containers must be reviewed manually.
-    response = run(["docker", "ps", "--all", "--format", "{{.Names}}"])
-    if response.returncode != 0 or len(response.stdout) > 16384:
+def inspect_docker_inventory():
+    """Read all containers AND their actual state from a single Docker snapshot.
+
+    A stopped xmesh-node still appears in 'docker ps --all', so treating that
+    list as running yields false-green routing readiness. Keep every stopped
+    unexpected container in the review set: it can be restarted after cutover.
+    """
+    response = run(["docker", "ps", "--all", "--format", "{{.Names}}\\t{{.State}}"])
+    if response.returncode != 0 or len(response.stdout) > 32768:
         raise ValueError("Docker inventory unavailable")
-    names = response.stdout.splitlines()
-    if len(names) > 128 or len(names) != len(set(names)) or any(
-            not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", name)
-            for name in names):
-        raise ValueError("Invalid Docker container inventory")
-    return frozenset(names)
+    names = set()
+    running = set()
+    rows = response.stdout.splitlines()
+    allowed = {"running", "created", "restarting", "removing",
+               "paused", "exited", "dead"}
+    if len(rows) > 128:
+        raise ValueError("Too many Docker containers")
+    for row in rows:
+        parts = row.split("\\t")
+        if len(parts) != 2:
+            raise ValueError("Malformed Docker state inventory")
+        name, state = parts
+        if (not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", name)
+                or name in names or state not in allowed):
+            raise ValueError("Untrustworthy Docker container inventory")
+        names.add(name)
+        if state == "running":
+            running.add(name)
+    return frozenset(names), frozenset(running)
 
 
 def inspect_enforcement_timers():
@@ -113,7 +128,7 @@ def inspect_enforcement_timers():
 
 
 def evaluate(policy, profile_attested, control_current, binaries_verified,
-             native_services, now_ms, running_containers=None,
+             native_services, now_ms, docker_inventory=None,
              enforcement_timers=None):
     """Pure cutover verdict: this host's managed v2 state ONLY, never the fleet."""
     reasons = []
@@ -143,17 +158,19 @@ def evaluate(policy, profile_attested, control_current, binaries_verified,
     for service, state in native_services.items():
         if state != "inactive":
             reasons.append("legacy_or_unverifiable_" + service.replace(".", "_"))
-    if running_containers is None:
+    if docker_inventory is None:
         reasons.append("docker_inventory_unavailable")
     else:
-        running = set(running_containers)
-        if "xmesh-managed-xray" not in running:
+        all_containers, running_containers = docker_inventory
+        if not running_containers.issubset(all_containers):
+            reasons.append("docker_inventory_inconsistent")
+        if "xmesh-managed-xray" not in running_containers:
             reasons.append("managed_xray_container_not_running")
-        if "xmesh-node" not in running:
+        if "xmesh-node" not in running_containers:
             reasons.append("managed_router_container_not_running")
-        if running - MANAGED_CONTAINERS:
-            # Never assume an extra running OR stopped container cannot
-            # resume a legacy proxy workload based on its friendly name.
+        if all_containers - MANAGED_CONTAINERS:
+            # Include stopped as well as running non-managed containers.
+            # They could be restarted after the fleet cutover.
             reasons.append("unreviewed_other_docker_container")
     if enforcement_timers is None:
         reasons.append("enforcement_timer_inventory_unavailable")
@@ -224,16 +241,16 @@ def inspect_local():
         except (OSError, subprocess.SubprocessError):
             services[service] = "unknown"
     try:
-        running_containers = inspect_all_docker_names()
+        docker_inventory = inspect_docker_inventory()
     except (OSError, ValueError, subprocess.SubprocessError):
-        running_containers = None
+        docker_inventory = None
     try:
         timers = inspect_enforcement_timers()
     except (OSError, ValueError, subprocess.SubprocessError):
         timers = None
     status = evaluate(policy, attested, control, verified_bins,
                       services, int(time.time() * 1000),
-                      running_containers, timers)
+                      docker_inventory, timers)
     status["blockers"] = sorted(set(status["blockers"] + problems))
     status["localV2AppliedVerified"] &= not problems
     return status
