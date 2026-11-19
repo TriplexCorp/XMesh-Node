@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-SOURCE = Path(__file__).resolve().parents[1] / "deploy/xmesh-quota-v2-local-audit.py"
+SOURCE = Path(__file__).resolve().parents[1] / "scripts/quota-v2-local-audit.py"
 spec = importlib.util.spec_from_file_location("xmesh_v2_audit", SOURCE)
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
