@@ -86,16 +86,13 @@ class OfflinePolicyCutoff(unittest.TestCase):
         # A VALID cached policy can revoke a user due to quota exhaustion.
         # If a later Docker/TLS/GeoData/router stage fails, preserving or
         # rolling back an old config would re-admit that revoked identity.
-        guard = 'if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then'
-        self.assertEqual(SHELL.count(guard), 3)
-        self.assertNotIn(
-            'if [[ "$REVOCATION_FAIL_CLOSED" != true && -f "$PREVIOUS" ]];then',
-            SHELL,
-        )
+        # No online/offline transition may briefly restart an obsolete
+        # configured user set before the exit cutoff executes.
+        self.assertNotIn('cp "$PREVIOUS" "$ACTIVE"', SHELL)
+        self.assertNotIn('&& -f "$PREVIOUS" ]];then', SHELL)
         trap = SHELL.split("trap 'rc=$?;", 1)[1].split("' EXIT", 1)[0]
         self.assertIn(
-            'if [[ "$OFFLINE_POLICY" == true && "$rc" -ne 0 ]];then '
-            'stop_managed_xray_for_invalid_offline_policy',
+            'if [[ "$rc" -ne 0 ]];then stop_managed_xray_for_invalid_offline_policy',
             trap,
         )
         self.assertIn('if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]]', trap)
@@ -142,6 +139,124 @@ docker() {
                     self.assertEqual(state.read_text().strip(), "false")
                     self.assertEqual(restart.read_text().strip(), "disabled")
                     self.assertIn("CRITICAL", result.stderr)
+
+
+    def test_early_failure_trap_precedes_identity_helper_and_journal_checks(self):
+        # The real EXIT trap is registered before sourcing local identity,
+        # parsing the durable ledger, verifying deny helper or network work.
+        trap_match = re.search(r"(?m)^trap 'rc=\$\?;.*' EXIT$", SHELL)
+        self.assertIsNotNone(trap_match)
+        trap_line = trap_match.group()
+        self.assertLess(SHELL.index(trap_line), SHELL.index("source /etc/xmesh-node-metrics.env"))
+        self.assertLess(SHELL.index(trap_line), SHELL.index('[[ -f "$DENY_HELPER"'))
+        self.assertLess(SHELL.index(trap_line), SHELL.index('REQUEST="$(python3 -'))
+        self.assertLess(SHELL.index(trap_line), SHELL.index('if flock -n -E 75 9;then'))
+        self.assertIn('if [[ "$rc" -ne 0 ]];then stop_managed_xray_for_invalid_offline_policy',
+                      trap_line)
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "running"
+            restarted = Path(td) / "restart"
+            state.write_text("true")
+            program = """set -Eeuo pipefail
+STATE_FILE="$1"; RESTART_FILE="$2"
+STATE="$3"; REVOCATION_MARKER="$STATE/missing-marker"
+GEO_WORKER="$STATE/missing-geodata"
+SIGN_FILE=""; RESP_FILE=""; CONFIG_FILE=""
+docker() {
+ case "$1" in
+  info) return 0;;
+  inspect) if [[ "$2" == "-f" ]];then cat "$STATE_FILE";else return 0;fi;;
+  update) [[ "$2" == "--restart=no" ]] || return 1
+          printf 'disabled\\n' > "$RESTART_FILE";;
+  stop|kill) printf 'false\\n' > "$STATE_FILE";;
+  *) return 1;;
+ esac
+}
+""" + STOP + trap_line + """
+# Simulates missing local identity, corrupt JSON or a failed preflight command.
+false
+"""
+            result = subprocess.run(
+                ["bash", "-c", program, "_", str(state), str(restarted), td],
+                capture_output=True, text=True, check=False, timeout=5)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(state.read_text().strip(), "false")
+            self.assertEqual(restarted.read_text().strip(), "disabled")
+
+    def test_guard_missing_even_on_http_200_denies_managed_xray(self):
+        # The gate is unconditional after detection of missing/disabled guard,
+        # before parsing an allegedly valid HTTP 200 desired config.
+        gate = SHELL.index('if [[ "$POLICY_ENABLED" != true ]];then')
+        self.assertLess(gate, SHELL.index('printf \'XMESH1\\nPOST'))
+        self.assertLess(gate, SHELL.index('if [[ "$HTTP_STATUS" == 202 ]];then'))
+        if_fragment = SHELL[gate:SHELL.index('fi\n', gate)+3]
+        self.assertIn('exit 1', if_fragment)
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "running"
+            state.write_text("true")
+            script = """set -Eeuo pipefail
+STATE_FILE="$1"
+POLICY_ENABLED=false; HTTP_STATUS=200
+docker() {
+ case "$1" in
+  info) return 0;;
+  inspect) if [[ "$2" == "-f" ]];then cat "$STATE_FILE";else return 0;fi;;
+  update) return 0;;
+  stop|kill) printf 'false\\n' > "$STATE_FILE";;
+  *) return 1;;
+ esac
+}
+""" + STOP + if_fragment
+            # The extracted gate exits nonzero, but it must also invoke
+            # physical stop through the startup EXIT trap in production.
+            script = script.replace(if_fragment, (
+                "trap 'rc=$?; if [[ $rc -ne 0 ]];then "
+                "stop_managed_xray_for_invalid_offline_policy;fi' EXIT\n"
+                + if_fragment))
+            result = subprocess.run(["bash", "-c", script, "_", str(state)],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(state.read_text().strip(), "false")
+
+    def test_unexpected_202_body_physically_stops_old_xray(self):
+        # Invalid profile-assignment body must never be a keep-alive path.
+        start = SHELL.index('if [[ "$HTTP_STATUS" == 202 ]];then')
+        end = SHELL.index('# An unrelated 403', start)
+        branch = SHELL[start:end]
+        trap_line = re.search(r"(?m)^trap 'rc=\$\?;.*' EXIT$", SHELL).group()
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "running"
+            state.write_text("true")
+            response = Path(td) / "response.json"
+            response.write_text('{"status":"awaiting_profile","nodeId":999}')
+            program = """set -Eeuo pipefail
+STATE_FILE="$1"; RESP_FILE="$2"; STATE="$3"
+REVOCATION_MARKER="$STATE/missing-marker"
+GEO_WORKER="$STATE/missing-geodata"
+SIGN_FILE=""; CONFIG_FILE=""
+XMESH_NODE_ID=7; HTTP_STATUS=202
+docker() {
+ case "$1" in
+  info) return 0;;
+  inspect) if [[ "$2" == "-f" ]];then cat "$STATE_FILE";else return 0;fi;;
+  update) return 0;;
+  stop|kill) printf 'false\\n' > "$STATE_FILE";;
+  *) return 1;;
+ esac
+}
+""" + STOP + trap_line + "\n" + branch
+            result = subprocess.run(
+                ["bash", "-c", program, "_", str(state), str(response), td],
+                capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unexpected HTTP 202", result.stderr)
+            self.assertEqual(state.read_text().strip(), "false")
+
+    def test_forced_stop_marker_also_checks_physical_xray_stop(self):
+        branch = SHELL[SHELL.index(
+            'if [[ -f /var/lib/xmesh-node-control/forced-stop ]];then'):
+            SHELL.index('if [[ -f "$REVOCATION_MARKER" && "$HTTP_STATUS" != 200 ]]')]
+        self.assertIn('stop_managed_xray_for_invalid_offline_policy || exit 1', branch)
 
     def test_no_docker_restart_and_actual_stopped_state(self):
         shell = """set -Eeuo pipefail
