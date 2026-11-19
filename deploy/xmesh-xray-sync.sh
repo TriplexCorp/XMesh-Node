@@ -112,7 +112,11 @@ if [[ "$REVOCATION_FAIL_CLOSED" == true && "$POLICY_ENABLED" != true ]];then
 fi
 OFFLINE_POLICY=false
 GEO_WORKER=/usr/local/libexec/xmesh-geodata-sync.py
-trap 'rc=$?; if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation || echo "CRITICAL: revoked Xray stop requires operator action" >&2;fi; if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"; exit "$rc"' EXIT
+# An offline policy re-evaluation that FAILS at ANY subsequent stage (TLS,
+# GeoData, Docker image/config validation, routing or launch) must not silently
+# retain/restore an older live Xray with revoked or overspent credentials.
+# Never treat this physical stop as a final byte receipt or refund evidence.
+trap 'rc=$?; if [[ "$OFFLINE_POLICY" == true && "$rc" -ne 0 ]];then stop_managed_xray_for_invalid_offline_policy || echo "CRITICAL: offline-policy stop requires operator action" >&2;fi; if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation || echo "CRITICAL: revoked Xray stop requires operator action" >&2;fi; if [[ -f "$STATE/geo-changed" && -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE" || true;fi; rm -f "$SIGN_FILE" "$RESP_FILE" "$CONFIG_FILE"; exit "$rc"' EXIT
 printf 'XMESH1\nPOST\n%s\n%s\n%s\n%s\n%s\n' "$PATH_API" "$XMESH_NODE_ID" "$STAMP" "$NONCE" "$HASH" > "$SIGN_FILE"
 SIG="$(openssl pkeyutl -sign -rawin -inkey "$KEY" -in "$SIGN_FILE" | od -An -tx1 -v | tr -d ' \n')"
 HTTP_STATUS="$(curl --proto '=https' --tlsv1.2 -sS --max-time 20 -X POST "$XMESH_API_URL$PATH_API" \
@@ -738,7 +742,7 @@ if ! docker run -d --name xmesh-managed-xray --restart unless-stopped \
  "$IMAGE" run -config /etc/xray/config.json;then
  echo "Xray start failed; attempting rollback." >&2
  if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE";fi
- if [[ "$REVOCATION_FAIL_CLOSED" != true && -f "$PREVIOUS" ]];then
+ if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then
   cp "$PREVIOUS" "$ACTIVE"
   docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
@@ -753,7 +757,7 @@ if [[ "$(docker inspect -f '{{.State.Running}}' xmesh-managed-xray)" != true ]];
  if [[ -r "$GEO_WORKER" ]];then python3 "$GEO_WORKER" rollback "$STATE";fi
  docker logs --tail 20 xmesh-managed-xray >&2 || true
  docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
- if [[ "$REVOCATION_FAIL_CLOSED" != true && -f "$PREVIOUS" ]];then
+ if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then
   cp "$PREVIOUS" "$ACTIVE"
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
    --user 0:0 --read-only --security-opt no-new-privileges --cap-drop ALL \
@@ -764,7 +768,7 @@ fi
 # The public router must follow the validated local Xray listener.
 if ! reconcile_router_default;then
  echo "CRITICAL: $INBOUND_NETWORK router was not reconciled; rolling Xray back." >&2
- if [[ "$REVOCATION_FAIL_CLOSED" != true && -f "$PREVIOUS" ]];then
+ if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then
   cp "$PREVIOUS" "$ACTIVE"
   docker rm -f xmesh-managed-xray >/dev/null 2>&1 || true
   docker run -d --name xmesh-managed-xray --restart unless-stopped --network host \
