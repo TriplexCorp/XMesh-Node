@@ -240,7 +240,7 @@ def recover_pending_observations(dfd):
     for pending in sorted(os.listdir(dfd)):
         if not pending.startswith(".observed-pending-"):
             continue
-        if not re.fullmatch(r"\\.observed-pending-[0-9a-f]{32}", pending):
+        if not re.fullmatch(r"\.observed-pending-[0-9a-f]{32}", pending):
             raise ValueError("unrecognized pending Node observation journal")
         before = os.stat(pending, dir_fd=dfd, follow_symlinks=False)
         if (not stat.S_ISREG(before.st_mode) or
@@ -261,7 +261,7 @@ def recover_pending_observations(dfd):
         finally:
             os.close(fd)
         record = strict_json(raw)
-        if raw != canonical(record) + b"\\n" or (
+        if raw != canonical(record) + b"\n" or (
                 set(record) != {"algorithm", "payload", "signature"} or
                 record["algorithm"] != "Ed25519" or
                 not isinstance(record["payload"], dict) or
