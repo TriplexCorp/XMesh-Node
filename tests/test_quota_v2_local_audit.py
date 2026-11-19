@@ -25,7 +25,8 @@ class TestLocalAudit(unittest.TestCase):
             services = {"xray.service": "inactive", "v2ray.service": "inactive"}
         return audit.evaluate(
             policy, applied, control, pq, services, 1_900_000_000_000,
-            ("xmesh-node", "xmesh-managed-xray"),
+            (frozenset(("xmesh-node", "xmesh-managed-xray")),
+             frozenset(("xmesh-node", "xmesh-managed-xray"))),
             {unit: True for unit in audit.REQUIRED_TIMERS},
         )
 
@@ -73,7 +74,7 @@ class TestLocalAudit(unittest.TestCase):
             with self.subTest(running=running):
                 r = audit.evaluate(p, True, True, True,
                     {"xray.service": "inactive", "v2ray.service": "inactive"},
-                    1_900_000_000_000, running,
+                    1_900_000_000_000, (frozenset(running), frozenset(running)),
                     {unit: True for unit in audit.REQUIRED_TIMERS})
                 self.assertFalse(r["localV2AppliedVerified"])
                 self.assertIn("unreviewed_other_docker_container",
@@ -88,7 +89,9 @@ class TestLocalAudit(unittest.TestCase):
             with self.subTest(containers=containers):
                 r = audit.evaluate(signed(2), True, True, True,
                     {"xray.service": "inactive", "v2ray.service": "inactive"},
-                    1_900_000_000_000, containers,
+                    1_900_000_000_000,
+                    (frozenset(containers), frozenset(containers))
+                    if containers is not None else None,
                     {unit: True for unit in audit.REQUIRED_TIMERS})
                 self.assertFalse(r["localV2AppliedVerified"])
                 self.assertIn(blocker, r["blockers"])
@@ -101,35 +104,83 @@ class TestLocalAudit(unittest.TestCase):
                 r = audit.evaluate(signed(2), True, True, True,
                     {"xray.service": "inactive", "v2ray.service": "inactive"},
                     1_900_000_000_000,
-                    ("xmesh-node", "xmesh-managed-xray"), timers)
+                    (frozenset(("xmesh-node", "xmesh-managed-xray")),
+                     frozenset(("xmesh-node", "xmesh-managed-xray"))), timers)
                 self.assertFalse(r["localV2AppliedVerified"])
                 self.assertIn("enforcement_timer_not_enabled_and_active",
                               r["blockers"])
         r = audit.evaluate(signed(2), True, True, True,
             {"xray.service": "inactive", "v2ray.service": "inactive"},
             1_900_000_000_000,
-            ("xmesh-node", "xmesh-managed-xray"), None)
+            (frozenset(("xmesh-node", "xmesh-managed-xray")),
+             frozenset(("xmesh-node", "xmesh-managed-xray"))), None)
         self.assertIn("enforcement_timer_inventory_unavailable", r["blockers"])
 
-    def test_docker_inventory_validates_names_and_rejects_failure(self):
-        for names, code, should_pass in (
-            (("xmesh-node", "xmesh-managed-xray"), 0, True),
-            (("xmesh-node", "xmesh-node"), 0, False),
-            (("xmesh-node", "name/invalid"), 0, False),
-            ((), 1, False),
+    def test_docker_inventory_distinguishes_stopped_from_running(self):
+        # A stopped managed router must never count as active. Docker ps -a
+        # would have listed its name, producing a false-green in older audits.
+        all_names = frozenset(("xmesh-node", "xmesh-managed-xray"))
+        for running in (
+            frozenset(("xmesh-managed-xray",)),
+            frozenset(("xmesh-node",)),
+            frozenset(),
         ):
-            with self.subTest(names=names, code=code):
+            with self.subTest(running=running):
+                result = audit.evaluate(
+                    signed(2), True, True, True,
+                    {"xray.service": "inactive", "v2ray.service": "inactive"},
+                    1_900_000_000_000, (all_names, running),
+                    {unit: True for unit in audit.REQUIRED_TIMERS})
+                self.assertFalse(result["localV2AppliedVerified"])
+                self.assertIn(
+                    "managed_router_container_not_running"
+                    if "xmesh-node" not in running
+                    else "managed_xray_container_not_running",
+                    result["blockers"])
+
+    def test_extra_stopped_container_is_still_blocked(self):
+        result = audit.evaluate(
+            signed(2), True, True, True,
+            {"xray.service": "inactive", "v2ray.service": "inactive"},
+            1_900_000_000_000,
+            (frozenset(("xmesh-node", "xmesh-managed-xray", "old-xray")),
+             frozenset(("xmesh-node", "xmesh-managed-xray"))),
+            {unit: True for unit in audit.REQUIRED_TIMERS})
+        self.assertFalse(result["localV2AppliedVerified"])
+        self.assertIn("unreviewed_other_docker_container", result["blockers"])
+
+    def test_docker_inventory_validates_states_names_and_rejects_failure(self):
+        samples = [
+            (["xmesh-node\trunning", "xmesh-managed-xray\trunning"],
+             0, True),
+            (["xmesh-node\texited", "xmesh-managed-xray\trunning"],
+             0, True),
+            (["xmesh-node\trunning", "xmesh-node\texited"],
+             0, False),
+            (["xmesh-node\trunning", "name/invalid\tcreated"],
+             0, False),
+            (["xmesh-node\tother"], 0, False),
+            (["xmesh-node\trunning\tanything"], 0, False),
+            (["xmesh-node"], 0, False),
+            ([], 1, False),
+        ]
+        for rows, code, should_pass in samples:
+            with self.subTest(rows=rows, code=code):
                 response = subprocess.CompletedProcess(
-                    [], code, stdout="\n".join(names) + "\n", stderr="")
+                    [], code, stdout="\n".join(rows) + "\n", stderr="")
                 with patch.object(audit, "run", return_value=response):
                     if should_pass:
+                        all_names, running = audit.inspect_docker_inventory()
                         self.assertEqual(
-                            audit.inspect_all_docker_names(),
-                            frozenset(("xmesh-node", "xmesh-managed-xray")),
-                        )
+                            all_names,
+                            frozenset(("xmesh-node", "xmesh-managed-xray")))
+                        self.assertEqual(
+                            running,
+                            frozenset(("xmesh-managed-xray",))
+                            if "xmesh-node\texited" in rows else all_names)
                     else:
                         with self.assertRaises(ValueError):
-                            audit.inspect_all_docker_names()
+                            audit.inspect_docker_inventory()
 
     def test_actual_binary_identities_must_match_installed_manifest(self):
         a = "a" * 64
