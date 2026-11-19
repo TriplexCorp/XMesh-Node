@@ -377,7 +377,7 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     temporary,err:=os.CreateTemp(observed.directory,".observed-pending-")
     if err!=nil{return empty,err}
     tempName:=temporary.Name()
-    defer os.Remove(tempName)
+    // Preserve an uncertain pending meter snapshot on any failed publish.
     if _,err=temporary.Write(append(data,byte(10)));err!=nil{
         temporary.Close()
         return empty,err
@@ -387,16 +387,13 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
         return empty,err
     }
     if err=temporary.Close();err!=nil{return empty,err}
+    // Make the pending filename crash-durable BEFORE publishing the final
+    // observation. fsync(file) alone does not persist its directory entry.
+    if err=syncFenceDirectory(observed.directory);err!=nil{return empty,err}
     // Link makes creation exclusive: never replace an earlier runtime's
     // observation or follow an attacker-supplied destination symlink.
-    if err=os.Link(tempName,path);err!=nil{
-        return empty,fmt.Errorf("checkpoint already present or unsafe: %w",err)
+    if err=publishDurableJournal(observed.directory,tempName,path);err!=nil{
+        return empty,fmt.Errorf("checkpoint publication incomplete: %w",err)
     }
-    directory,err:=os.Open(observed.directory)
-    if err!=nil{return empty,err}
-    syncErr:=directory.Sync()
-    closeErr:=directory.Close()
-    if syncErr!=nil{return empty,syncErr}
-    if closeErr!=nil{return empty,closeErr}
     return record,nil
 }
