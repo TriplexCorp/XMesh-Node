@@ -92,7 +92,7 @@ def inspect_docker_inventory():
     list as running yields false-green routing readiness. Keep every stopped
     unexpected container in the review set: it can be restarted after cutover.
     """
-    response = run(["docker", "ps", "--all", "--format", "{{.Names}}\\t{{.State}}"])
+    response = run(["docker", "ps", "--all", "--format", "{{.Names}}\t{{.State}}"])
     if response.returncode != 0 or len(response.stdout) > 32768:
         raise ValueError("Docker inventory unavailable")
     names = set()
@@ -103,7 +103,7 @@ def inspect_docker_inventory():
     if len(rows) > 128:
         raise ValueError("Too many Docker containers")
     for row in rows:
-        parts = row.split("\\t")
+        parts = row.split("\t")
         if len(parts) != 2:
             raise ValueError("Malformed Docker state inventory")
         name, state = parts
