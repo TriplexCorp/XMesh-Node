@@ -4,10 +4,12 @@
 package xmeshdrain
 
 import (
+    "bytes"
     "context"
     "encoding/json"
     "errors"
     "fmt"
+    "io"
     "net"
     "net/http"
     "os"
@@ -373,6 +375,49 @@ func fence(ctx context.Context, email string) (result, error) {
     return state(email, u), nil
 }
 
+// A control-socket request is NOT cryptographically authenticated Node lease
+// evidence. Even on the root-only socket, do not let a duplicate JSON key
+// silently rebind the requested account or revocation. Encoding/json's normal
+// struct Decode accepts duplicate keys, and the previous handler accepted a
+// second JSON object after the first. Both are ambiguous for a stop intent.
+func decodeScopedFenceRequest(body io.Reader) (checkpointScope,error) {
+    var req checkpointScope
+    raw,err:=io.ReadAll(io.LimitReader(body,2049))
+    if err!=nil{return req,err}
+    if len(raw)>2048{return req,errors.New("oversized scoped fence request")}
+    d:=json.NewDecoder(bytes.NewReader(raw))
+    first,err:=d.Token()
+    if err!=nil || first!=json.Delim('{') {
+        return req,errors.New("scoped fence request must be one JSON object")
+    }
+    keys:=make(map[string]struct{},8)
+    for d.More() {
+        token,err:=d.Token()
+        if err!=nil{return req,err}
+        key,ok:=token.(string)
+        if !ok{return req,errors.New("invalid scoped fence field")}
+        if _,duplicate:=keys[key];duplicate {
+            return req,errors.New("duplicate scoped fence field")
+        }
+        keys[key]=struct{}{}
+        var value json.RawMessage
+        if err:=d.Decode(&value);err!=nil{return req,err}
+    }
+    closing,err:=d.Token()
+    if err!=nil || closing!=json.Delim('}') {
+        return req,errors.New("unterminated scoped fence object")
+    }
+    var trailing json.RawMessage
+    if err:=d.Decode(&trailing);!errors.Is(err,io.EOF) {
+        return req,errors.New("trailing scoped fence JSON")
+    }
+    strict:=json.NewDecoder(bytes.NewReader(raw))
+    strict.DisallowUnknownFields()
+    if err:=strict.Decode(&req);err!=nil{return req,err}
+    if !validScope(req){return req,errors.New("invalid scoped lease identity")}
+    return req,nil
+}
+
 func serveHTTP(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     if r.Method != http.MethodPost || r.URL.Path != "/v1/fence" {
@@ -381,11 +426,8 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
     }
     // This is accessible only through a root-owned local Unix socket
     // in a disposable CI runner. It is NEVER a production Node control API.
-    var req checkpointScope
-    r.Body = http.MaxBytesReader(w, r.Body, 2048)
-    decoder:=json.NewDecoder(r.Body)
-    decoder.DisallowUnknownFields()
-    if err:=decoder.Decode(&req);err!=nil || !validScope(req) {
+    req,err:=decodeScopedFenceRequest(r.Body)
+    if err!=nil {
         http.Error(w, "invalid scoped request", http.StatusBadRequest)
         return
     }
