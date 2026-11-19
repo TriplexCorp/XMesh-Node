@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "control-v6.0.22"
+VERSION = "control-v6.0.23"
 STATE = Path("/var/lib/xmesh-xray-sync")
 CONTROL = Path("/usr/local/sbin/xmesh-node-control")
 ATTEST = Path("/usr/local/libexec/xmesh-profile-attest.py")
