@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -20,14 +21,14 @@ def signed(version, budget=64 * 1024 * 1024, expiry=2_000_000_000_000):
 
 class TestLocalAudit(unittest.TestCase):
     def check(self, policy, *, applied=True, control=True, pq=True,
-              services=None):
+              services=None, workers=True):
         if services is None:
             services = {"xray.service": "inactive", "v2ray.service": "inactive"}
         return audit.evaluate(
             policy, applied, control, pq, services, 1_900_000_000_000,
             (frozenset(("xmesh-node", "xmesh-managed-xray")),
              frozenset(("xmesh-node", "xmesh-managed-xray"))),
-            {unit: True for unit in audit.REQUIRED_TIMERS},
+            {unit: True for unit in audit.REQUIRED_TIMERS}, workers,
         )
 
     def test_v1_with_unexpired_budget_blocks(self):
@@ -75,7 +76,7 @@ class TestLocalAudit(unittest.TestCase):
                 r = audit.evaluate(p, True, True, True,
                     {"xray.service": "inactive", "v2ray.service": "inactive"},
                     1_900_000_000_000, (frozenset(running), frozenset(running)),
-                    {unit: True for unit in audit.REQUIRED_TIMERS})
+                    {unit: True for unit in audit.REQUIRED_TIMERS}, True)
                 self.assertFalse(r["localV2AppliedVerified"])
                 self.assertIn("unreviewed_other_docker_container",
                               r["blockers"])
@@ -92,7 +93,7 @@ class TestLocalAudit(unittest.TestCase):
                     1_900_000_000_000,
                     (frozenset(containers), frozenset(containers))
                     if containers is not None else None,
-                    {unit: True for unit in audit.REQUIRED_TIMERS})
+                    {unit: True for unit in audit.REQUIRED_TIMERS}, True)
                 self.assertFalse(r["localV2AppliedVerified"])
                 self.assertIn(blocker, r["blockers"])
 
@@ -105,7 +106,7 @@ class TestLocalAudit(unittest.TestCase):
                     {"xray.service": "inactive", "v2ray.service": "inactive"},
                     1_900_000_000_000,
                     (frozenset(("xmesh-node", "xmesh-managed-xray")),
-                     frozenset(("xmesh-node", "xmesh-managed-xray"))), timers)
+                     frozenset(("xmesh-node", "xmesh-managed-xray"))), timers, True)
                 self.assertFalse(r["localV2AppliedVerified"])
                 self.assertIn("enforcement_timer_not_enabled_and_active",
                               r["blockers"])
@@ -113,7 +114,7 @@ class TestLocalAudit(unittest.TestCase):
             {"xray.service": "inactive", "v2ray.service": "inactive"},
             1_900_000_000_000,
             (frozenset(("xmesh-node", "xmesh-managed-xray")),
-             frozenset(("xmesh-node", "xmesh-managed-xray"))), None)
+             frozenset(("xmesh-node", "xmesh-managed-xray"))), None, True)
         self.assertIn("enforcement_timer_inventory_unavailable", r["blockers"])
 
     def test_docker_inventory_distinguishes_stopped_from_running(self):
@@ -130,7 +131,7 @@ class TestLocalAudit(unittest.TestCase):
                     signed(2), True, True, True,
                     {"xray.service": "inactive", "v2ray.service": "inactive"},
                     1_900_000_000_000, (all_names, running),
-                    {unit: True for unit in audit.REQUIRED_TIMERS})
+                    {unit: True for unit in audit.REQUIRED_TIMERS}, True)
                 self.assertFalse(result["localV2AppliedVerified"])
                 self.assertIn(
                     "managed_router_container_not_running"
@@ -145,7 +146,7 @@ class TestLocalAudit(unittest.TestCase):
             1_900_000_000_000,
             (frozenset(("xmesh-node", "xmesh-managed-xray", "old-xray")),
              frozenset(("xmesh-node", "xmesh-managed-xray"))),
-            {unit: True for unit in audit.REQUIRED_TIMERS})
+            {unit: True for unit in audit.REQUIRED_TIMERS}, True)
         self.assertFalse(result["localV2AppliedVerified"])
         self.assertIn("unreviewed_other_docker_container", result["blockers"])
 
@@ -212,6 +213,56 @@ class TestLocalAudit(unittest.TestCase):
                 patch.object(audit, "digest_file", side_effect=[a, b])), (
                 patch.object(audit, "run", side_effect=identities("e" * 40))):
             self.assertFalse(audit.verify_binary_manifest())
+
+    def test_installed_worker_integrity_blocks_green_fleet_audit(self):
+        result = self.check(signed(2), workers=False)
+        self.assertFalse(result["localV2AppliedVerified"])
+        self.assertIn("installed_quota_enforcement_worker_unverified",
+                      result["blockers"])
+
+    def test_installed_worker_bytes_must_match_pq_pinned_git_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "node"
+            (root / "deploy").mkdir(parents=True)
+            (root / ".git").mkdir()
+            installed_dir = Path(temp) / "installed"
+            installed_dir.mkdir()
+            (root / "config.json").write_text("{}")
+            workers = {}
+            for name in audit.NODE_RUNTIME_WORKERS:
+                src = root / "deploy" / name
+                dst = installed_dir / name
+                src.write_bytes(b"reviewed signed quota worker\n")
+                dst.write_bytes(src.read_bytes())
+                workers[name] = dst
+            revision = "a" * 40
+            def command(argv):
+                if argv[:2] == ["docker", "inspect"]:
+                    return subprocess.CompletedProcess(argv, 0,
+                                stdout=str(root / "config.json") + "\n")
+                if argv[-2:] == ["rev-parse", "HEAD"]:
+                    return subprocess.CompletedProcess(argv, 0,
+                                stdout=revision + "\n")
+                if argv[-3:] == ["status", "--porcelain", "--untracked-files=no"]:
+                    return subprocess.CompletedProcess(argv, 0, stdout="")
+                if argv[-3:] == ["remote", "get-url", "origin"]:
+                    return subprocess.CompletedProcess(argv, 0,
+                        stdout="https://github.com/TriplexCorp/XMesh-Node.git\n")
+                raise AssertionError(f"Unexpected audit command: {argv}")
+            with patch.object(audit, "read_json",
+                    return_value={"sourceRevision": revision}), \
+                 patch.object(audit, "NODE_RUNTIME_WORKERS", workers), \
+                 patch.object(audit, "owned_regular", side_effect=lambda p: p.is_file()), \
+                 patch.object(audit, "run", side_effect=command):
+                self.assertTrue(audit.verify_installed_enforcement_workers())
+                workers["xmesh-xray-sync.sh"].write_bytes(b"outdated sync code\n")
+                self.assertFalse(audit.verify_installed_enforcement_workers())
+                workers["xmesh-xray-sync.sh"].write_bytes(
+                    (root / "deploy" / "xmesh-xray-sync.sh").read_bytes())
+                with patch.object(audit, "read_json",
+                        return_value={"sourceRevision": "b" * 40}):
+                    self.assertFalse(audit.verify_installed_enforcement_workers())
+                self.assertTrue(audit.verify_installed_enforcement_workers())
 
     def test_invalid_and_bool_versions_rejected(self):
         for bad in (None, {}, [], {"version": True}, {"version": 3}):

@@ -27,6 +27,19 @@ REQUIRED_TIMERS = (
     "xmesh-node-metrics.timer",
 )
 
+# Deployed Node-owned admission/counter workers MUST be the reviewed Git
+# checkout's exact bytes. A correct PQ binary version and fresh Xray heartbeat
+# alone cannot prove that an old, permissive Xray sync worker was replaced.
+NODE_RUNTIME_WORKERS = {
+    "xmesh-xray-sync.sh": Path("/usr/local/sbin/xmesh-xray-sync"),
+    "xmesh-policy-guard.py": Path("/usr/local/libexec/xmesh-policy-guard.py"),
+    "xmesh-policy-guard-base.py": Path("/usr/local/libexec/xmesh-policy-guard-base.py"),
+    "xmesh-quota-revocation-marker.py": Path("/usr/local/libexec/xmesh-quota-revocation-marker.py"),
+    "xmesh-profile-attest.py": Path("/usr/local/libexec/xmesh-profile-attest.py"),
+    "xmesh-strict-pq-curl.sh": Path("/usr/local/libexec/xmesh-strict-pq-curl"),
+    "xmesh-hot-user-reconcile.py": Path("/usr/local/libexec/xmesh-hot-user-reconcile.py"),
+}
+
 
 def owned_regular(path):
     try:
@@ -85,6 +98,54 @@ def verify_binary_manifest():
     return True
 
 
+def verify_installed_enforcement_workers():
+    """Tie installed admission and metering scripts to the deployed Node Git
+    revision from the already-checked strict-PQ binary manifest.
+
+    Offline-only, read-only. No remote fetch or mutable 'main' comparison:
+    the live router's config bind mount locates its actual local checkout.
+    An incomplete update or old shell worker must never be marked ready.
+    """
+    manifest = read_json(ID_FILE)
+    revision = manifest.get("sourceRevision")
+    if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
+        return False
+
+    mount = run(["docker", "inspect", "-f",
+                 '{{range .Mounts}}{{if eq .Destination "/etc/xmesh-node/config.json"}}{{.Source}}{{end}}{{end}}',
+                 "xmesh-node"])
+    if mount.returncode != 0 or len(mount.stdout) > 4096:
+        return False
+    mount_path = mount.stdout.strip()
+    # Do not trust newlines, relative paths or unexpected mount destinations.
+    if not mount_path.startswith("/") or "\n" in mount_path:
+        return False
+    config = Path(mount_path)
+    if config.name != "config.json" or not owned_regular(config):
+        return False
+    root = config.parent
+    if root.is_symlink() or not (root / ".git").is_dir():
+        return False
+    head = run(["git", "-C", str(root), "rev-parse", "HEAD"])
+    if head.returncode != 0 or head.stdout.strip() != revision:
+        return False
+    # A working tree changed after the release was built is not proof of its
+    # installed file identity, even if the HEAD revision still matches.
+    clean = run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"])
+    if clean.returncode != 0 or clean.stdout.strip():
+        return False
+    origin = run(["git", "-C", str(root), "remote", "get-url", "origin"])
+    if origin.returncode != 0 or origin.stdout.strip() not in (
+            "https://github.com/TriplexCorp/XMesh-Node.git",
+            "git@github.com:TriplexCorp/XMesh-Node.git"):
+        return False
+    for name, installed in NODE_RUNTIME_WORKERS.items():
+        source = root / "deploy" / name
+        if digest_file(source) != digest_file(installed):
+            return False
+    return True
+
+
 def inspect_docker_inventory():
     """Read all containers AND their actual state from a single Docker snapshot.
 
@@ -129,7 +190,7 @@ def inspect_enforcement_timers():
 
 def evaluate(policy, profile_attested, control_current, binaries_verified,
              native_services, now_ms, docker_inventory=None,
-             enforcement_timers=None):
+             enforcement_timers=None, worker_integrity_verified=False):
     """Pure cutover verdict: this host's managed v2 state ONLY, never the fleet."""
     reasons = []
     version = policy.get("version") if isinstance(policy, dict) else None
@@ -155,6 +216,8 @@ def evaluate(policy, profile_attested, control_current, binaries_verified,
         reasons.append("installed_control_worker_version_unverified")
     if not binaries_verified:
         reasons.append("strict_pq_binary_identity_unverified")
+    if not worker_integrity_verified:
+        reasons.append("installed_quota_enforcement_worker_unverified")
     for service, state in native_services.items():
         if state != "inactive":
             reasons.append("legacy_or_unverifiable_" + service.replace(".", "_"))
@@ -232,6 +295,11 @@ def inspect_local():
         verified_bins = verify_binary_manifest()
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         pass
+    workers_verified = False
+    try:
+        workers_verified = verify_installed_enforcement_workers()
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        pass
     services = {}
     for service in ("xray.service", "v2ray.service"):
         try:
@@ -250,7 +318,7 @@ def inspect_local():
         timers = None
     status = evaluate(policy, attested, control, verified_bins,
                       services, int(time.time() * 1000),
-                      docker_inventory, timers)
+                      docker_inventory, timers, workers_verified)
     status["blockers"] = sorted(set(status["blockers"] + problems))
     status["localV2AppliedVerified"] &= not problems
     return status
