@@ -38,6 +38,7 @@ jobs:
       - run: python3 tests/test_quota_v2_meter_continuity.py
       - run: python3 -m py_compile scripts/quota-v2-local-audit.py
       - run: python3 tests/test_quota_v2_local_audit.py
+      - run: python3 tests/test_quota_v2_offline_policy_cutoff.py
       - run: python3 tests/test_quota_v2_prestop_capture.py
       - run: python3 tests/test_meter_scope_publish.py
       - name: Check out immutable previous production v6.0.11 meter source
