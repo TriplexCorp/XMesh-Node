@@ -100,6 +100,49 @@ class OfflinePolicyCutoff(unittest.TestCase):
         )
         self.assertIn('if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]]', trap)
 
+
+    def test_missing_guard_cannot_leave_old_xray_running_during_panel_failure(self):
+        # Execute the REAL production response branch with a fake Docker, not
+        # merely a copy of the expected shell logic. No live VPS is involved.
+        start = SHELL.index(
+            'if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" != true ]];then')
+        end = SHELL.index("# The control agent owns reactivation.", start)
+        response_branch = SHELL[start:end]
+        self.assertNotIn("existing Xray untouched", response_branch)
+        for http_status in ("000", "403", "503"):
+            with self.subTest(http_status=http_status):
+                with tempfile.TemporaryDirectory() as td:
+                    state = Path(td) / "running"
+                    restart = Path(td) / "restart"
+                    state.write_text("true", encoding="ascii")
+                    script = """set -Eeuo pipefail
+STATE_FILE="$1"
+RESTART_FILE="$2"
+HTTP_STATUS="$3"
+POLICY_ENABLED=false
+OFFLINE_POLICY=true
+docker() {
+ case "$1" in
+  info) return 0;;
+  inspect)
+   if [[ "$2" == "-f" ]];then cat "$STATE_FILE";else return 0;fi;;
+  update)
+   [[ "$2" == "--restart=no" ]] || return 1
+   printf 'disabled\n' > "$RESTART_FILE";;
+  stop|kill) printf 'false\n' > "$STATE_FILE";;
+  *) return 1;;
+ esac
+}
+""" + STOP + response_branch
+                    result = subprocess.run(
+                        ["bash", "-c", script, "_", str(state), str(restart),
+                         http_status],
+                        text=True, capture_output=True, check=False, timeout=5)
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(state.read_text().strip(), "false")
+                    self.assertEqual(restart.read_text().strip(), "disabled")
+                    self.assertIn("CRITICAL", result.stderr)
+
     def test_no_docker_restart_and_actual_stopped_state(self):
         shell = """set -Eeuo pipefail
 RUNNING=true
