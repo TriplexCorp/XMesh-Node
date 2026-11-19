@@ -345,6 +345,8 @@ def inspect_local():
 def main():
     parser = argparse.ArgumentParser(description="Read-only local XMesh v1/v2 cutover check")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--phase", choices=("runtime", "applied"), default="applied",
+                        help="runtime checks installed workers before cutover; applied requires signed policy v2")
     args = parser.parse_args()
     status = inspect_local()
     if args.json:
@@ -356,10 +358,13 @@ def main():
         print("Managed local v2 applied:", "YES" if status["localV2AppliedVerified"] else "NO")
         print("Blockers:", ", ".join(status["blockers"]) or "none")
         print("This is NOT permission to activate v2 fleet-wide.")
-    # Exit 0 on a verified pre-cutover runtime (including a signed v1
-    # policy). The JSON/localV2AppliedVerified is the separate post-activation
-    # gate. No exit code is an approval to enable distributed quotas.
-    return 0 if status["localRuntimePreflightPassed"] else 1
+    # Preserve the historical --json exit-code contract by default:
+    # a v1 policy is NOT post-activation readiness, even with all workers
+    # verified. Explicit --phase runtime is available for staged rollout.
+    # Neither phase authorizes a *fleet-wide* feature switch.
+    check = ("localRuntimePreflightPassed" if args.phase == "runtime"
+             else "localV2AppliedVerified")
+    return 0 if status[check] else 1
 
 
 if __name__ == "__main__":
