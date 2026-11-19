@@ -133,7 +133,7 @@ def run(xray):
             command(xray,"run","-test","-config",str(p))
         log_server=(root/"server.log").open("w+")
         log_client=(root/"client.log").open("w+")
-        server=server2=server3=server4=server5=client=None
+        server=server2=server3=server4=server5=server_noncanonical=client=None
         a=b=None
         try:
             server_env=os.environ.copy()
@@ -169,7 +169,8 @@ def run(xray):
             returncode=server.wait(timeout=10)
             assert returncode == -signal.SIGKILL, f"Expected SIGKILL, got {returncode}"
             assert marker.exists() and marker.stat().st_mode & 0o077 == 0
-            persisted=json.loads(marker.read_text())
+            exact_committed_marker=marker.read_bytes()
+            persisted=json.loads(exact_committed_marker)
             assert persisted["schemaVersion"]==1
             for key,value in test_lease_scope(EMAIL_A,revocation).items():
                 assert persisted[key]==value,(key,persisted)
@@ -205,7 +206,23 @@ def run(xray):
 
             # Power loss AFTER fsync(.fence-pending-*) but BEFORE link(final)
             # leaves no complete durable deny. It MUST NOT silently restart.
-            marker.write_text(json.dumps(persisted))
+            # The engine's canonical fsynced bytes must survive exactly:
+            # a Python json.dumps rewrite is valid JSON but NOT equivalent
+            # to the original immutable on-disk representation.
+            noncanonical=json.dumps(persisted).encode()
+            assert noncanonical!=exact_committed_marker
+            marker.write_bytes(noncanonical)
+            server_noncanonical=subprocess.Popen(
+                [xray,"run","-config",str(server_json)],
+                stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
+            assert server_noncanonical.wait(timeout=10)!=0, (
+                "Xray accepted noncanonical JSON as a durable revocation")
+            assert marker.read_bytes()==noncanonical
+            assert not observed.exists()
+            # Restore the EXACT bytes previously written and fsynced by
+            # the real patched Xray for post-link crash reconciliation.
+            marker.write_bytes(exact_committed_marker)
+            assert marker.read_bytes()==exact_committed_marker
             pending=root/".fence-pending-simulated-sigkill"
             os.link(marker,pending)
             marker.unlink()
@@ -235,6 +252,7 @@ def run(xray):
                 "unrelatedUserAliveOnRestart":True,
                 "noMeterOrRefundAfterCrash":True,
                 "tamperedDenialPreventsStartup":True,
+                "noncanonicalDenialPreventsStartup":True,
                 "unpublishedPendingFencePreventsStartup":True,
                 "postLinkCrashReconcilesWithoutAdmission":True,
                 "finalMeterVerified":False,
@@ -252,7 +270,7 @@ def run(xray):
             for conn in (a,b):
                 if conn is not None:
                     conn.close()
-            for proc in (server,server2,server3,server4,server5,client):
+            for proc in (server,server2,server3,server4,server5,server_noncanonical,client):
                 if proc is not None and proc.poll() is None:
                     proc.terminate()
                     try:proc.wait(timeout=5)
