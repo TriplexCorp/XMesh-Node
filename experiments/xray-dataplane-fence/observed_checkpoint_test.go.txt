@@ -1,14 +1,13 @@
 package xmeshdrain
 
 import (
-    "strings"
     "bytes"
     "context"
     "errors"
-    "fmt"
     "os"
     "path/filepath"
     "reflect"
+    "strings"
     "sync"
     "testing"
 
