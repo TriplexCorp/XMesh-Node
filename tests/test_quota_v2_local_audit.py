@@ -88,9 +88,9 @@ class TestLocalAudit(unittest.TestCase):
             (["quota-v2-local-audit", "--json", "--phase", "applied"], 1),
             (["quota-v2-local-audit", "--json", "--phase", "runtime"], 0),
         ):
-            with self.subTest(argv=argv), \\
-                 patch.object(audit, "inspect_local", return_value=v1), \\
-                 patch("sys.argv", argv), patch("builtins.print"):
+            with (self.subTest(argv=argv),
+                  patch.object(audit, "inspect_local", return_value=v1),
+                  patch("sys.argv", argv), patch("builtins.print")):
                 self.assertEqual(audit.main(), wanted)
 
     def test_stale_profile_or_unverified_binary_fail_closed(self):
