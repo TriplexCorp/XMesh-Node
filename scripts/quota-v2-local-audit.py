@@ -20,6 +20,12 @@ BINS = {
     "activation": Path("/usr/local/bin/xmesh-agent-xspv2-activate"),
     "product": Path("/usr/local/bin/xmesh-agent-xspv2-product"),
 }
+MANAGED_CONTAINERS = frozenset(("xmesh-node", "xmesh-managed-xray"))
+REQUIRED_TIMERS = (
+    "xmesh-node-control.timer",
+    "xmesh-xray-sync.timer",
+    "xmesh-node-metrics.timer",
+)
 
 
 def owned_regular(path):
@@ -79,8 +85,36 @@ def verify_binary_manifest():
     return True
 
 
+def inspect_all_docker_names():
+    # Include STOPPED containers as well: an old legacy instance may be
+    # restarted after the cutover, especially with a Docker restart policy.
+    # This still cannot prove absence of deleted images, remote clones or
+    # native processes. Unknown local containers must be reviewed manually.
+    response = run(["docker", "ps", "--all", "--format", "{{.Names}}"])
+    if response.returncode != 0 or len(response.stdout) > 16384:
+        raise ValueError("Docker inventory unavailable")
+    names = response.stdout.splitlines()
+    if len(names) > 128 or len(names) != len(set(names)) or any(
+            not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", name)
+            for name in names):
+        raise ValueError("Invalid Docker container inventory")
+    return frozenset(names)
+
+
+def inspect_enforcement_timers():
+    # Both enabled and active are necessary: enabled alone does not prove
+    # periodic offline revocation/accounting is actually scheduled.
+    states = {}
+    for unit in REQUIRED_TIMERS:
+        enabled = run(["systemctl", "is-enabled", "--quiet", unit])
+        active = run(["systemctl", "is-active", "--quiet", unit])
+        states[unit] = enabled.returncode == 0 and active.returncode == 0
+    return states
+
+
 def evaluate(policy, profile_attested, control_current, binaries_verified,
-             native_services, now_ms):
+             native_services, now_ms, running_containers=None,
+             enforcement_timers=None):
     """Pure cutover verdict: this host's managed v2 state ONLY, never the fleet."""
     reasons = []
     version = policy.get("version") if isinstance(policy, dict) else None
@@ -109,6 +143,22 @@ def evaluate(policy, profile_attested, control_current, binaries_verified,
     for service, state in native_services.items():
         if state != "inactive":
             reasons.append("legacy_or_unverifiable_" + service.replace(".", "_"))
+    if running_containers is None:
+        reasons.append("docker_inventory_unavailable")
+    else:
+        running = set(running_containers)
+        if "xmesh-managed-xray" not in running:
+            reasons.append("managed_xray_container_not_running")
+        if "xmesh-node" not in running:
+            reasons.append("managed_router_container_not_running")
+        if running - MANAGED_CONTAINERS:
+            # Never assume an extra running OR stopped container cannot
+            # resume a legacy proxy workload based on its friendly name.
+            reasons.append("unreviewed_other_docker_container")
+    if enforcement_timers is None:
+        reasons.append("enforcement_timer_inventory_unavailable")
+    elif any(enforcement_timers.get(unit) is not True for unit in REQUIRED_TIMERS):
+        reasons.append("enforcement_timer_not_enabled_and_active")
     return {
         "localPolicyVersion": version,
         "potentialLiveV1OfflineBudget": possible_legacy_budget,
@@ -173,8 +223,17 @@ def inspect_local():
                                  "inactive" if result.returncode in (3, 4) else "unknown")
         except (OSError, subprocess.SubprocessError):
             services[service] = "unknown"
+    try:
+        running_containers = inspect_all_docker_names()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        running_containers = None
+    try:
+        timers = inspect_enforcement_timers()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        timers = None
     status = evaluate(policy, attested, control, verified_bins,
-                      services, int(time.time() * 1000))
+                      services, int(time.time() * 1000),
+                      running_containers, timers)
     status["blockers"] = sorted(set(status["blockers"] + problems))
     status["localV2AppliedVerified"] &= not problems
     return status
