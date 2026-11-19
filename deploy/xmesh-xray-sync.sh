@@ -38,6 +38,16 @@ stop_managed_xray_for_revocation() {
   fi
  fi
 }
+# The same physical, restart-disabled stop applies when an offline policy
+# cannot be verified. This is NOT signed revocation proof or a terminal byte
+# meter, and it never authorizes reservation refunds.
+stop_managed_xray_for_invalid_offline_policy() {
+ echo "CRITICAL: cannot safely enforce cached quota policy; stopping managed Xray." >&2
+ if ! stop_managed_xray_for_revocation;then
+  echo "CRITICAL: failed to confirm managed Xray stopped; operator action required." >&2
+  return 1
+ fi
+}
 REVOCATION_STATUS="$(python3 "$DENY_HELPER" status "$STATE")" || exit 1
 case "$REVOCATION_STATUS" in
  armed)
@@ -258,7 +268,8 @@ PY
 fi
 if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true ]];then
  if [[ ! -s "$STATE/policy-envelope.json" ]];then
-  echo "No previously issued signed offline policy; existing Xray untouched." >&2
+  echo "No previously issued signed offline policy; denying unmanaged traffic." >&2
+  stop_managed_xray_for_invalid_offline_policy || exit 1
   exit 1
  fi
  echo "XMesh desired-config returned HTTP $HTTP_STATUS; enforcing last signed offline policy; panel changes NOT applied." >&2
@@ -280,13 +291,50 @@ if [[ -f "$REVOCATION_MARKER" && "$HTTP_STATUS" != 200 ]];then
 fi
 if [[ "$POLICY_ENABLED" == true ]];then
  if [[ "$OFFLINE_POLICY" == true ]];then
+  # If the signed authorization lifetime has already elapsed, deny BEFORE
+  # Docker config validation. A failed validation must not preserve active
+  # credentials after their finite offline policy has expired. This local
+  # metadata check may only DENY; the guard still verifies the signature
+  # and counters before allowing any active policy.
+  CACHED_LIFETIME="$(python3 - "$STATE/policy-envelope.json" "$STATE/policy-usage.json" <<'PYCACHE'
+import json,sys,time
+try:
+ with open(sys.argv[1],encoding='utf-8') as f: document=json.load(f)
+ policy=document['policy']
+ issued,expiry=policy['issuedAtMs'],policy['validUntilMs']
+ if (type(issued) is not int or type(expiry) is not int or
+     expiry<=issued or expiry-issued>7*86400000):
+  raise ValueError('invalid signed policy lifetime')
+ now_ms=int(time.time()*1000)
+ try:
+  with open(sys.argv[2],encoding='utf-8') as f: ledger=json.load(f)
+  if not isinstance(ledger,dict):raise ValueError('invalid journal')
+  high_water=ledger.get('maxSeenMs',0)
+  if type(high_water) is not int or high_water<0:raise ValueError('invalid durable clock')
+  now_ms=max(now_ms,high_water)
+ except FileNotFoundError:
+  pass
+ print('expired' if now_ms>=expiry else 'live')
+except (OSError,ValueError,TypeError,KeyError,IndexError):
+ print('invalid')
+PYCACHE
+)" || CACHED_LIFETIME=invalid
+  if [[ "$CACHED_LIFETIME" != live ]];then
+   echo "Cached offline policy is expired or invalid; refusing continued proxy admission." >&2
+   stop_managed_xray_for_invalid_offline_policy || exit 1
+   exit 1
+  fi
   python3 "$POLICY_GUARD" offline --state "$STATE" --node-id "$XMESH_NODE_ID" --output "$CONFIG_FILE" || {
-   echo "No valid cached offline policy; leaving existing Xray intact." >&2;exit 1
+   echo "No verifiable cached offline policy or traffic counter." >&2
+   stop_managed_xray_for_invalid_offline_policy || exit 1
+   exit 1
   }
  else
   python3 "$POLICY_GUARD" prepare --state "$STATE" --node-id "$XMESH_NODE_ID" \
    --response "$RESP_FILE" --output "$CONFIG_FILE" || {
-   echo "Invalid signed desired policy; refusing to replace active Xray." >&2;exit 1
+   echo "Invalid signed desired policy; refusing continued proxy admission." >&2
+   stop_managed_xray_for_invalid_offline_policy || exit 1
+   exit 1
   }
  fi
  # Guard.prepare has verified the pending Ed25519 policy and durable journal.
@@ -307,7 +355,9 @@ if [[ "$POLICY_ENABLED" == true ]];then
  fi
 else
  if [[ "$OFFLINE_POLICY" == true ]];then
-  echo "Panel offline and no autonomous policy guard installed; preserving current Xray." >&2;exit 1
+  echo "Panel offline and autonomous quota guard unavailable; denying existing Xray." >&2
+  stop_managed_xray_for_invalid_offline_policy || exit 1
+  exit 1
  fi
 python3 - "$RESP_FILE" "$CONFIG_FILE" "$XMESH_NODE_ID" <<'PY'
 import json,sys,ipaddress
