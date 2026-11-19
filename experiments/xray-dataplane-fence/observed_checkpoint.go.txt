@@ -16,6 +16,7 @@ import (
     "sort"
     "strings"
     "sync"
+    "syscall"
 
     "github.com/xtls/xray-core/features/stats"
 )
@@ -132,9 +133,11 @@ func loadCheckpoint(path string) (observedCheckpoint,error) {
     var existing observedCheckpoint
     info,err := os.Lstat(path)
     if err != nil { return existing,err }
-    if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 ||
+    owner,ok:=info.Sys().(*syscall.Stat_t)
+    if !ok || !info.Mode().IsRegular() || info.Mode().Perm()!=0600 ||
+        owner.Uid!=uint32(os.Geteuid()) ||
         info.Size() <= 0 || info.Size() > 4096 {
-        return existing,errors.New("unsafe existing checkpoint file")
+        return existing,errors.New("unsafe existing checkpoint file identity")
     }
     b,err := os.ReadFile(path)
     if err != nil { return existing,err }
@@ -144,6 +147,14 @@ func loadCheckpoint(path string) (observedCheckpoint,error) {
         existing.FinalMeterVerified || existing.RefundableBytes != 0 ||
         !validObservedInboundMeters(existing) {
         return existing,errors.New("unsupported, incomplete or refundable existing checkpoint")
+    }
+    // Never resurrect a different byte count, alias list or receipt scope
+    // from duplicate JSON keys or a semantically equivalent noncanonical
+    // document on restart. Only the exact fsynced writer format is trusted.
+    canonical,err:=json.Marshal(existing)
+    if err!=nil{return existing,err}
+    if string(b)!=string(append(canonical,'\n')) {
+        return existing,errors.New("noncanonical or duplicate observed meter fields")
     }
     return existing,nil
 }

@@ -209,6 +209,51 @@ func TestDurableFenceRejectsInvalidSymlinkAndTamperedScopes(t *testing.T) {
     }
 }
 
+// A syntactically valid JSON object is not a safe crash-recovery fence.
+// Duplicate keys, unknown additions and alternate encodings might otherwise
+// hide a different lease or bypass downstream byte-identical comparisons.
+func TestNoncanonicalDurableFenceRefusesXrayRestart(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    for _,kind:=range []string{
+        "duplicate-scope","duplicate-schema","unknown-field",
+        "trailing-blank","read-only-mode",
+    } {
+        t.Run(kind,func(t *testing.T) {
+            dir,_:=setupCheckpoint(t,email,3,4)
+            path:=durableFencePath(dir,email)
+            b,err:=os.ReadFile(path)
+            if err!=nil{t.Fatal(err)}
+            data:=string(b)
+            switch kind {
+            case "duplicate-scope":
+                data=strings.Replace(data,`"nodeId":201`,
+                    `"nodeId":201,"nodeId":201`,1)
+            case "duplicate-schema":
+                data=strings.Replace(data,`"schemaVersion":1`,
+                    `"schemaVersion":1,"schemaVersion":1`,1)
+            case "unknown-field":
+                data=strings.Replace(data,`"schemaVersion":1`,
+                    `"schemaVersion":1,"finalMeterVerified":true`,1)
+            case "trailing-blank":
+                data+=" "
+            case "read-only-mode":
+                if err:=os.Chmod(path,0400);err!=nil{t.Fatal(err)}
+            }
+            if kind!="read-only-mode" {
+                if data==string(b){t.Fatal("tamper case failed to alter journal")}
+                if err:=os.WriteFile(path,[]byte(data),0600);err!=nil{t.Fatal(err)}
+            }
+            if _,err:=readDurableFence(path);err==nil {
+                t.Fatal("noncanonical admission fence was accepted as durable")
+            }
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatal("corrupt durable denial silently allowed Xray restart")
+            }
+        })
+    }
+}
+
 func TestDurableFencePersistenceFailureNeverStopsAsAcknowledged(t *testing.T) {
     resetGate()
     dir:=t.TempDir()

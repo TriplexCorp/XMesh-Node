@@ -11,7 +11,6 @@ import (
     "encoding/json"
     "errors"
     "fmt"
-    "io"
     "net"
     "os"
     "path/filepath"
@@ -33,22 +32,28 @@ func durableFencePath(dir,email string) string {
 
 func readDurableFence(path string) (durableFenceRecord,error) {
     var record durableFenceRecord
+    // A durable admission denial must be an exact root/process-owned private
+    // canonical object, not merely a JSON object that happens to decode. Go's
+    // JSON decoder otherwise accepts duplicate keys and alternative encodings
+    // and could silently recover a different lease scope after a crash.
     info,err:=os.Lstat(path)
-    if err!=nil {return record,err}
-    if !info.Mode().IsRegular() || info.Mode().Perm()&0077!=0 ||
+    if err!=nil{return record,err}
+    owner,ok:=info.Sys().(*syscall.Stat_t)
+    if !ok || !info.Mode().IsRegular() || info.Mode().Perm()!=0600 ||
+        owner.Uid!=uint32(os.Geteuid()) ||
         info.Size()<1 || info.Size()>4096 {
-        return record,errors.New("unsafe durable fence file")
+        return record,errors.New("unsafe durable fence file identity")
     }
     data,err:=os.ReadFile(path)
     if err!=nil{return record,err}
-    dec:=json.NewDecoder(strings.NewReader(string(data)))
-    dec.DisallowUnknownFields()
-    if err=dec.Decode(&record);err!=nil{return record,err}
-    if err=dec.Decode(new(any));!errors.Is(err,io.EOF) {
-        return record,errors.New("durable fence has trailing JSON")
-    }
+    if err:=json.Unmarshal(data,&record);err!=nil{return record,err}
     if record.SchemaVersion!=1 || !validScope(record.checkpointScope) {
         return record,errors.New("invalid durable fence scope")
+    }
+    expected,err:=json.Marshal(record)
+    if err!=nil{return record,err}
+    if string(data)!=string(append(expected,'\n')) {
+        return record,errors.New("noncanonical or duplicate durable fence fields")
     }
     return record,nil
 }
