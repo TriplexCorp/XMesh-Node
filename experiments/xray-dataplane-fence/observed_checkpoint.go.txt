@@ -14,6 +14,7 @@ import (
     "path/filepath"
     "reflect"
     "sort"
+    "strings"
     "sync"
 
     "github.com/xtls/xray-core/features/stats"
@@ -223,6 +224,46 @@ func readObservedMeterTwice(aliases []string, requestEmail string,
     return first,up,down,nil
 }
 
+// verifyObservedCounterRegistry refuses a seemingly stable multi-inbound
+// observation when StatsService still contains an unseen same-account alias.
+// Xray sessions cannot enumerate all provisioned inbounds: an inbound may have
+// already registered traffic counters without an active session in the drain
+// ledger. Ignoring that alias would silently omit bytes, including bytes from
+// an inbound that stopped earlier than the observed sessions.
+//
+// The caller holds the user gate throughout this scan, the two-pass sample,
+// and fsynced publication. Any nonzero raw Add/Set after the gate is fenced
+// leaves a durable taint (and is rejected by persistObservedCheckpoint).
+//
+// This is only a FAIL-CLOSED structural audit of live counters. Absence of an
+// alias from the registry does NOT prove it was never provisioned: true
+// completeness still requires the independently verified signed Node roster.
+func verifyObservedCounterRegistry(manager stats.Manager, email string, seen []string) error {
+    known:=make(map[string]struct{},len(seen))
+    for _,alias:=range seen {known[alias]=struct{}{}}
+    canonical:=canonicalMeterUser(email)
+    var unexpected string
+    manager.VisitCounters(func(name string, _ stats.Counter) bool {
+        if !strings.HasPrefix(name,"user>>>") {return true}
+        rest:=strings.TrimPrefix(name,"user>>>")
+        alias,direction,ok:=strings.Cut(rest,">>>traffic>>>")
+        if !ok || canonicalMeterUser(alias)!=canonical {return true}
+        if direction!="uplink" && direction!="downlink" {
+            unexpected=name
+            return false
+        }
+        if _,present:=known[alias];!present {
+            unexpected=name
+            return false
+        }
+        return true
+    })
+    if unexpected!="" {
+        return fmt.Errorf("unobserved same-user Xray StatsService counter: %s",unexpected)
+    }
+    return nil
+}
+
 // persistObservedCheckpoint is called ONLY after fence() has stopped new
 // admission and seen both worker and routedDispatch return. It samples the
 // original Xray StatsService counters while Xray is still running. Such a
@@ -266,6 +307,9 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
         return empty,errors.New("missing or unbounded observed inbound identities")
     }
     sort.Strings(seenEmails)
+    if err:=verifyObservedCounterRegistry(observed.manager,email,seenEmails);err!=nil {
+        return empty,err
+    }
     // Every observed account-bearing inbound must contribute to the sample.
     // A single request-email read would undercount actual main+CDN traffic.
     // Still NONFINAL: observed sessions are NOT an authenticated enumeration
@@ -280,6 +324,12 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     }
     meters,uplink,downlink,err:=readObservedMeterTwice(seenEmails,email,read)
     if err!=nil{return empty,err}
+    // A counter may have been registered during a read-pass. Only an
+    // authoritative signed roster can rule out never-registered aliases.
+    // Re-enumerate before publication to reject any discovered extra alias.
+    if err:=verifyObservedCounterRegistry(observed.manager,email,seenEmails);err!=nil {
+        return empty,err
+    }
     record:=observedCheckpoint{
         checkpointScope:scope,
         SchemaVersion:3,
