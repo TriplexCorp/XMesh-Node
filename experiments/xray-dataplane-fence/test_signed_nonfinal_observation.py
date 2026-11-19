@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline tests: signed observation is authenticated, immutable, and NONFINAL."""
 import copy
+import hashlib
+import multiprocessing
 import importlib.util
 import json
 import errno
@@ -35,6 +37,22 @@ def checkpoint(node=7):
         "drained": True, "finalMeterVerified": False,
         "refundableBytes": 0,
     }
+
+
+def concurrent_append_worker(directory, name, raw, release, results):
+    # Separate OS processes and independent directory descriptors: a
+    # thread-only mutex or a local-only journal lock cannot pass this test.
+    try:
+        if not release.wait(timeout=20):
+            raise TimeoutError("concurrent signer start was never released")
+        dfd = evidence.private_directory(directory)
+        try:
+            created = evidence.append_only(dfd, name, raw)
+        finally:
+            os.close(dfd)
+        results.put(("ok", created))
+    except Exception as exc:
+        results.put(("error", type(exc).__name__, str(exc)))
 
 
 class SignedNonfinalObservationTests(unittest.TestCase):
@@ -255,6 +273,107 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         self.assertEqual(final.stat().st_ino, inode)
         self.assertEqual(final.read_bytes(), original)
         self.assertFalse(signed["payload"]["finalMeterVerified"])
+
+    def run_concurrent_appends(self, candidate_raws, name):
+        ctx = multiprocessing.get_context("fork")
+        release = ctx.Event()
+        results = ctx.Queue()
+        workers = [
+            ctx.Process(target=concurrent_append_worker,
+                        args=(str(self.output), name, raw, release, results))
+            for raw in candidate_raws
+        ]
+        try:
+            for worker in workers:
+                worker.start()
+            release.set()
+            outcomes = [results.get(timeout=30) for _ in workers]
+            for worker in workers:
+                worker.join(timeout=30)
+                self.assertEqual(worker.exitcode, 0,
+                                 "concurrent signer died without durable result")
+            return outcomes
+        finally:
+            release.set()
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+                worker.join(timeout=5)
+            results.close()
+            results.join_thread()
+
+    def test_independent_process_identical_receipts_are_serialized(self):
+        cp = checkpoint()
+        signed = self.create(cp)
+        name = evidence.receipt_name(cp)
+        final = self.output / name
+        raw = final.read_bytes()
+        final.unlink()
+        results = self.run_concurrent_appends([raw] * 12, name)
+        self.assertEqual(results.count(("ok", True)), 1)
+        self.assertEqual(results.count(("ok", False)), 11, results)
+        self.assertEqual(list(self.output.iterdir()), [final])
+        self.assertEqual(final.stat().st_nlink, 1)
+        self.assertEqual(final.read_bytes(), raw)
+        self.assertEqual(evidence.verify_envelope(
+            evidence.strict_json(raw), 7, self.pub)["checkpoint"], cp)
+        self.assertFalse(signed["payload"]["finalMeterVerified"])
+
+    def test_concurrent_conflicting_signed_receipts_one_wins(self):
+        cp = checkpoint()
+        first = self.create(cp)
+        final = self.output / evidence.receipt_name(cp)
+        original = final.read_bytes()
+        second = copy.deepcopy(first)
+        second_cp = second["payload"]["checkpoint"]
+        second_cp["downlinkBytes"] = 21
+        second_cp["inboundMeters"][0]["downlinkBytes"] = 21
+        second["payload"]["checkpointSha256"] = hashlib.sha256(
+            evidence.canonical(second_cp)).hexdigest()
+        second["signature"] = evidence.sign_bytes(
+            self.key, evidence.DOMAIN + evidence.canonical(second["payload"]))
+        alternative = evidence.canonical(second) + b"\n"
+        self.assertNotEqual(original, alternative)
+        evidence.verify_envelope(second, 7, self.pub)
+        final.unlink()
+        results = self.run_concurrent_appends(
+            [original, alternative] * 6, final.name)
+        self.assertEqual(results.count(("ok", True)), 1, results)
+        self.assertEqual(results.count(("ok", False)), 5, results)
+        errors = [result for result in results if result[0] == "error"]
+        self.assertEqual(len(errors), 6, results)
+        self.assertTrue(all("conflicting or corrupt immutable observation" in
+                            result[2] for result in errors), results)
+        self.assertEqual(list(self.output.iterdir()), [final])
+        self.assertEqual(final.stat().st_nlink, 1)
+        self.assertIn(final.read_bytes(), (original, alternative))
+        accepted = evidence.verify_envelope(
+            evidence.strict_json(final.read_bytes()), 7, self.pub)
+        self.assertFalse(accepted["settlementEligible"])
+        self.assertEqual(accepted["refundableBytes"], 0)
+
+    def test_crash_linked_journal_parallel_recovery_is_idempotent(self):
+        cp = checkpoint()
+        self.create(cp)
+        final = self.output / evidence.receipt_name(cp)
+        raw = final.read_bytes()
+        inode = final.stat().st_ino
+        pending = self.output / (".observed-pending-" + "c" * 32)
+        os.link(final, pending)
+        outcomes = self.run_concurrent_appends([raw] * 8, final.name)
+        self.assertEqual(outcomes, [("ok", False)] * 8)
+        self.assertFalse(pending.exists())
+        self.assertEqual(list(self.output.iterdir()), [final])
+        self.assertEqual(final.stat().st_ino, inode)
+        self.assertEqual(final.stat().st_nlink, 1)
+        self.assertEqual(final.read_bytes(), raw)
+
+    def test_directory_lock_error_does_not_publish_any_receipt(self):
+        with patch.object(evidence.fcntl, "flock",
+                          side_effect=OSError(errno.EIO, "failed to lock journal")):
+            with self.assertRaises(OSError):
+                self.create()
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_failed_link_preserves_unpublished_signed_journal(self):
         cp = checkpoint()
