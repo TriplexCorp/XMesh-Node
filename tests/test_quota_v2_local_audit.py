@@ -98,6 +98,9 @@ class TestLocalAudit(unittest.TestCase):
                 self.assertIn(blocker, r["blockers"])
 
     def test_quota_timers_must_be_enabled_and_active(self):
+        # User meter is the durable per-user sampler, not interchangeable with
+        # aggregate node metrics heartbeat or a healthy running Xray.
+        self.assertIn("xmesh-node-user-meter.timer", audit.REQUIRED_TIMERS)
         for unit in audit.REQUIRED_TIMERS:
             with self.subTest(unit=unit):
                 timers = {name: True for name in audit.REQUIRED_TIMERS}

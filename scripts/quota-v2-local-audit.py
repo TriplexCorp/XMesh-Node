@@ -25,6 +25,9 @@ REQUIRED_TIMERS = (
     "xmesh-node-control.timer",
     "xmesh-xray-sync.timer",
     "xmesh-node-metrics.timer",
+    # This oneshot timer is the independent durable per-user Xray sampler.
+    # A fresh router heartbeat without actual user metering is not readiness.
+    "xmesh-node-user-meter.timer",
 )
 
 # Deployed Node-owned admission/counter workers MUST be the reviewed Git
