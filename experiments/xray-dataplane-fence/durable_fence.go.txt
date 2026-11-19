@@ -249,6 +249,9 @@ func commitDurableFence(scope checkpointScope) error {
         return err
     }
     if err=file.Close();err!=nil{return err}
+    // fsync the pending DIRECTORY ENTRY, not just file contents. Without
+    // this, a power cut before link() could lose the only denial intent.
+    if err=syncFenceDirectory(dir);err!=nil{return err}
     // Publish with an exclusive hard link: never replace another revocation.
     return publishDurableJournal(dir,name,path)
 }
