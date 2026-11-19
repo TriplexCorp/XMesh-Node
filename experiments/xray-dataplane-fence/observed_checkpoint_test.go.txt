@@ -266,6 +266,53 @@ func TestObservedFsyncSnapshotNeverRefundable(t *testing.T) {
     if string(contents)!=string(after){t.Fatal("immutable observed file overwritten")}
 }
 
+// A readable, syntactically valid journal is NOT adequate for recovery.
+// It must be the exact immutable bytes written by the observed-only recorder;
+// duplicate fields and a false "final" claim can never become trustworthy.
+func TestObservedCheckpointNoncanonicalRecoveryFailsClosed(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    for _,kind:=range []string{
+        "duplicate-finality","duplicate-usage","unknown-proof",
+        "trailing-blank","read-only-mode",
+    } {
+        t.Run(kind,func(t *testing.T){
+            dir,_:=setupCheckpoint(t,email,11,13)
+            scope:=testScope(email,testRevocation)
+            if _,err:=persistObservedCheckpoint(scope);err!=nil{t.Fatal(err)}
+            path:=checkpointPath(dir,email)
+            b,err:=os.ReadFile(path)
+            if err!=nil{t.Fatal(err)}
+            data:=string(b)
+            switch kind {
+            case "duplicate-finality":
+                data=strings.Replace(data,`"finalMeterVerified":false`,
+                    `"finalMeterVerified":true,"finalMeterVerified":false`,1)
+            case "duplicate-usage":
+                data=strings.Replace(data,`"uplinkBytes":11`,
+                    `"uplinkBytes":1,"uplinkBytes":11`,1)
+            case "unknown-proof":
+                data=strings.Replace(data,`"refundableBytes":0`,
+                    `"refundableBytes":0,"terminalProof":"forged"`,1)
+            case "trailing-blank":
+                data+=" "
+            case "read-only-mode":
+                if err:=os.Chmod(path,0400);err!=nil{t.Fatal(err)}
+            }
+            if kind!="read-only-mode" {
+                if data==string(b){t.Fatal("checkpoint tamper did not modify bytes")}
+                if err:=os.WriteFile(path,[]byte(data),0600);err!=nil{t.Fatal(err)}
+            }
+            if _,err:=loadCheckpoint(path);err==nil {
+                t.Fatal("ambiguous observed-only meter passed strict validation")
+            }
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatal("Xray restart accepted noncanonical observed meter")
+            }
+        })
+    }
+}
+
 func TestObservedScopeMissingStatsAndInvalidIdentity(t *testing.T){
     dir,_:=setupCheckpoint(t,"bob",0,0)
     if _,err:=persistObservedCheckpoint(testScope("bob","bad-request"));err==nil{
