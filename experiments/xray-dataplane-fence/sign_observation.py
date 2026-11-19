@@ -229,7 +229,70 @@ def read_private_record(dfd, name):
         os.close(fd)
 
 
+def recover_pending_observations(dfd):
+    """Repair ONLY fsynced, same-inode post-link crash records.
+
+    A temp without a matching published hardlink might be a signed but
+    UNPUBLISHED observation. Deleting or ignoring it would allow a different
+    receipt for the same reservation after a crash. Treat it as an operator
+    recovery blocker, never as an accepted proof or refundable meter.
+    """
+    for pending in sorted(os.listdir(dfd)):
+        if not pending.startswith(".observed-pending-"):
+            continue
+        if not re.fullmatch(r"\\.observed-pending-[0-9a-f]{32}", pending):
+            raise ValueError("unrecognized pending Node observation journal")
+        before = os.stat(pending, dir_fd=dfd, follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or
+                before.st_uid != os.geteuid() or
+                stat.S_IMODE(before.st_mode) != 0o600 or
+                before.st_nlink != 2 or
+                not 0 < before.st_size <= MAX_RECORD):
+            raise ValueError("unpublished or unsafe pending Node observation")
+        fd = os.open(pending, os.O_RDONLY | NOFOLLOW | CLOEXEC, dir_fd=dfd)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (
+                    before.st_dev, before.st_ino):
+                raise ValueError("pending Node observation changed during read")
+            raw = os.read(fd, MAX_RECORD + 1)
+            if len(raw) != before.st_size:
+                raise ValueError("pending Node observation truncated during read")
+        finally:
+            os.close(fd)
+        record = strict_json(raw)
+        if raw != canonical(record) + b"\\n" or (
+                set(record) != {"algorithm", "payload", "signature"} or
+                record["algorithm"] != "Ed25519" or
+                not isinstance(record["payload"], dict) or
+                not isinstance(record["payload"].get("checkpoint"), dict)):
+            raise ValueError("noncanonical pending Node observation")
+        published = receipt_name(record["payload"]["checkpoint"])
+        try:
+            final = os.stat(published, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise ValueError("unpublished pending Node observation") from exc
+        if (not stat.S_ISREG(final.st_mode) or
+                final.st_uid != before.st_uid or
+                stat.S_IMODE(final.st_mode) != 0o600 or
+                final.st_nlink != 2 or
+                (final.st_dev, final.st_ino) != (
+                    before.st_dev, before.st_ino)):
+            raise ValueError("conflicting pending Node observation hardlink")
+        # A crash after link() but before parent fsync may have left a
+        # visible yet uncommitted name. Make it durable BEFORE unlinking
+        # the validated temporary name, then fsync its removal as well.
+        os.fsync(dfd)
+        os.unlink(pending, dir_fd=dfd)
+        os.fsync(dfd)
+        if read_private_record(dfd, published) != raw:
+            raise ValueError("recovered Node observation differs from journal")
+
+
 def append_only(dfd, name, evidence):
+    # Never sign past an interrupted publication, even when the requested
+    # receipt is byte-identical to an already visible final filename.
+    recover_pending_observations(dfd)
     try:
         old = read_private_record(dfd, name)
     except FileNotFoundError:
@@ -242,18 +305,18 @@ def append_only(dfd, name, evidence):
     temp = ".observed-pending-" + secrets.token_hex(16)
     fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
                  NOFOLLOW | CLOEXEC, 0o600, dir_fd=dfd)
-    try:
-        with os.fdopen(fd, "wb", closefd=True) as sink:
-            sink.write(evidence)
-            sink.flush()
-            os.fsync(sink.fileno())
-        # Exclusive hardlink, not replace/rename: no conflicting replay wins.
-        os.link(temp, name, src_dir_fd=dfd, dst_dir_fd=dfd,
-                follow_symlinks=False)
-        os.fsync(dfd)
-    finally:
-        os.unlink(temp, dir_fd=dfd)
-        os.fsync(dfd)
+    with os.fdopen(fd, "wb", closefd=True) as sink:
+        sink.write(evidence)
+        sink.flush()
+        os.fsync(sink.fileno())
+    # Failures after the durable temp is written MUST leave that file in
+    # place. Removing it on a failed hardlink/fsync silently discards crash
+    # evidence and could allow conflicting signatures on a retry.
+    os.link(temp, name, src_dir_fd=dfd, dst_dir_fd=dfd,
+            follow_symlinks=False)
+    os.fsync(dfd)
+    os.unlink(temp, dir_fd=dfd)
+    os.fsync(dfd)
     if read_private_record(dfd, name) != evidence:
         raise ValueError("observation publication was not durable")
     return True
