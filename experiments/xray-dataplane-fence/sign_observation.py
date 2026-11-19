@@ -6,6 +6,7 @@ Only a committed, Ed25519-verified policy can bind an Xray observation to a
 reservation before the Node identity signs it. Node authentication alone
 cannot prove physical stop, writer completion, or final byte accuracy.
 """
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -289,7 +290,11 @@ def recover_pending_observations(dfd):
             raise ValueError("recovered Node observation differs from journal")
 
 
-def append_only(dfd, name, evidence):
+def _append_only_locked(dfd, name, evidence):
+    # Caller holds an EXCLUSIVE Linux flock on the verified private directory.
+    # Without it, two independent signers can both see no receipt, fsync two
+    # temps, and the losing hardlink leaves a permanent ambiguous pending
+    # journal. Recovery itself must be serialized with publication.
     # Never sign past an interrupted publication, even when the requested
     # receipt is byte-identical to an already visible final filename.
     recover_pending_observations(dfd)
@@ -320,6 +325,22 @@ def append_only(dfd, name, evidence):
     if read_private_record(dfd, name) != evidence:
         raise ValueError("observation publication was not durable")
     return True
+
+
+def append_only(dfd, name, evidence):
+    """Atomically publish one immutable observation across Node processes.
+
+    flock is on the already validated root-private directory inode, not on
+    a replaceable/unlinkable lock filename. Every signer opens its own fd;
+    Linux kernel locks serialize pending recovery, lookup, hardlink, fsync
+    and cleanup. A process killed mid-write releases the lock automatically,
+    leaving its fsynced pending journal for fail-closed recovery.
+    """
+    fcntl.flock(dfd, fcntl.LOCK_EX)
+    try:
+        return _append_only_locked(dfd, name, evidence)
+    finally:
+        fcntl.flock(dfd, fcntl.LOCK_UN)
 
 
 def create_observation(state_dir, node_id, checkpoint, key_path, ledger_dir,
