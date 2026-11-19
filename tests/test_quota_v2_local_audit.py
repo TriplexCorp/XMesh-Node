@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Local Quota V2 audit must never declare whole fleet or byte refunds safe."""
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import unittest
+from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[1] / "scripts/quota-v2-local-audit.py"
 spec = importlib.util.spec_from_file_location("xmesh_v2_audit", SOURCE)
@@ -56,6 +59,37 @@ class TestLocalAudit(unittest.TestCase):
                     "xray.service": state, "v2ray.service": "inactive"})
                 self.assertIn("legacy_or_unverifiable_xray_service", result["blockers"])
                 self.assertFalse(result["localV2AppliedVerified"])
+
+    def test_actual_binary_identities_must_match_installed_manifest(self):
+        a = "a" * 64
+        b = "b" * 64
+        revision = "c" * 40
+        manifest = {
+            "version": audit.VERSION, "sourceRevision": revision,
+            "activationArtifactSha256": a, "productArtifactSha256": b,
+            "strictPQCapable": True, "strictPQRequired": True,
+            "automaticClassicalFallback": False,
+        }
+        def identities(revision_override=None):
+            return [
+                subprocess.CompletedProcess([], 0, stdout=json.dumps({
+                    "version": audit.VERSION,
+                    "sourceRevision": revision_override or revision,
+                    "artifactSha256": h,
+                })) for h in (a, b)
+            ]
+        with patch.object(audit, "read_json", return_value=manifest), (
+                patch.object(audit, "digest_file", side_effect=[a, b])), (
+                patch.object(audit, "run", side_effect=identities())):
+            self.assertTrue(audit.verify_binary_manifest())
+        with patch.object(audit, "read_json", return_value=manifest), (
+                patch.object(audit, "digest_file", side_effect=[a, "d" * 64])), (
+                patch.object(audit, "run", side_effect=identities())):
+            self.assertFalse(audit.verify_binary_manifest())
+        with patch.object(audit, "read_json", return_value=manifest), (
+                patch.object(audit, "digest_file", side_effect=[a, b])), (
+                patch.object(audit, "run", side_effect=identities("e" * 40))):
+            self.assertFalse(audit.verify_binary_manifest())
 
     def test_invalid_and_bool_versions_rejected(self):
         for bad in (None, {}, [], {"version": True}, {"version": 3}):
