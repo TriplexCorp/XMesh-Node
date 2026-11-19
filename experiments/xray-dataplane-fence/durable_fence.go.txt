@@ -194,6 +194,24 @@ func syncFenceDirectory(dir string) error {
     return closeErr
 }
 
+// Only the experimental CI publisher uses these injectable primitives.
+// The crash-recovery reader always uses the real filesystem operations.
+var experimentalJournalLink = os.Link
+var experimentalJournalSync = syncFenceDirectory
+
+// A durable pending record is NEVER discarded on a failed link/fsync.
+// Startup can reconcile a same-inode published link, or refuse an
+// unpublished/unsafe record; it must not forget an uncertain denial.
+func publishDurableJournal(dir, pending, final string) error {
+    if err:=experimentalJournalLink(pending,final);err!=nil{return err}
+    // Commit the final hardlink before removing the only crash evidence.
+    if err:=experimentalJournalSync(dir);err!=nil{return err}
+    if err:=os.Remove(pending);err!=nil{return err}
+    // Make the cleanup durable too. On failure the final marker was
+    // already fsynced, and a crash can safely re-run reconciliation.
+    return experimentalJournalSync(dir)
+}
+
 func commitDurableFence(scope checkpointScope) error {
     if !validScope(scope){return errors.New("invalid durable fence scope")}
     observed.Lock()
@@ -221,7 +239,7 @@ func commitDurableFence(scope checkpointScope) error {
     file,err:=os.CreateTemp(dir,".fence-pending-")
     if err!=nil{return err}
     name:=file.Name()
-    defer os.Remove(name)
+    // Preserve uncertain pending fence evidence on all failures.
     if _,err=file.Write(append(data,byte(10)));err!=nil {
         _=file.Close()
         return err
@@ -232,8 +250,7 @@ func commitDurableFence(scope checkpointScope) error {
     }
     if err=file.Close();err!=nil{return err}
     // Publish with an exclusive hard link: never replace another revocation.
-    if err=os.Link(name,path);err!=nil{return err}
-    return syncFenceDirectory(dir)
+    return publishDurableJournal(dir,name,path)
 }
 
 func fenceScoped(ctx context.Context,scope checkpointScope) (result,error) {
