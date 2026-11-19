@@ -124,6 +124,7 @@ def evaluate(policy, profile_attested, control_current, binaries_verified,
 def inspect_local():
     problems = []
     policy = None
+    signed = None
     if os.geteuid() != 0:
         problems.append("requires_root")
     try:
@@ -148,7 +149,15 @@ def inspect_local():
             response = run([sys.executable, str(ATTEST), "--json"])
             if response.returncode == 0 and len(response.stdout) <= 4096:
                 data = json.loads(response.stdout)
-                attested = isinstance(data, dict) and data.get("status") == "verified"
+                # Bind the attestor's live running config digest to the exact
+                # policy bytes seen here. Re-read after inspection: a
+                # concurrent signed-policy replacement must not make two
+                # independently consistent snapshots look like one.
+                attested = (isinstance(data, dict)
+                            and data.get("status") == "verified"
+                            and isinstance(policy, dict)
+                            and data.get("revision") == policy.get("configSha256")
+                            and read_json(STATE / "policy-envelope.json") == signed)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
     verified_bins = False
