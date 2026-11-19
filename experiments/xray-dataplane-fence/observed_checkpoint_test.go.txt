@@ -1,6 +1,8 @@
 package xmeshdrain
 
 import (
+    "strings"
+    "bytes"
     "context"
     "errors"
     "fmt"
@@ -122,8 +124,16 @@ func TestObservedMeterTwoPassRejectsLateCounterGrowth(t *testing.T) {
 func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T) {
     mainEmail:="xmesh-u101--vless-share"
     cdnEmail:="xmesh-u101--vless-cdn"
-    for _,missingCDN:=range []bool{false,true} {
-        t.Run(fmt.Sprintf("missingCDNCounter=%v",missingCDN),func(t *testing.T){
+    for _,tc:=range []struct{
+        name string
+        missingCDN bool
+        hiddenSameUser bool
+    }{
+        {name:"main-and-cdn"},
+        {name:"missing-cdn-direction",missingCDN:true},
+        {name:"hidden-same-user-pre-fence-traffic",hiddenSameUser:true},
+    } {
+        t.Run(tc.name,func(t *testing.T){
             resetGate()
             observed.Lock()
             observed.manager=nil
@@ -144,7 +154,18 @@ func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T
             addCounter(mainEmail,"uplink",100)
             addCounter(mainEmail,"downlink",60)
             addCounter(cdnEmail,"uplink",200)
-            if !missingCDN {addCounter(cdnEmail,"downlink",40)}
+            if !tc.missingCDN {addCounter(cdnEmail,"downlink",40)}
+            if tc.hiddenSameUser {
+                // A different provisioned inbound registered counters and
+                // spent bytes BEFORE the fence, but its stream finished
+                // before a Register() session was ever observed.
+                hidden:="xmesh-u101--vless-hidden"
+                addCounter(hidden,"uplink",37)
+                addCounter(hidden,"downlink",19)
+            }
+            // A different billing user's counters MUST NOT contaminate A.
+            addCounter("xmesh-u102--vless-other","uplink",5)
+            addCounter("xmesh-u102--vless-other","downlink",7)
             p,c:=ctx(1011),ctx(1012)
             if err:=Register(p,mainEmail,func(){});err!=nil{t.Fatal(err)}
             if err:=Register(c,cdnEmail,func(){});err!=nil{t.Fatal(err)}
@@ -155,8 +176,11 @@ func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T
             if err!=nil||!snapshot.Drained{t.Fatalf("fence: %+v %v",snapshot,err)}
             observed,err:=persistObservedCheckpoint(scope)
             path:=checkpointPath(dir,mainEmail)
-            if missingCDN {
-                if err==nil{t.Fatal("silently omitted missing CDN traffic counter")}
+            if tc.missingCDN || tc.hiddenSameUser {
+                if err==nil{t.Fatal("silently omitted a registered same-account meter")}
+                if tc.hiddenSameUser && !strings.Contains(err.Error(),"unobserved same-user Xray StatsService counter") {
+                    t.Fatalf("hidden provisioned alias rejected for wrong reason: %v",err)
+                }
                 if _,err:=os.Lstat(path);!errors.Is(err,os.ErrNotExist){
                     t.Fatalf("committed a partial multi-inbound observation: %v",err)
                 }
@@ -176,6 +200,37 @@ func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T
                 t.Fatal("alias bypassed immutable per-user observation")
             }
         })
+    }
+}
+
+func TestZeroByteUnobservedAliasInvalidatesAlreadyPublishedNonfinalReplay(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    dir,_:=setupCheckpoint(t,email,30,40)
+    scope:=testScope(email,testRevocation)
+    first,err:=persistObservedCheckpoint(scope)
+    if err!=nil{t.Fatal(err)}
+    path:=checkpointPath(dir,email)
+    original,err:=os.ReadFile(path)
+    if err!=nil{t.Fatal(err)}
+    // Even without a byte mutation, the counter registry proves that
+    // the prior seen-session alias set was incomplete. It is not safe
+    // to replay the older immutable observation as complete evidence.
+    manager:=observed.manager
+    for _,direction:=range []string{"uplink","downlink"} {
+        name:="user>>>xmesh-u101--vless-hidden>>>traffic>>>"+direction
+        if _,err:=manager.RegisterCounter(name);err!=nil{t.Fatal(err)}
+    }
+    if _,err:=persistObservedCheckpoint(scope);err==nil ||
+        !strings.Contains(err.Error(),"unobserved same-user Xray StatsService counter") {
+        t.Fatalf("zero-byte unexpected alias did not invalidate checkpoint: %v",err)
+    }
+    later,err:=os.ReadFile(path)
+    if err!=nil{t.Fatal(err)}
+    if !bytes.Equal(original,later) {
+        t.Fatal("immutable observed journal changed after hidden alias detection")
+    }
+    if first.FinalMeterVerified || first.RefundableBytes!=0 {
+        t.Fatal("stale observed snapshot incorrectly authorized a refund")
     }
 }
 
