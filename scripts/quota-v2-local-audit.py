@@ -85,12 +85,12 @@ def verify_binary_manifest():
     return True
 
 
-def inspect_running_docker_names():
-    # Listing only running containers cannot prove absence of detached
-    # daemon clones or native processes. It does flag an *additional*
-    # container that a signed profile attestation of the named managed
-    # Xray instance could otherwise miss.
-    response = run(["docker", "ps", "--format", "{{.Names}}"])
+def inspect_all_docker_names():
+    # Include STOPPED containers as well: an old legacy instance may be
+    # restarted after the cutover, especially with a Docker restart policy.
+    # This still cannot prove absence of deleted images, remote clones or
+    # native processes. Unknown local containers must be reviewed manually.
+    response = run(["docker", "ps", "--all", "--format", "{{.Names}}"])
     if response.returncode != 0 or len(response.stdout) > 16384:
         raise ValueError("Docker inventory unavailable")
     names = response.stdout.splitlines()
@@ -152,9 +152,9 @@ def evaluate(policy, profile_attested, control_current, binaries_verified,
         if "xmesh-node" not in running:
             reasons.append("managed_router_container_not_running")
         if running - MANAGED_CONTAINERS:
-            # Never assume a parallel container has no VLESS/VMess/Xray
-            # workload just from its friendly Docker name or image tag.
-            reasons.append("unreviewed_parallel_running_docker_container")
+            # Never assume an extra running OR stopped container cannot
+            # resume a legacy proxy workload based on its friendly name.
+            reasons.append("unreviewed_other_docker_container")
     if enforcement_timers is None:
         reasons.append("enforcement_timer_inventory_unavailable")
     elif any(enforcement_timers.get(unit) is not True for unit in REQUIRED_TIMERS):
@@ -224,7 +224,7 @@ def inspect_local():
         except (OSError, subprocess.SubprocessError):
             services[service] = "unknown"
     try:
-        running_containers = inspect_running_docker_names()
+        running_containers = inspect_all_docker_names()
     except (OSError, ValueError, subprocess.SubprocessError):
         running_containers = None
     try:
