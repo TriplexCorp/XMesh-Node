@@ -82,6 +82,24 @@ class OfflinePolicyCutoff(unittest.TestCase):
         self.assertNotIn("No previously issued signed offline policy; existing Xray untouched", SHELL)
         self.assertIn("stop_managed_xray_for_invalid_offline_policy || exit 1", SHELL)
 
+    def test_offline_reconciliation_error_trap_cannot_restore_old_users(self):
+        # A VALID cached policy can revoke a user due to quota exhaustion.
+        # If a later Docker/TLS/GeoData/router stage fails, preserving or
+        # rolling back an old config would re-admit that revoked identity.
+        guard = 'if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then'
+        self.assertEqual(SHELL.count(guard), 3)
+        self.assertNotIn(
+            'if [[ "$REVOCATION_FAIL_CLOSED" != true && -f "$PREVIOUS" ]];then',
+            SHELL,
+        )
+        trap = SHELL.split("trap 'rc=$?;", 1)[1].split("' EXIT", 1)[0]
+        self.assertIn(
+            'if [[ "$OFFLINE_POLICY" == true && "$rc" -ne 0 ]];then '
+            'stop_managed_xray_for_invalid_offline_policy',
+            trap,
+        )
+        self.assertIn('if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]]', trap)
+
     def test_no_docker_restart_and_actual_stopped_state(self):
         shell = """set -Eeuo pipefail
 RUNNING=true
