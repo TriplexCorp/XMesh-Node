@@ -53,6 +53,46 @@ class TestLocalAudit(unittest.TestCase):
         self.assertFalse(result["finalMeterVerified"])
         self.assertEqual(result["refundableBytes"], 0)
 
+    def test_v1_policy_can_verify_installed_runtime_before_v2_is_enabled(self):
+        # Nexus issues signed v1 while XMESH_QUOTA_V2_ENABLED=0. This must
+        # never become a false "v2 applied" result or authorize the fleet.
+        for policy in (signed(1), signed(1, budget=0),
+                       signed(1, expiry=1_800_000_000_000)):
+            with self.subTest(policy=policy):
+                result = self.check(policy)
+                self.assertTrue(result["localRuntimePreflightPassed"])
+                self.assertEqual(result["runtimeBlockers"], [])
+                self.assertTrue(result["v2PolicyStillPending"])
+                self.assertFalse(result["localV2AppliedVerified"])
+                self.assertIn("committed_v1_signed_policy", result["blockers"])
+                self.assertFalse(result["fleetActivationAuthorized"])
+                self.assertEqual(result["refundableBytes"], 0)
+
+    def test_runtime_preflight_still_rejects_unverified_workers_or_xray(self):
+        for kwargs in ({"applied": False}, {"control": False},
+                       {"pq": False}, {"workers": False}):
+            with self.subTest(kwargs=kwargs):
+                result = self.check(signed(1), **kwargs)
+                self.assertFalse(result["localRuntimePreflightPassed"])
+                self.assertTrue(result["runtimeBlockers"])
+        result = self.check(signed(2))
+        self.assertTrue(result["localRuntimePreflightPassed"])
+        self.assertTrue(result["localV2AppliedVerified"])
+        self.assertFalse(result["v2PolicyStillPending"])
+        self.assertEqual(result["runtimeBlockers"], [])
+
+    def test_cli_runtime_phase_is_explicit_default_exit_remains_fail_closed(self):
+        v1 = self.check(signed(1))
+        for argv, wanted in (
+            (["quota-v2-local-audit", "--json"], 1),
+            (["quota-v2-local-audit", "--json", "--phase", "applied"], 1),
+            (["quota-v2-local-audit", "--json", "--phase", "runtime"], 0),
+        ):
+            with self.subTest(argv=argv), \\
+                 patch.object(audit, "inspect_local", return_value=v1), \\
+                 patch("sys.argv", argv), patch("builtins.print"):
+                self.assertEqual(audit.main(), wanted)
+
     def test_stale_profile_or_unverified_binary_fail_closed(self):
         for kwargs in [{"applied": False}, {"control": False}, {"pq": False}]:
             with self.subTest(kwargs=kwargs):
