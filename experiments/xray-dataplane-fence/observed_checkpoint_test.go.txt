@@ -556,3 +556,65 @@ func TestObservedLeaseScopeFailClosed(t *testing.T){
     assertChanged("revision",func(x *checkpointScope){x.Revision++})
     assertChanged("revocation",func(x *checkpointScope){x.RevocationID="77777777-7777-4777-8777-777777777777"})
 }
+
+func TestObservedPublicationFailureNeverLosesNonfinalJournal(t *testing.T) {
+    for _,mode:=range []string{"link-failure","directory-fsync-failure"} {
+        t.Run(mode,func(t *testing.T){
+            email:="observed-publish-"+mode
+            dir,_:=setupCheckpoint(t,email,21,34)
+            scope:=testScope(email,testRevocation)
+            realLink,realSync:=experimentalJournalLink,experimentalJournalSync
+            t.Cleanup(func(){experimentalJournalLink=realLink;experimentalJournalSync=realSync})
+            if mode=="link-failure" {
+                experimentalJournalLink=func(_, _ string) error {
+                    return errors.New("injected observation hardlink failure")
+                }
+            }else{
+                experimentalJournalSync=func(string) error {
+                    return errors.New("injected observation directory fsync failure")
+                }
+            }
+            _,err:=persistObservedCheckpoint(scope)
+            experimentalJournalLink,experimentalJournalSync=realLink,realSync
+            if err==nil{t.Fatal("uncommitted observation was acknowledged")}
+            entries,err:=os.ReadDir(dir)
+            if err!=nil{t.Fatal(err)}
+            var pending string
+            for _,entry:=range entries {
+                if strings.HasPrefix(entry.Name(),".observed-pending-") {
+                    if pending!=""{t.Fatal("multiple uncertain observation journals")}
+                    pending=filepath.Join(dir,entry.Name())
+                }
+            }
+            if pending==""{t.Fatal("uncertain observation was silently discarded")}
+            final:=checkpointPath(dir,email)
+            _,err=os.Lstat(final)
+            if mode=="link-failure" {
+                if !errors.Is(err,os.ErrNotExist){t.Fatalf("unexpected observed checkpoint: %v",err)}
+                resetGate()
+                if err:=configureObservedCheckpoint(dir);err==nil{
+                    t.Fatal("unpublished observation allowed Xray restart")
+                }
+                if _,err:=os.Lstat(pending);err!=nil{
+                    t.Fatalf("unpublished evidence was discarded: %v",err)
+                }
+            }else{
+                if err!=nil{t.Fatal(err)}
+                p,_:=os.Lstat(pending)
+                f,_:=os.Lstat(final)
+                if !os.SameFile(p,f){t.Fatal("post-link observation has a different inode")}
+                resetGate()
+                if err:=configureObservedCheckpoint(dir);err!=nil{
+                    t.Fatalf("post-link observation was not recoverable: %v",err)
+                }
+                if _,err:=os.Lstat(pending);!errors.Is(err,os.ErrNotExist){
+                    t.Fatalf("recovered observation pending file remains: %v",err)
+                }
+                recovered,err:=loadCheckpoint(final)
+                if err!=nil || recovered.FinalMeterVerified || recovered.RefundableBytes!=0{
+                    t.Fatalf("recovered record improperly claims finality: %+v %v",recovered,err)
+                }
+            }
+        })
+    }
+}
