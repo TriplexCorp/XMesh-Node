@@ -194,13 +194,14 @@ class PreStopCaptureTests(unittest.TestCase):
         self.assertIn('stop_managed_xray_for_revocation || exit 1', shell)
         self.assertIn('Signed quota revocation pending: cached/offline policy cannot re-enable old Xray.', shell)
         self.assertIn('Signed quota revocation pending but policy guard unavailable', shell)
-        self.assertEqual(shell.count('if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then'), 3)
+        self.assertNotIn('cp "$PREVIOUS" "$ACTIVE"', shell)
+        self.assertIn('if [[ "$rc" -ne 0 ]];then stop_managed_xray_for_invalid_offline_policy', shell)
         self.assertEqual(shell.count('python3 "$DENY_HELPER" clear "$STATE"'), 2)
         self.assertIn('if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation', shell)
         self.assertLess(shell.index('PENDING_REVOCATION="$(python3'), shell.index('# An active signed GeoData manifest'))
         self.assertLess(shell.index('python3 "$DENY_HELPER" arm "$STATE"'), shell.index('docker rm -f xmesh-managed-xray'))
-        # Non-revocation deployments retain the existing rollback path.
-        self.assertIn('cp "$PREVIOUS" "$ACTIVE"', shell)
+        # A failed transition must not resurrect credentials via an old profile.
+        self.assertNotIn('cp "$PREVIOUS" "$ACTIVE"', shell)
         self.assertIn(marker, shell)
 
     def test_revoked_xray_stop_uses_restart_disable_and_verifies_termination(self):
