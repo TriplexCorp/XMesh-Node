@@ -1,9 +1,12 @@
 package xmeshdrain
 
 import (
+    "bytes"
     "context"
+    "encoding/json"
     "errors"
     "os"
+    "strings"
     "sync"
     "testing"
     "time"
@@ -20,6 +23,76 @@ func TestMain(m *testing.M) {
     os.Exit(m.Run())
 }
 
+
+func TestScopedFenceRequiresEmailAndBillingUserIDMatch(t *testing.T) {
+    correct:=testScope("xmesh-u101--vless-main",testRevocation)
+    if !validScope(correct) {t.Fatal("valid signed user email was rejected")}
+    cdn:=correct
+    cdn.Email="xmesh-u101--vless-cdn"
+    if !validScope(cdn) {t.Fatal("same billing identity on CDN was rejected")}
+    for _,tc:=range []struct{name string;email string;userID int64}{
+        {"wrong_user_id",correct.Email,102},
+        {"valid_other_user_email","xmesh-u102--vless-main",101},
+        {"leading_zero_user","xmesh-u0101--vless-main",101},
+        {"missing_suffix","xmesh-u101--",101},
+        {"embedded_separator","xmesh-u101--vless>main",101},
+        {"overflow_user_id","xmesh-u9223372036854775808--vless-main",101},
+    } {
+        t.Run(tc.name,func(t *testing.T){
+            changed:=correct
+            changed.Email=tc.email
+            changed.UserID=tc.userID
+            if validScope(changed) {
+                t.Fatalf("cross-account or malformed signed-policy label accepted: %+v",changed)
+            }
+        })
+    }
+    // Bare names are used exclusively by legacy memory-only unit fixtures.
+    legacy:=testScope("legacy-fixture",testRevocation)
+    if !validScope(legacy){t.Fatal("legacy unit fixture was incorrectly rejected")}
+}
+
+func TestScopedFenceControlRejectsDuplicateAndTrailingJSON(t *testing.T) {
+    valid:=testScope("xmesh-u101--vless-main",testRevocation)
+    canonical,err:=json.Marshal(valid)
+    if err!=nil{t.Fatal(err)}
+    for _,raw:=range []string{
+        string(canonical),
+        " \n" + string(canonical) + "\n",
+    } {
+        parsed,err:=decodeScopedFenceRequest(strings.NewReader(raw))
+        if err!=nil || parsed!=valid {
+            t.Fatalf("valid scoped request failed: %v %+v",err,parsed)
+        }
+    }
+    for _,tc:=range []struct{name string;raw string}{
+        {"duplicate_user_id",strings.Replace(string(canonical),
+            `"userId":101`,`"userId":102,"userId":101`,1)},
+        {"duplicate_email",strings.Replace(string(canonical),
+            `"email":"xmesh-u101--vless-main"`,
+            `"email":"xmesh-u102--vless-main","email":"xmesh-u101--vless-main"`,1)},
+        {"duplicate_revocation",strings.Replace(string(canonical),
+            `"revocationId":"`+testRevocation+`"`,
+            `"revocationId":"44444444-4444-4444-8444-444444444444","revocationId":"`+testRevocation+`"`,1)},
+        {"unknown_terminal_claim",strings.Replace(string(canonical),
+            `"revision":7`,`"revision":7,"finalMeterVerified":true`,1)},
+        {"trailing_json",string(canonical)+"{}"},
+        {"trailing_nonjson",string(canonical)+" invalid"},
+        {"array", "["+string(canonical)+"]"},
+        {"oversized",string(canonical)+strings.Repeat(" ",2050)},
+        {"mismatched_billing_user",strings.Replace(string(canonical),
+            `"userId":101`,`"userId":102`,1)},
+        {"noncanonical_email",strings.Replace(string(canonical),
+            `"email":"xmesh-u101--vless-main"`,`"email":"xmesh-u0101--vless-main"`,1)},
+    } {
+        t.Run(tc.name,func(t *testing.T){
+            if bytes.Equal([]byte(tc.raw),canonical){t.Fatal("test failed to tamper request")}
+            if _,err:=decodeScopedFenceRequest(strings.NewReader(tc.raw));err==nil{
+                t.Fatal("ambiguous, forged or out-of-scope fence request admitted")
+            }
+        })
+    }
+}
 
 func TestRuntimeFingerprintStableForSameLiveKernelProcess(t *testing.T) {
     first,err:=currentRuntimeIdentity()
