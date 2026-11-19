@@ -76,7 +76,7 @@ class TestLocalAudit(unittest.TestCase):
                     1_900_000_000_000, running,
                     {unit: True for unit in audit.REQUIRED_TIMERS})
                 self.assertFalse(r["localV2AppliedVerified"])
-                self.assertIn("unreviewed_parallel_running_docker_container",
+                self.assertIn("unreviewed_other_docker_container",
                               r["blockers"])
 
     def test_missing_required_docker_container_or_unavailable_docker(self):
@@ -124,12 +124,12 @@ class TestLocalAudit(unittest.TestCase):
                 with patch.object(audit, "run", return_value=response):
                     if should_pass:
                         self.assertEqual(
-                            audit.inspect_running_docker_names(),
+                            audit.inspect_all_docker_names(),
                             frozenset(("xmesh-node", "xmesh-managed-xray")),
                         )
                     else:
                         with self.assertRaises(ValueError):
-                            audit.inspect_running_docker_names()
+                            audit.inspect_all_docker_names()
 
     def test_actual_binary_identities_must_match_installed_manifest(self):
         a = "a" * 64
