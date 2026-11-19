@@ -194,7 +194,7 @@ class PreStopCaptureTests(unittest.TestCase):
         self.assertIn('stop_managed_xray_for_revocation || exit 1', shell)
         self.assertIn('Signed quota revocation pending: cached/offline policy cannot re-enable old Xray.', shell)
         self.assertIn('Signed quota revocation pending but policy guard unavailable', shell)
-        self.assertEqual(shell.count('if [[ "$REVOCATION_FAIL_CLOSED" != true && -f "$PREVIOUS" ]];then'), 3)
+        self.assertEqual(shell.count('if [[ "$REVOCATION_FAIL_CLOSED" != true && "$OFFLINE_POLICY" != true && -f "$PREVIOUS" ]];then'), 3)
         self.assertEqual(shell.count('python3 "$DENY_HELPER" clear "$STATE"'), 2)
         self.assertIn('if [[ -e "$REVOCATION_MARKER" || -L "$REVOCATION_MARKER" ]];then stop_managed_xray_for_revocation', shell)
         self.assertLess(shell.index('PENDING_REVOCATION="$(python3'), shell.index('# An active signed GeoData manifest'))
