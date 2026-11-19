@@ -46,6 +46,53 @@ class MeterFloorTests(unittest.TestCase):
         self.assertFalse(proof["finalMeterVerified"])
         self.assertEqual(proof["refundableBytes"], 0)
 
+    def test_sticky_discontinuity_refuses_new_signing_even_after_counters_recover(self):
+        for reason in ("regressed-xray-user-counter",
+                       "missing-xray-inbound-counter",
+                       "unverified-xray-runtime-transition"):
+            ledger, cp = sample()
+            ledger["users"]["101"]["quotaMeterContinuityLost"] = {
+                "reason": reason, "runtimeId": ledger["runtimeId"],
+                "atMs": 1795050000000,
+            }
+            with self.subTest(reason=reason), self.assertRaisesRegex(
+                    ValueError, "continuity loss"):
+                verify(ledger, cp, DOCKER)
+
+    def test_cumulative_inbounds_cannot_outgrow_absolute_user_meter(self):
+        ledger, cp = sample()
+        # A raw reset of the user's aggregate meter can be hidden behind
+        # an apparently healthy raw snapshot. The historic inbound totals
+        # are stronger and MUST not be allowed to exceed user absolute.
+        ledger["users"]["101"]["total"] = 350
+        self.assertGreaterEqual(
+            ledger["users"]["101"]["total"],
+            ledger["users"]["101"]["last"])
+        with self.assertRaisesRegex(ValueError, "inbound cumulative bytes exceed"):
+            verify(ledger, cp, DOCKER)
+
+    def test_recent_inbound_delta_must_fit_user_absolute_delta(self):
+        ledger, cp = sample()
+        # The individual cumulative totals are <= the durable user total,
+        # yet after adding newly observed per-inbound raw bytes the
+        # account's projected absolute total becomes inconsistent.
+        ledger["inbounds"]['[101,"vless-main"]']["totalUp"] = 230
+        ledger["users"]["101"]["last"] = 300
+        # Recorded inbound absolute 550 <= recorded user absolute 560,
+        # but the newer per-inbound raw delta is 120 versus user delta 100.
+        self.assertLessEqual(550, ledger["users"]["101"]["total"])
+        with self.assertRaisesRegex(ValueError, "inbound cumulative bytes exceed"):
+            verify(ledger, cp, DOCKER)
+        # A coherent user raw floor restores NONFINAL interpretation.
+        ledger["users"]["101"]["last"] = 280
+        self.assertFalse(verify(ledger, cp, DOCKER)["finalMeterVerified"])
+
+    def test_cumulative_inbound_overflow_is_nonproof(self):
+        ledger, cp = sample()
+        ledger["inbounds"]['[101,"vless-main"]']["totalUp"] = 2**63 - 1
+        with self.assertRaisesRegex(ValueError, "cumulative signed inbound meter overflow"):
+            verify(ledger, cp, DOCKER)
+
     def test_every_inbound_counter_must_be_monotonic(self):
         for index in (0, 1):
             for column in ("uplinkBytes", "downlinkBytes"):

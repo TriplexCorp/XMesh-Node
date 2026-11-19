@@ -50,6 +50,12 @@ def verify_monotonic_meter_floor(ledger, checkpoint, managed_runtime):
     record = users.get(str(uid)) if isinstance(users, dict) else None
     if not isinstance(record, dict):
         raise ValueError("durable Node user meter missing")
+    # The Agent latches a LOST-CONTINUITY marker on same-runtime reset,
+    # vanished counters, or replacement without a terminal old-process
+    # proof. It is never safe to sign a deceptively clean current reading
+    # after this permanent user-scoped incident.
+    if "quotaMeterContinuityLost" in record:
+        raise ValueError("sticky quota-v2 meter continuity loss forbids observation")
     last = unsigned_byte(record.get("last"), "user raw counter")
     durable_total = unsigned_byte(record.get("total"), "absolute user total")
     rows = checkpoint.get("inboundMeters")
@@ -59,6 +65,7 @@ def verify_monotonic_meter_floor(ledger, checkpoint, managed_runtime):
         raise ValueError("durable per-inbound meter missing")
     up = down = 0
     last_up = last_down = 0
+    cumulative_inbound = 0
     seen = set()
     prefix = f"xmesh-u{uid}--"
     for row in rows:
@@ -86,6 +93,9 @@ def verify_monotonic_meter_floor(ledger, checkpoint, managed_runtime):
             floor.get("totalDown"), "inbound cumulative downlink")
         if cumulative_up < prior_up or cumulative_down < prior_down:
             raise ValueError("durable inbound cumulative bytes below current raw floor")
+        cumulative_inbound += cumulative_up + cumulative_down
+        if cumulative_inbound > MAX_METER:
+            raise ValueError("cumulative signed inbound meter overflow")
         if current_up < prior_up or current_down < prior_down:
             raise ValueError("Xray inbound counter regressed below durable Node floor")
         up += current_up
@@ -102,6 +112,20 @@ def verify_monotonic_meter_floor(ledger, checkpoint, managed_runtime):
         raise ValueError("Xray combined observed bytes differ from per-inbound meters")
     if durable_total < last:
         raise ValueError("durable absolute meter is below its raw counter")
+    # The SAME Xray runtime has monotonic raw counters. Extend both
+    # independently journalled absolute histories by only the new observed
+    # raw delta; the sum of the signed per-inbound histories must never
+    # exceed the account's own absolute history. Otherwise one side lost
+    # bytes despite each individual raw reading appearing monotonic.
+    observed_delta = up + down - last
+    inbound_delta = up + down - (last_up + last_down)
+    user_absolute_at_observation = durable_total + observed_delta
+    inbound_absolute_at_observation = cumulative_inbound + inbound_delta
+    if user_absolute_at_observation > MAX_METER or (
+            inbound_absolute_at_observation > MAX_METER):
+        raise ValueError("observed absolute Xray counter overflow")
+    if inbound_absolute_at_observation > user_absolute_at_observation:
+        raise ValueError("signed inbound cumulative bytes exceed user absolute meter")
     return {"sameDockerRuntime": True, "aboveDurableFloor": True,
             "durableAbsoluteBytes": durable_total,
             "observedRawBytes": up + down,

@@ -59,7 +59,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         # raw user counter and each signed inbound's own monotonic floor.
         self.valid_managed_ledger = {
             "runtimeId": self.managed_identity[0] + " " + self.managed_identity[1],
-            "users": {"1": {"last": 110, "total": 120}},
+            "users": {"1": {"last": 110, "total": 125}},
             "inbounds": {'[1,"MAIN"]': {
                 "lastUp": 80, "lastDown": 15,
                 "totalUp": 90, "totalDown": 20}},
@@ -118,6 +118,10 @@ class SignedNonfinalObservationTests(unittest.TestCase):
                                   inboundMeters=[{"email": "xmesh-u1--MAIN",
                                                  "uplinkBytes": 1, "downlinkBytes": 20}])),
             ("different-docker-runtime", lambda cp, led: led.update(runtimeId="b"*64+" 2026-11-18T12:00:00Z")),
+            ("sticky-continuity-loss", lambda cp, led: led["users"]["1"].update(
+                quotaMeterContinuityLost={"reason": "regressed-xray-user-counter",
+                                          "runtimeId": led["runtimeId"], "atMs": 1})),
+            ("aggregate-user-understates-inbounds", lambda cp, led: led["users"]["1"].update(total=120)),
         )
         for name, mutate in cases:
             cp = checkpoint()
@@ -187,7 +191,7 @@ class SignedNonfinalObservationTests(unittest.TestCase):
         checked.assert_called_once_with(cp)
         self.assertEqual(receipt["payload"]["schemaVersion"], 2)
         self.assertTrue(receipt["payload"]["monotonicLedgerFloorVerified"])
-        self.assertEqual(receipt["payload"]["durableAbsoluteFloorBytes"], 120)
+        self.assertEqual(receipt["payload"]["durableAbsoluteFloorBytes"], 125)
         self.assertTrue(evidence.verify_envelope(
             receipt, 7, self.pub)["liveRuntimeIndependentlyVerified"])
         self.assertEqual(len(list(self.output.iterdir())), 1)
