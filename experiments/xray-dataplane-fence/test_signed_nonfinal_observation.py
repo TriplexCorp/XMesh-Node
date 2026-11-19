@@ -391,13 +391,46 @@ class SignedNonfinalObservationTests(unittest.TestCase):
             self.create(cp)
         self.assertEqual(pending[0].read_bytes(), raw)
 
+    def test_pending_directory_fsync_failure_never_publishes_receipt(self):
+        cp = checkpoint()
+        real_fsync = evidence.os.fsync
+        directory_calls = 0
+
+        def fail_first_directory_sync(fd):
+            nonlocal directory_calls
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                directory_calls += 1
+                if directory_calls == 1:
+                    raise OSError(errno.EIO, "injected pending-name fsync")
+            return real_fsync(fd)
+
+        with patch.object(evidence.os, "fsync",
+                          side_effect=fail_first_directory_sync):
+            with self.assertRaises(OSError):
+                self.create(cp)
+        self.assertEqual(directory_calls, 1)
+        pending = list(self.output.glob(".observed-pending-*"))
+        self.assertEqual(len(pending), 1)
+        raw = pending[0].read_bytes()
+        self.assertEqual(raw, evidence.canonical(
+            evidence.strict_json(raw)) + b"\n")
+        self.assertFalse((self.output / evidence.receipt_name(cp)).exists())
+        with self.assertRaisesRegex(ValueError, "unpublished|unsafe"):
+            self.create(cp)
+        self.assertEqual(pending[0].read_bytes(), raw)
+
     def test_postlink_fsync_failure_recovers_same_inode(self):
         cp = checkpoint()
         real_fsync = evidence.os.fsync
 
+        directory_syncs = 0
+
         def fail_directory(fd):
+            nonlocal directory_syncs
             if stat.S_ISDIR(os.fstat(fd).st_mode):
-                raise OSError(errno.EIO, "injected directory fsync")
+                directory_syncs += 1
+                if directory_syncs == 2:
+                    raise OSError(errno.EIO, "injected postlink directory fsync")
             return real_fsync(fd)
 
         with patch.object(evidence.os, "fsync", side_effect=fail_directory):
