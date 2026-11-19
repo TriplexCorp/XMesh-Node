@@ -3,6 +3,8 @@
 import copy
 import importlib.util
 import json
+import errno
+import stat
 from pathlib import Path
 import os
 import subprocess
@@ -237,6 +239,97 @@ class SignedNonfinalObservationTests(unittest.TestCase):
             evidence.verify_live_runtime(cp, other.pid)
         with self.assertRaises(ValueError):
             evidence.verify_live_runtime(cp, "7")
+
+    def test_postlink_crash_reconciles_exact_signed_record(self):
+        cp = checkpoint()
+        signed = self.create(cp)
+        final = self.output / evidence.receipt_name(cp)
+        original = final.read_bytes()
+        inode = final.stat().st_ino
+        pending = self.output / (".observed-pending-" + "a" * 32)
+        os.link(final, pending)
+        self.assertEqual(final.stat().st_nlink, 2)
+        self.assertEqual(self.create(cp), signed)
+        self.assertFalse(pending.exists())
+        self.assertEqual(final.stat().st_nlink, 1)
+        self.assertEqual(final.stat().st_ino, inode)
+        self.assertEqual(final.read_bytes(), original)
+        self.assertFalse(signed["payload"]["finalMeterVerified"])
+
+    def test_failed_link_preserves_unpublished_signed_journal(self):
+        cp = checkpoint()
+        with patch.object(evidence.os, "link",
+                          side_effect=OSError(errno.ENOSPC, "injected")):
+            with self.assertRaises(OSError):
+                self.create(cp)
+        pending = list(self.output.glob(".observed-pending-*"))
+        self.assertEqual(len(pending), 1)
+        raw = pending[0].read_bytes()
+        self.assertEqual(raw, evidence.canonical(
+            evidence.strict_json(raw)) + b"\n")
+        self.assertFalse((self.output / evidence.receipt_name(cp)).exists())
+        with self.assertRaisesRegex(ValueError, "unpublished|unsafe"):
+            self.create(cp)
+        self.assertEqual(pending[0].read_bytes(), raw)
+
+    def test_postlink_fsync_failure_recovers_same_inode(self):
+        cp = checkpoint()
+        real_fsync = evidence.os.fsync
+
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "injected directory fsync")
+            return real_fsync(fd)
+
+        with patch.object(evidence.os, "fsync", side_effect=fail_directory):
+            with self.assertRaises(OSError):
+                self.create(cp)
+        final = self.output / evidence.receipt_name(cp)
+        pending = list(self.output.glob(".observed-pending-*"))
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(final.stat().st_ino, pending[0].stat().st_ino)
+        self.assertEqual(final.stat().st_nlink, 2)
+        raw = final.read_bytes()
+        recovered = self.create(cp)
+        self.assertEqual(final.read_bytes(), raw)
+        self.assertEqual(final.stat().st_nlink, 1)
+        self.assertEqual(list(self.output.iterdir()), [final])
+        self.assertEqual(evidence.canonical(recovered) + b"\n", raw)
+        self.assertFalse(recovered["payload"]["settlementEligible"])
+
+    def test_pending_journal_forgery_blocks_signing(self):
+        cp = checkpoint()
+        for kind in ("symlink", "copied-inode", "unpublished",
+                     "invalid-name", "noncanonical"):
+            with self.subTest(kind=kind):
+                for existing in self.output.iterdir():
+                    existing.unlink()
+                self.create(cp)
+                final = self.output / evidence.receipt_name(cp)
+                raw = final.read_bytes()
+                pending = self.output / (".observed-pending-" + "b" * 32)
+                if kind == "symlink":
+                    pending.symlink_to(final)
+                elif kind == "copied-inode":
+                    pending.write_bytes(raw)
+                    pending.chmod(0o600)
+                else:
+                    os.link(final, pending)
+                    if kind == "unpublished":
+                        final.unlink()
+                    elif kind == "invalid-name":
+                        pending.rename(self.output / ".observed-pending-nothex")
+                    elif kind == "noncanonical":
+                        pending.write_bytes(raw + b" ")
+                before = sorted((p.name, p.is_symlink(), p.read_bytes()
+                                 if not p.is_symlink() else b"link")
+                                for p in self.output.iterdir())
+                with self.assertRaises(ValueError):
+                    self.create(cp)
+                after = sorted((p.name, p.is_symlink(), p.read_bytes()
+                                if not p.is_symlink() else b"link")
+                               for p in self.output.iterdir())
+                self.assertEqual(before, after)
 
     def test_conflicting_meter_never_overwrites(self):
         cp = checkpoint()
