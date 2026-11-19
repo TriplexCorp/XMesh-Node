@@ -76,11 +76,15 @@ class MeterFloorTests(unittest.TestCase):
         # The individual cumulative totals are <= the durable user total,
         # yet after adding newly observed per-inbound raw bytes the
         # account's projected absolute total becomes inconsistent.
-        ledger["users"]["101"]["total"] = 540
+        ledger["inbounds"]['[101,"vless-main"]']["totalUp"] = 230
+        ledger["users"]["101"]["last"] = 300
+        # Recorded inbound absolute 550 <= recorded user absolute 560,
+        # but the newer per-inbound raw delta is 120 versus user delta 100.
+        self.assertLessEqual(550, ledger["users"]["101"]["total"])
         with self.assertRaisesRegex(ValueError, "inbound cumulative bytes exceed"):
             verify(ledger, cp, DOCKER)
-        # A coherent previous ledger remains nonfinal and signs no refunds.
-        ledger["users"]["101"]["total"] = 560
+        # A coherent user raw floor restores NONFINAL interpretation.
+        ledger["users"]["101"]["last"] = 280
         self.assertFalse(verify(ledger, cp, DOCKER)["finalMeterVerified"])
 
     def test_cumulative_inbound_overflow_is_nonproof(self):
