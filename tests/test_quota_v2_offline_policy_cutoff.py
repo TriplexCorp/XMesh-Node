@@ -50,7 +50,9 @@ class OfflinePolicyCutoff(unittest.TestCase):
     def test_high_water_from_ledger_prevents_clock_rollback_revival(self):
         # Future on wall clock does NOT erase the previously durable clock.
         self.assertEqual(
-            self.status(expiry=1_999_999_999_000, now_floor=2_000_000_000_000),
+            self.status(expiry=1_999_999_999_000,
+                        issued=1_999_999_999_000 - 86_400_000,
+                        now_floor=2_000_000_000_000),
             "expired")
 
     def test_malformed_or_invalid_lifetime_denied(self):
@@ -63,7 +65,9 @@ class OfflinePolicyCutoff(unittest.TestCase):
         self.assertEqual(self.status(expiry=future, issued=future - 86_400_000), "live")
         self.assertIn('python3 "$POLICY_GUARD" offline --state "$STATE"', SHELL)
         # Metadata 'live' is never enough to bypass the verified guard.
-        branch = SHELL.split('if [[ "$OFFLINE_POLICY" == true ]];then', 2)[-1]
+        branch = SHELL[
+            SHELL.index('CACHED_LIFETIME="$(python3 - '):
+            SHELL.index('PENDING_REVOCATION="$(python3 ')]
         self.assertIn('if [[ "$CACHED_LIFETIME" != live ]];then', branch)
         self.assertIn('python3 "$POLICY_GUARD" offline', branch)
 
