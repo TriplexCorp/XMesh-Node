@@ -242,9 +242,22 @@ def evaluate(policy, profile_attested, control_current, binaries_verified,
         reasons.append("enforcement_timer_inventory_unavailable")
     elif any(enforcement_timers.get(unit) is not True for unit in REQUIRED_TIMERS):
         reasons.append("enforcement_timer_not_enabled_and_active")
+    # Two distinct stages: the server deliberately signs v1 policies while
+    # XMESH_QUOTA_V2_ENABLED=0. Before cutover the *runtime* can be verified,
+    # but the applied policy cannot possibly be v2 yet. Keep v1 policy as an
+    # explicit cutover blocker without misreporting a correctly installed
+    # Agent as unprepared. This NEVER grants permission to switch the fleet:
+    # independent retirement of every v1 offline-policy copy is required.
+    runtime_blockers = sorted(
+        reason for reason in set(reasons) if reason != "committed_v1_signed_policy"
+    )
+    runtime_preflight = version in (1, 2) and not runtime_blockers
     return {
         "localPolicyVersion": version,
         "potentialLiveV1OfflineBudget": possible_legacy_budget,
+        "localRuntimePreflightPassed": runtime_preflight,
+        "runtimeBlockers": runtime_blockers,
+        "v2PolicyStillPending": version == 1,
         "localV2AppliedVerified": version == 2 and not reasons,
         "allLegacyCopiesRetiredVerified": False,
         "fleetActivationAuthorized": False,
@@ -323,6 +336,8 @@ def inspect_local():
                       services, int(time.time() * 1000),
                       docker_inventory, timers, workers_verified)
     status["blockers"] = sorted(set(status["blockers"] + problems))
+    status["runtimeBlockers"] = sorted(set(status["runtimeBlockers"] + problems))
+    status["localRuntimePreflightPassed"] &= not problems
     status["localV2AppliedVerified"] &= not problems
     return status
 
@@ -335,10 +350,16 @@ def main():
     if args.json:
         print(json.dumps(status, separators=(",", ":"), sort_keys=True))
     else:
+        print("Installed quota runtime preflight:",
+              "PASS" if status["localRuntimePreflightPassed"] else "FAIL")
+        print("Applied signed policy version:", status["localPolicyVersion"])
         print("Managed local v2 applied:", "YES" if status["localV2AppliedVerified"] else "NO")
         print("Blockers:", ", ".join(status["blockers"]) or "none")
         print("This is NOT permission to activate v2 fleet-wide.")
-    return 0 if status["localV2AppliedVerified"] else 1
+    # Exit 0 on a verified pre-cutover runtime (including a signed v1
+    # policy). The JSON/localV2AppliedVerified is the separate post-activation
+    # gate. No exit code is an approval to enable distributed quotas.
+    return 0 if status["localRuntimePreflightPassed"] else 1
 
 
 if __name__ == "__main__":
