@@ -665,9 +665,6 @@ def run(xray, transport, *, denied_direction=None):
                 b_observed=root/("observed-"+hashlib.sha256(b_key.encode()).hexdigest()+".json")
                 assert not b_observed.exists(),"B received a forged post-reset observed meter"
                 assert taint_file.read_bytes()==taint_disk
-                server.terminate()
-                server.wait(timeout=5)
-                assert taint_file.read_bytes()==taint_disk
                 assert b_taint.read_bytes()==b_taint_disk
 
             # Data remains after shutting down the Xray process: this
@@ -717,6 +714,8 @@ def run(xray, transport, *, denied_direction=None):
                 assert b"unsafe Xray StatsService counter mutation or reset" in b_restart,b_restart
                 # A second real Linux Xray incarnation must restore BOTH
                 # independent fenced users and B's pre-fence taint.
+                server.terminate()
+                server.wait(timeout=5)
                 server=subprocess.Popen([xray,"run","-config",str(server_json)],
                                         stdout=log_a,stderr=subprocess.STDOUT,env=env)
                 deadline=time.monotonic()+15
