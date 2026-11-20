@@ -75,6 +75,14 @@ def run(root: Path):
         shared / "durable_meter_intent_test.go",
     )
     shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/meter_inventory.go.txt",
+        shared / "meter_inventory.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/meter_inventory_test.go.txt",
+        shared / "meter_inventory_test.go",
+    )
+    shutil.copyfile(
         NODE_ROOT / "experiments/xray-dataplane-fence/historic_runtime_debt.go.txt",
         shared / "historic_runtime_debt.go",
     )
