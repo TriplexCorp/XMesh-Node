@@ -595,6 +595,15 @@ func TestMeterReadDeliveryAuthorizationRevokedAcrossInboundAliases(t *testing.T)
         t.Fatal("healthy signed alias read was unexpectedly denied")
     }
     if !MayDeliverMeterRead(unrelated){t.Fatal("independent live user denied")}
+    // A StatsService reset before B's revocation invalidates B's meter,
+    // but is not itself a transport-denial decision. Keep its live stream
+    // usable until its own signed revocation arrives.
+    gate.Lock()
+    gate.users[canonicalMeterUser(unrelated)].lateCounterMutation=true
+    gate.Unlock()
+    if !MayDeliverMeterRead(unrelated){
+        t.Fatal("pre-fence taint must not prematurely stop user B")
+    }
     outcome:=make(chan struct{r result;err error},1)
     go func(){
         ctx,cancel:=context.WithTimeout(context.Background(),time.Second)
