@@ -316,7 +316,10 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     gate.Lock()
     defer gate.Unlock()
     u:=gate.users[canonicalMeterUser(email)]
-    drained:=u!=nil && u.fenced && u.closed && len(u.active)==0 && u.writes==0 && u.reads==0
+    // Even an already-finished worker/route cannot certify a checkpoint
+    // while its asynchronous transport cancellation remains unfinished.
+    drained:=u!=nil && u.fenced && u.closed && len(u.active)==0 &&
+        u.writes==0 && u.reads==0 && u.stopping==0
     var seenEmails []string
     if u!=nil {
         for alias:=range u.emails { seenEmails=append(seenEmails,alias) }
