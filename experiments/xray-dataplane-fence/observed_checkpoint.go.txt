@@ -90,10 +90,14 @@ func configureObservedCheckpoint(directory string) error {
 func BindStatsManager(manager stats.Manager) {
     if !enabled { return }
     audited, ok := manager.(interface {
-        SetExperimentalCounterMutationAudit(func(string, bool, func() int64) int64) error
+        SetExperimentalCounterMutationAudit(
+            func(string, bool, func() int64) int64,
+            func(string, int64, func() int64, func() int64) int64,
+        ) error
     })
-    if !ok { panic("experimental StatsService missing mandatory counter audit") }
-    if err := audited.SetExperimentalCounterMutationAudit(AuditRawCounterMutation); err != nil {
+    if !ok { panic("experimental StatsService missing mandatory counter origin/overflow audit") }
+    if err := audited.SetExperimentalCounterMutationAudit(
+        AuditRawCounterMutation,AuditRawCounterAdd); err != nil {
         panic(err)
     }
     observed.Lock()
