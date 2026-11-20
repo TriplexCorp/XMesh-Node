@@ -9,6 +9,7 @@ on:
       - 'tests/test_quota_v2_physical_stop_attestor.py'
       - 'experiments/quota-v2-physical-stop/attestor.py'
       - 'experiments/quota-v2-physical-stop/stop_chain.py'
+      - 'experiments/quota-v2-physical-stop/journal_integrity.py'
       - 'tests/test_quota_v2_stop_chain.py'
       - 'tests/test_quota_v2_revocation_marker.py'
       - '.github/workflows/quota-v2-real-xray-stop.yml'
@@ -21,6 +22,7 @@ on:
       - 'tests/test_quota_v2_physical_stop_attestor.py'
       - 'experiments/quota-v2-physical-stop/attestor.py'
       - 'experiments/quota-v2-physical-stop/stop_chain.py'
+      - 'experiments/quota-v2-physical-stop/journal_integrity.py'
       - 'tests/test_quota_v2_stop_chain.py'
       - 'tests/test_quota_v2_revocation_marker.py'
       - '.github/workflows/quota-v2-real-xray-stop.yml'
@@ -36,7 +38,7 @@ jobs:
           persist-credentials: false
       - name: Verify disposable test and production shell syntax
         run: |
-          python3 -m py_compile tests/test_quota_v2_real_xray_stop.py tests/test_quota_v2_physical_stop_attestor.py tests/test_quota_v2_stop_chain.py experiments/quota-v2-physical-stop/attestor.py experiments/quota-v2-physical-stop/stop_chain.py
+          python3 -m py_compile tests/test_quota_v2_real_xray_stop.py tests/test_quota_v2_physical_stop_attestor.py tests/test_quota_v2_stop_chain.py experiments/quota-v2-physical-stop/attestor.py experiments/quota-v2-physical-stop/stop_chain.py experiments/quota-v2-physical-stop/journal_integrity.py
           python3 -m py_compile deploy/xmesh-quota-revocation-marker.py tests/test_quota_v2_revocation_marker.py
           python3 tests/test_quota_v2_stop_chain.py
           python3 tests/test_quota_v2_physical_stop_attestor.py

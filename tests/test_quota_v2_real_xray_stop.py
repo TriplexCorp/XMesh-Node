@@ -29,6 +29,7 @@ NAME = "xmesh-managed-xray"
 sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 import attestor
 import stop_chain
+import journal_integrity
 import sign_observation as observed
 import runtime_identity
 
@@ -93,7 +94,7 @@ def verify_stopped():
     assert raw == "false no", f"Revoked Xray still runnable via Docker restart: {raw!r}"
 
 
-def synthetic_signed_observation_fixture(root, host_pid):
+def synthetic_signed_observation_fixture(root, host_pid, xray_journal):
     """Signature-chain canary only: bytes and policy approval are SYNTHETIC.
 
     This tests the exact live PID/process -> immutable Node Ed25519 receipt ->
@@ -149,6 +150,19 @@ def synthetic_signed_observation_fixture(root, host_pid):
             observed.canonical(envelope) + b"\n")
     finally:
         os.close(dfd)
+    # This published-Xray canary does NOT instrument StatsService. Write a
+    # plainly synthetic Go-format journal to test the mount/verification
+    # chain only; the real byte accounting path is tested separately by
+    # the pinned patched-Xray CI, and cannot become terminal by this fixture.
+    stem=hashlib.sha256(b"xmesh-u101").hexdigest()
+    fence={field:checkpoint[field] for field in journal_integrity.FIELDS}
+    fence["schemaVersion"]=1
+    observed_record={
+        field:checkpoint[field] for field in journal_integrity.CHECKPOINT}
+    for prefix,record in (("fence-",fence),("observed-",observed_record)):
+        target=xray_journal/(prefix+stem+".json")
+        target.write_bytes(journal_integrity._canonical_go(record))
+        target.chmod(0o600)
     return checkpoint, observed_dir, stopped_dir, key, pub
 
 
@@ -162,6 +176,8 @@ def run():
     helper = stop_helper()
     with tempfile.TemporaryDirectory(prefix="xmesh-v2-real-stop-") as path:
         root = Path(path)
+        xray_journal = root / "xray-synthetic-meter-fixture"
+        xray_journal.mkdir(mode=0o700)
         echo = EchoServer(("127.0.0.1", 0), Echo)
         thread = threading.Thread(target=echo.serve_forever, daemon=True)
         thread.start()
@@ -196,6 +212,7 @@ def run():
                 "--network", "host", "--user", "0:0", "--read-only",
                 "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                 "-v", f"{config_file}:/etc/xray/config.json:ro",
+                "-v", f"{xray_journal}:{journal_integrity.JOURNAL_DEST}:rw",
                 IMAGE, "run", "-config", "/etc/xray/config.json"
             )
             created = True
@@ -215,9 +232,9 @@ def run():
             assert durable_marker("status").stdout.strip() == "armed"
             stop_probe = attestor.begin_old_xray_probe()
             cp, observed_dir, stopped_dir, test_key, test_pub = (
-                synthetic_signed_observation_fixture(root, stop_probe.old_pid))
+                synthetic_signed_observation_fixture(root, stop_probe.old_pid, xray_journal))
             signed_chain = stop_chain.prepare_old_process_stop(
-                stop_probe, cp, observed_dir, 9, test_pub)
+                stop_probe, cp, observed_dir, 9, test_pub, xray_journal)
             script = (
                 "set -Eeuo pipefail\n" + helper +
                 "\nREVOCATION_MARKER=" + str(marker) + "\n" +
