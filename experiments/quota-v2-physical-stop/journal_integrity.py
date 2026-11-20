@@ -159,10 +159,13 @@ def _read_meter_wal(dfd, name):
         for line in raw[:-1].split(b"\n"):
             if not 0 < len(line) <= 1024:
                 raise ValueError("Xray WAL record is unbounded or empty")
-            record = json.loads(
-                line.decode("utf-8"), object_pairs_hook=_pairs,
-                parse_constant=lambda _: (_ for _ in ()).throw(
-                    ValueError("nonfinite WAL counter")))
+            try:
+                record = json.loads(
+                    line.decode("utf-8"), object_pairs_hook=_pairs,
+                    parse_constant=lambda _: (_ for _ in ()).throw(
+                        ValueError("nonfinite WAL counter")))
+            except (ValueError,UnicodeDecodeError) as exc:
+                raise ValueError("invalid old-Xray meter WAL JSON: " + str(exc)) from exc
             if (not isinstance(record,dict) or
                     tuple(record) != METER_FIELDS or
                     _canonical_go(record) != line+b"\n"):
