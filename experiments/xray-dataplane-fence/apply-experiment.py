@@ -221,12 +221,16 @@ def run(root: Path):
     )
     # Install the counted-write gate on all three user statistics writer paths
     # (getLink uplink/downlink and DispatchLink downlink).
-    for writer_path in ("inboundLink.Writer", "outboundLink.Writer", "link.Writer"):
+    for writer_path, direction in (
+            ("inboundLink.Writer", "uplink"),
+            ("outboundLink.Writer", "downlink"),
+            ("link.Writer", "downlink")):
         source = replace_once(
             source,
             "\t\t\t\t\tWriter:  " + writer_path + ",\n",
             "\t\t\t\t\tWriter:  " + writer_path + ",\n"
-            "\t\t\t\t\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\n",
+            "\t\t\t\t\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\n"
+            "\t\t\t\t\tExperimentalDirection: " + '"' + direction + '"' + ",\n",
         )
     dispatcher_file.write_text(source, encoding="utf-8")
 
@@ -323,17 +327,18 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     meter_source = replace_once(
         meter_source,
         '\tWriter  buf.Writer\n',
-        '\tWriter  buf.Writer\n\tExperimentalEmail string\n',
+        '\tWriter  buf.Writer\n\tExperimentalEmail string\n'
+        '\tExperimentalDirection string\n',
     )
     meter_source = replace_once(
         meter_source,
         '\tw.Counter.Add(int64(mb.Len()))\n\treturn w.Writer.WriteMultiBuffer(mb)',
         '''    if w.ExperimentalEmail != "" {
-        if err := xmeshdrain.BeginMeterWrite(w.ExperimentalEmail); err != nil {
+        if err := xmeshdrain.BeginMeterWrite(w.ExperimentalEmail,w.ExperimentalDirection); err != nil {
             buf.ReleaseMulti(mb)
             return err
         }
-        defer xmeshdrain.EndMeterWrite(w.ExperimentalEmail)
+        defer xmeshdrain.EndMeterWrite(w.ExperimentalEmail,w.ExperimentalDirection)
     }
     w.Counter.Add(int64(mb.Len()))
     return w.Writer.WriteMultiBuffer(mb)''',
@@ -353,6 +358,7 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     value int64
     experimentalName string
     experimentalAudit func(string, bool, func() int64) int64
+    experimentalAddAudit func(string, int64, func() int64, func() int64) int64
 }""",
     )
     counter = replace_once(
@@ -368,10 +374,10 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     counter = replace_once(
         counter,
         "return atomic.AddInt64(&c.value, delta)",
-        """if c.experimentalAudit != nil && delta != 0 {
-        return c.experimentalAudit(c.experimentalName, delta < 0, func() int64 {
-            return atomic.AddInt64(&c.value, delta)
-        })
+        """if c.experimentalAddAudit != nil && delta != 0 {
+        return c.experimentalAddAudit(c.experimentalName, delta,
+            func() int64 { return atomic.LoadInt64(&c.value) },
+            func() int64 { return atomic.AddInt64(&c.value, delta) })
     }
     return atomic.AddInt64(&c.value, delta)""",
     )
