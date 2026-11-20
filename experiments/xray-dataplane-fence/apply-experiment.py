@@ -388,6 +388,25 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
         if readerConn == nil {
             return errors.New("experimental Xray: scoped raw reader is missing")
         }
+        // A test must prove that real Vision/TLS sessions reached the
+        // splice-PREPARABLE path, not merely the generic raw-copy function.
+        // Inbound state 2 can transition to 1 while Vision decodes inner
+        // TLS. We bypass the entire raw-copy loop, so only record a
+        // candidate, never claim a physical kernel-splice operation.
+        if runtime.GOOS == "linux" {
+            rawWriter, _, _ := UnwrapRawConn(writerConn)
+            if _, tcp := rawWriter.(*net.TCPConn); tcp {
+                inbound := session.InboundFromContext(ctx)
+                outbounds := session.OutboundsFromContext(ctx)
+                candidate := inbound != nil && inbound.CanSpliceCopy != 3 && len(outbounds) > 0
+                for _, ob := range outbounds {
+                    if ob.CanSpliceCopy == 3 { candidate = false }
+                }
+                if candidate {
+                    xmeshdrain.NoteBufferedSpliceCandidate(scoped.ExperimentalEmail)
+                }
+            }
+        }
         // Keep the original writer (the instrumented SizeStatWriter).
         // Only readV -> WriteMultiBuffer can pass Begin/EndMeterWrite and the
         // trusted exact-alias counter update. No kernel splice is possible.

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
 from runtime_identity import verify_live_runtime
 from test_quota_v2_xray_user_inbound_drain import (  # noqa: E402
-    EchoHandler, EchoServer, reserve_port, connect_socks, echo_bytes,
+    EchoHandler, EchoServer, reserve_port, connect_socks as raw_connect_socks, echo_bytes,
     probe_echo,
 )
 
@@ -32,13 +33,13 @@ EMAIL_A_UNSAFE = "xmesh-u101--vless-unsafe"
 EMAIL_A_USER_KEY = "xmesh-u101"
 EMAIL_B = "xmesh-u102--vless-share"
 # Run a real patched-Xray process per transport. Production remains untouched.
-TRANSPORTS = ("tcp", "ws", "xhttp", "xhttp-stream-up",
+TRANSPORTS = ("tls-vision", "tcp", "ws", "xhttp", "xhttp-stream-up",
               "xhttp-stream-one", "mux-tcp")
 
 
 def make_stream_settings(transport):
     # MUX is an application-level multiplexing layer over VLESS/TCP.
-    wire_transport = "tcp" if transport == "mux-tcp" else transport
+    wire_transport = "tcp" if transport in ("mux-tcp","tls-vision") else transport
     settings = {"network": wire_transport, "security": "none"}
     if transport == "ws":
         settings["wsSettings"] = {"path": "/xmesh-ci-ws"}
@@ -55,7 +56,7 @@ def make_stream_settings(transport):
         settings["xhttpSettings"] = {
             "path": "/xmesh-ci-xhttp/", "mode": mode,
         }
-    elif transport not in ("tcp", "mux-tcp"):
+    elif transport not in ("tcp", "mux-tcp", "tls-vision"):
         raise AssertionError(f"Unsupported test transport: {transport}")
     return settings
 
@@ -178,12 +179,34 @@ def await_socket(path, process):
     raise AssertionError("Patched Xray did not start private Unix control socket")
 
 
+class TLSEchoServer(EchoServer):
+    """A genuine inner TLS destination, needed to exercise XTLS Vision.
+
+    A plaintext echo cannot trigger the Vision transition toward direct
+    TCP splice. We do real TLS1.3 app-data through the SOCKS -> VLESS
+    Vision/TLS -> freedom chain instead of claiming a synthetic stream was
+    splice-eligible.
+    """
+    def __init__(self, address, handler, context):
+        self.tls_context = context
+        super().__init__(address, handler)
+
+    def get_request(self):
+        conn, address = super().get_request()
+        try:
+            return self.tls_context.wrap_socket(conn, server_side=True),address
+        except BaseException:
+            conn.close()
+            raise
+
+
 def run(xray, transport, *, denied_direction=None):
     assert transport in TRANSPORTS
     assert denied_direction in (None, "uplink", "downlink")
     assert os.getenv("GITHUB_ACTIONS") == "true"
     assert os.getenv("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
     assert Path(xray).is_file()
+    vision = transport == "tls-vision"
     with tempfile.TemporaryDirectory(prefix=f"xmesh-v2-{transport}-") as tmp:
         root = Path(tmp)
         assert root.stat().st_mode & 0o077 == 0
@@ -191,8 +214,51 @@ def run(xray, transport, *, denied_direction=None):
         revocation_id = str(uuid.uuid4())
         journal_file = root / ("observed-" +
                                hashlib.sha256(EMAIL_A_USER_KEY.encode()).hexdigest() + ".json")
-        echo = EchoServer(("127.0.0.1",0),EchoHandler)
+        if vision:
+            cert, key = root/"vision-tls.crt", root/"vision-tls.key"
+            command("openssl","req","-x509","-nodes","-newkey","rsa:2048",
+                    "-days","1","-keyout",str(key),"-out",str(cert),
+                    "-subj","/CN=localhost","-addext","subjectAltName=DNS:localhost")
+            key.chmod(0o600)
+            # Xray 26.10.31 removed allowInsecure. Pin the exact
+            # disposable certificate DER instead of bypassing TLS trust.
+            cert_sha256 = hashlib.sha256(
+                ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+            server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_tls.minimum_version = ssl.TLSVersion.TLSv1_3
+            server_tls.load_cert_chain(str(cert),str(key))
+            echo = TLSEchoServer(("127.0.0.1",0),EchoHandler,server_tls)
+            client_tls = ssl.create_default_context()
+            client_tls.check_hostname = False  # disposable local fixture
+            client_tls.verify_mode = ssl.CERT_NONE
+            client_tls.minimum_version = ssl.TLSVersion.TLSv1_3
+        else:
+            echo = EchoServer(("127.0.0.1",0),EchoHandler)
         threading.Thread(target=echo.serve_forever,daemon=True).start()
+
+        def connect_socks(*args):
+            connected = raw_connect_socks(*args)
+            if not vision:
+                return connected
+            try:
+                return client_tls.wrap_socket(connected,server_hostname="localhost")
+            except BaseException:
+                connected.close()
+                raise
+
+        def assert_rejected(port, reason):
+            # A revoked real Vision route can fail during the INNER TLS
+            # handshake instead of delivering a SOCKS-accepted plaintext
+            # socket. Either is denial; a successful echo is not.
+            try:
+                denied=connect_socks(port,echo.server_address[1],"127.0.0.1")
+            except OSError:
+                return
+            try:
+                assert not probe_echo(denied),reason
+            finally:
+                denied.close()
+
         api_port, vless_port, cdn_port, unsafe_port, socks_a, socks_cdn, socks_unsafe, socks_b, socks_blank = (
             reserve_port(),reserve_port(),reserve_port(),reserve_port(),
             reserve_port(),reserve_port(),reserve_port(),reserve_port(),reserve_port()
@@ -241,12 +307,38 @@ def run(xray, transport, *, denied_direction=None):
             "routing":{"rules":[{"type":"field","inboundTag":["xmesh_stats_in"],
                                   "outboundTag":"xmesh_stats_api"}]}
         }
+        if vision:
+            # Only the primary VLESS inbound is Vision/TLS. The secondary
+            # CDN inbound remains ordinary VLESS TCP to verify canonical
+            # per-user revocation spans both metering paths.
+            server_config["inbounds"][0]["streamSettings"] = {
+                "network":"tcp","security":"tls",
+                "tlsSettings":{
+                    "minVersion":"1.3",
+                    "certificates":[{
+                        "certificateFile":str(cert),
+                        "keyFile":str(key),
+                    }],
+                },
+            }
+            for registered in server_config["inbounds"][0]["settings"]["clients"][:2]:
+                registered["flow"]="xtls-rprx-vision"
+
         def outbound(tag, identity, *, cdn=False, unsafe=False):
             destination = unsafe_port if unsafe else (cdn_port if cdn else vless_port)
             config = {"tag":tag,"protocol":"vless","settings":{"vnext":[{
                 "address":"127.0.0.1","port":destination,
                 "users":[{"id":identity,"encryption":"none"}]}]},
                 "streamSettings":make_stream_settings("tcp" if (cdn or unsafe) else transport)}
+            if vision and not (cdn or unsafe):
+                config["streamSettings"] = {
+                    "network":"tcp","security":"tls",
+                    "tlsSettings":{"serverName":"localhost",
+                                   "pinnedPeerCertSha256":cert_sha256,
+                                   "minVersion":"1.3"},
+                }
+                if tag in ("user-a","user-b"):
+                    config["settings"]["vnext"][0]["users"][0]["flow"] = "xtls-rprx-vision"
             # Exercise two simultaneous logical streams A on one physical MUX
             # transport, while user B uses a separate physical connection.
             if transport == "mux-tcp" and tag == "user-a":
@@ -294,7 +386,12 @@ def run(xray, transport, *, denied_direction=None):
         server_json.write_text(json.dumps(server_config),encoding="utf-8")
         client_json.write_text(json.dumps(client_config),encoding="utf-8")
         for config in (server_json,client_json):
-            command(xray,"run","-test","-config",str(config))
+            tested=command(xray,"run","-test","-config",str(config),check=False)
+            if tested.returncode:
+                raise AssertionError(
+                    f"Disposable {transport} {config.name} Xray config rejected:"
+                    f" exit={tested.returncode}, stdout={tested.stdout[-2500:]!r},"
+                    f" stderr={tested.stderr[-2500:]!r}")
         log_a=(root/"server.log").open("w+")
         log_b=(root/"client.log").open("w+")
         server=None
@@ -413,6 +510,13 @@ def run(xray, transport, *, denied_direction=None):
             proof=request_fence(socket_file,EMAIL_A,revocation_id)
             assert proof["fenced"] and proof["drained"] and proof["active"]==0,proof
             assert not proof["finalMeterVerified"] and not proof["refundable"],proof
+            if vision:
+                # Must have reached an authenticated, TCP-splice-PREPARABLE
+                # raw-copy path. This diagnostic does NOT claim kernel
+                # splice occurred or that all Xray background writers ended.
+                assert proof["bufferedSpliceCandidates"] > 0, (
+                    "Vision/TLS fixture did not exercise the raw-splice candidate path",
+                    proof)
             observation=proof["observedCheckpoint"]
             assert verify_live_runtime(observation, server.pid), (
                 "Observed Xray runtime is not independently tied to the live host PID")
@@ -444,24 +548,12 @@ def run(xray, transport, *, denied_direction=None):
             assert not probe_echo(cdn),"Old CDN inbound stream survived user fence"
             if a2 is not None:
                 assert not probe_echo(a2),"Second MUX child survived user fence"
-            denied=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
-            try:
-                assert not probe_echo(denied),"Fenced user opened new authenticated stream"
-            finally:
-                denied.close()
-            denied_cdn=connect_socks(socks_cdn,echo.server_address[1],"127.0.0.1")
-            try:
-                assert not probe_echo(denied_cdn), "Revoked user reopened secondary CDN inbound"
-            finally:
-                denied_cdn.close()
+            assert_rejected(socks_a,"Fenced user opened new authenticated stream")
+            assert_rejected(socks_cdn,"Revoked user reopened secondary CDN inbound")
             # The disposable billable VLESS inbound must reject an
             # authenticated user lacking a stable accounting identity.
             # The independent management API inbound must remain usable.
-            unnamed=connect_socks(socks_blank,echo.server_address[1],"127.0.0.1")
-            try:
-                assert not probe_echo(unnamed),"Blank VLESS email bypassed per-user gate"
-            finally:
-                unnamed.close()
+            assert_rejected(socks_blank,"Blank VLESS email bypassed per-user gate")
             assert probe_echo(b),"Fence for user A killed user B on shared inbound"
             fresh_b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             try:
