@@ -388,7 +388,8 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     manager = replace_once(
         manager,
         "\tcounters   map[string]*Counter\n",
-        "\tcounters   map[string]*Counter\n\tcounterAudit func(string, bool, func() int64) int64\n",
+        "\tcounters   map[string]*Counter\n\tcounterAudit func(string, bool, func() int64) int64\n"
+        "\tcounterAddAudit func(string, int64, func() int64, func() int64) int64\n",
     )
     manager = replace_once(
         manager,
@@ -396,13 +397,15 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
         """// Refuse binding after user counters have begun accumulating bytes.
 func (m *Manager) SetExperimentalCounterMutationAudit(
     audit func(string, bool, func() int64) int64,
+    addAudit func(string, int64, func() int64, func() int64) int64,
 ) error {
     m.access.Lock()
     defer m.access.Unlock()
-    if audit == nil || m.counterAudit != nil || len(m.counters) != 0 {
+    if audit == nil || addAudit == nil || m.counterAudit != nil || len(m.counters) != 0 {
         return errors.New("Xray StatsService audit installed too late or twice")
     }
     m.counterAudit = audit
+    m.counterAddAudit = addAudit
     return nil
 }
 
@@ -433,7 +436,7 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
         raise ValueError("Pinned StatsService changed counter registration paths")
     manager = manager.replace(
         "\tc := new(Counter)\n",
-        "\tc := &Counter{experimentalName: name, experimentalAudit: m.counterAudit}\n",
+        "\tc := &Counter{experimentalName: name, experimentalAudit: m.counterAudit, experimentalAddAudit: m.counterAddAudit}\n",
     )
     manager_file.write_text(manager, encoding="utf-8")
 
