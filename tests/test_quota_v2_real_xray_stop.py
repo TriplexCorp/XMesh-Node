@@ -164,6 +164,9 @@ def synthetic_signed_observation_fixture(root, host_pid, xray_journal):
         target=xray_journal/(prefix+stem+".json")
         target.write_bytes(journal_integrity._canonical_go(record))
         target.chmod(0o600)
+    # Published Xray is uninstrumented: all synthetic counters here are zero.
+    # The helper therefore creates NO pretend nonzero durable meter entries.
+    quota_v2_meter_wal_fixture.write_test_meter_intents(checkpoint,xray_journal)
     return checkpoint, observed_dir, stopped_dir, key, pub
 
 
