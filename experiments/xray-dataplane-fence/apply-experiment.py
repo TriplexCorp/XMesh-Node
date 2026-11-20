@@ -354,6 +354,58 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     )
     meter_writer_file.write_text(meter_source, encoding="utf-8")
 
+    # Xray's raw TCPConn.ReadFrom splice bypasses SizeStatWriter entirely:
+    # upstream proxy.CopyRawConnIfExist increments statWriter.Counter.Add
+    # AFTER a potentially unbounded kernel copy. Such traffic can outlive a
+    # user fence and is not represented by Begin/EndMeterWrite. Both an
+    # instrumented stat writer and an authenticated tracked inbound must
+    # fail closed unless raw copy uses the buffered, gated writer path.
+    proxy_file = root / "proxy/proxy.go"
+    proxy_source = proxy_file.read_text(encoding="utf-8")
+    proxy_source = replace_once(
+        proxy_source,
+        '\t"github.com/xtls/xray-core/app/dispatcher"\n',
+        '\t"github.com/xtls/xray-core/app/dispatcher"\n'
+        '\t"github.com/xtls/xray-core/app/xmeshdrain"\n',
+    )
+    proxy_source = replace_once(
+        proxy_source,
+        '\treaderConn, readCounter, _ := UnwrapRawConn(readerConn)\n'
+        '\twriterConn, _, writeCounter := UnwrapRawConn(writerConn)\n',
+        '''    readerConn, readCounter, _ := UnwrapRawConn(readerConn)
+    // A monitored user can NEVER take the raw TCP splice fast path:
+    // ReadFrom sends before its raw Counter.Add, outside the gated writer.
+    // A late write after user revocation could escape without a meter.
+    if scoped, ok := writer.(*dispatcher.SizeStatWriter); ok &&
+        scoped.ExperimentalEmail != "" {
+        if scoped.ExperimentalDirection != "downlink" || scoped.Counter == nil {
+            return errors.New("experimental Xray: unsafe unmetered scoped raw writer")
+        }
+        if xmeshdrain.IsTrackedInbound(ctx) &&
+            xmeshdrain.ScopedEmail(ctx) != scoped.ExperimentalEmail {
+            return errors.New("experimental Xray: raw writer belongs to another user")
+        }
+        if readerConn == nil {
+            return errors.New("experimental Xray: scoped raw reader is missing")
+        }
+        // Keep the original writer (the instrumented SizeStatWriter).
+        // Only readV -> WriteMultiBuffer can pass Begin/EndMeterWrite and the
+        // trusted exact-alias counter update. No kernel splice is possible.
+        return readV(ctx, buf.NewReader(readerConn), writer, timer, readCounter)
+    }
+    if xmeshdrain.IsTrackedInbound(ctx) {
+        // A covered authenticated inbound without its mandatory wrapping
+        // must never fall through to the upstream direct TCPConn.ReadFrom.
+        return errors.New("experimental Xray: tracked raw copy missing stats writer")
+    }
+    writerConn, _, writeCounter := UnwrapRawConn(writerConn)
+''',
+    )
+    proxy_file.write_text(proxy_source, encoding="utf-8")
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/splice_meter_test.go.txt",
+        root / "proxy/xmesh_splice_meter_test.go",
+    )
 
     # Patch ONLY the exact disposable Xray StatsService authority. Each user
     # Counter.Add/Set is serialized with the admission fence and checkpoint.

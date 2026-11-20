@@ -1,0 +1,179 @@
+package proxy
+
+// Injected only into exact-pinned disposable Xray CI. Proves that even when
+// BOTH peers are real TCP sockets and both session flags request raw splice,
+// an account-bearing XMesh writer MUST use the audited MultiBuffer writer,
+// and a non-scoped connection retains Xray's upstream TCP fast path.
+import (
+    "bytes"
+    "context"
+    "errors"
+    "io"
+    "net"
+    "sync"
+    "sync/atomic"
+    "testing"
+    "time"
+
+    "github.com/xtls/xray-core/app/dispatcher"
+    "github.com/xtls/xray-core/common/buf"
+    "github.com/xtls/xray-core/common/session"
+    "github.com/xtls/xray-core/common/signal"
+)
+
+type xmeshSpliceCounter struct {
+    value atomic.Int64
+    rawAdds atomic.Int64
+    trustedAdds atomic.Int64
+}
+func(c *xmeshSpliceCounter) Value() int64 {return c.value.Load()}
+func(c *xmeshSpliceCounter) Set(v int64) int64 {return c.value.Swap(v)}
+func(c *xmeshSpliceCounter) Add(v int64) int64 {
+    c.rawAdds.Add(1)
+    return c.value.Add(v)
+}
+func(c *xmeshSpliceCounter) ExperimentalAddMetered(v int64) int64 {
+    c.trustedAdds.Add(1)
+    return c.value.Add(v)
+}
+type xmeshSpliceSink struct {
+    mu sync.Mutex
+    b bytes.Buffer
+    writes int
+}
+func(s *xmeshSpliceSink) WriteMultiBuffer(mb buf.MultiBuffer) error {
+    defer buf.ReleaseMulti(mb)
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    s.writes++
+    for _,part:=range mb {
+        if _,err:=s.b.Write(part.Bytes());err!=nil{return err}
+    }
+    return nil
+}
+func(s *xmeshSpliceSink) snapshot()([]byte,int){
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return append([]byte(nil),s.b.Bytes()...),s.writes
+}
+func xmeshSpliceTCP(t *testing.T)(client,server *net.TCPConn) {
+    t.Helper()
+    l,err:=net.ListenTCP("tcp",&net.TCPAddr{IP:net.ParseIP("127.0.0.1")})
+    if err!=nil{t.Fatal(err)}
+    defer l.Close()
+    c,err:=net.DialTCP("tcp",nil,l.Addr().(*net.TCPAddr))
+    if err!=nil{t.Fatal(err)}
+    s,err:=l.AcceptTCP()
+    if err!=nil{c.Close();t.Fatal(err)}
+    return c,s
+}
+func xmeshSpliceContext()(context.Context,*signal.ActivityTimer,func()) {
+    ctx,cancel:=context.WithCancel(context.Background())
+    ctx=session.ContextWithInbound(ctx,&session.Inbound{CanSpliceCopy:1})
+    ctx=session.ContextWithOutbounds(ctx,[]*session.Outbound{{CanSpliceCopy:1}})
+    timer:=signal.CancelAfterInactivity(ctx,cancel,time.Hour)
+    return ctx,timer,func(){timer.SetTimeout(0);cancel()}
+}
+func xmeshSendAndClose(t *testing.T,c *net.TCPConn,payload []byte)<-chan error{
+    t.Helper()
+    done:=make(chan error,1)
+    go func(){
+        _,err:=c.Write(payload)
+        if err==nil{err=c.CloseWrite()}
+        done<-err
+    }()
+    return done
+}
+
+func TestExperimentalSpliceEligibleSignedUserStillUsesAuditedBufferWriter(t *testing.T) {
+    incoming,readerConn:=xmeshSpliceTCP(t)
+    outgoing,writerConn:=xmeshSpliceTCP(t)
+    defer incoming.Close()
+    defer readerConn.Close()
+    defer outgoing.Close()
+    defer writerConn.Close()
+    ctx,timer,done:=xmeshSpliceContext()
+    defer done()
+
+    payload:=bytes.Repeat([]byte("xray-quota-v2-splice-gate-"),64)
+    sent:=xmeshSendAndClose(t,incoming,payload)
+    counter:=&xmeshSpliceCounter{}
+    sink:=&xmeshSpliceSink{}
+    writer:=&dispatcher.SizeStatWriter{
+        Counter:counter,Writer:sink,
+        ExperimentalEmail:"xmesh-u101--vless-main",
+        ExperimentalDirection:"downlink",
+    }
+    if err:=CopyRawConnIfExist(ctx,readerConn,writerConn,writer,timer,nil);err!=nil{
+        t.Fatalf("buffered scoped transfer failed: %v",err)
+    }
+    if err:=<-sent;err!=nil{t.Fatal(err)}
+    got,operations:=sink.snapshot()
+    if !bytes.Equal(got,payload) || operations==0 {
+        t.Fatalf("scoped bytes bypassed audited writer: %d vs %d; ops=%d",
+            len(got),len(payload),operations)
+    }
+    if counter.Value()!=int64(len(payload)) || counter.trustedAdds.Load()==0 ||
+        counter.rawAdds.Load()!=0 {
+        t.Fatalf("raw splice counter used instead of trusted wrapper: value=%d trusted=%d raw=%d",
+            counter.Value(),counter.trustedAdds.Load(),counter.rawAdds.Load())
+    }
+    // If the kernel had performed ReadFrom, it would have delivered to the
+    // unwrapped raw TCP connection and silently bypassed our fake sink.
+    if err:=outgoing.SetReadDeadline(time.Now().Add(30*time.Millisecond));err!=nil{t.Fatal(err)}
+    b:=make([]byte,1)
+    n,err:=outgoing.Read(b)
+    if n!=0||err==nil{
+        t.Fatal("scoped bytes escaped through bypassed raw TCP writer")
+    }
+}
+
+func TestExperimentalUnsafeScopedWriterRejectedBeforeRawSplice(t *testing.T){
+    for _,variant:=range []string{"wrong-direction","missing-meter"}{
+        t.Run(variant,func(t *testing.T){
+            incoming,readerConn:=xmeshSpliceTCP(t)
+            outgoing,writerConn:=xmeshSpliceTCP(t)
+            defer incoming.Close()
+            defer readerConn.Close()
+            defer outgoing.Close()
+            defer writerConn.Close()
+            ctx,timer,done:=xmeshSpliceContext()
+            defer done()
+            direction:="downlink"
+            var counter *xmeshSpliceCounter=&xmeshSpliceCounter{}
+            if variant=="wrong-direction"{direction="uplink"}
+            if variant=="missing-meter"{counter=nil}
+            var c interface{Value()int64;Set(int64)int64;Add(int64)int64}
+            if counter!=nil{c=counter}
+            writer:=&dispatcher.SizeStatWriter{
+                Counter:c,Writer:&xmeshSpliceSink{},
+                ExperimentalEmail:"xmesh-u101--vless-main",
+                ExperimentalDirection:direction,
+            }
+            err:=CopyRawConnIfExist(ctx,readerConn,writerConn,writer,timer,nil)
+            if err==nil{t.Fatal("unsafe scoped raw writer was accepted")}
+        })
+    }
+}
+
+func TestExperimentalNonScopedTCPStillRetainsOriginalRawSplice(t *testing.T){
+    incoming,readerConn:=xmeshSpliceTCP(t)
+    outgoing,writerConn:=xmeshSpliceTCP(t)
+    defer incoming.Close()
+    defer readerConn.Close()
+    defer outgoing.Close()
+    defer writerConn.Close()
+    ctx,timer,done:=xmeshSpliceContext()
+    defer done()
+    payload:=[]byte("non-user management route keeps Xray original TCP fastpath")
+    sent:=xmeshSendAndClose(t,incoming,payload)
+    if err:=CopyRawConnIfExist(ctx,readerConn,writerConn,buf.Discard,timer,nil);err!=nil &&
+        !errors.Is(err,io.EOF) {
+        t.Fatalf("unrelated raw TCP route regressed: %v",err)
+    }
+    if err:=<-sent;err!=nil{t.Fatal(err)}
+    if err:=outgoing.SetReadDeadline(time.Now().Add(2*time.Second));err!=nil{t.Fatal(err)}
+    got:=make([]byte,len(payload))
+    if _,err:=io.ReadFull(outgoing,got);err!=nil{t.Fatalf("raw splice did not deliver: %v",err)}
+    if !bytes.Equal(got,payload){t.Fatal("management route changed raw TCP bytes")}
+}
