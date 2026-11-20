@@ -32,6 +32,14 @@ if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
     echo "Agent 6.0.25 WAL rehearsal requires explicit staging and an exact Nexus revision." >&2; exit 2
   fi
 fi
+if [[ "$WAL_STAGE_AGENT" == 1 ]];then
+  for path in /usr/local/sbin/xmesh-node-control /etc/systemd/system/xmesh-node-control.{service,timer};do
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+      echo "WAL staging requires a fresh test node without an existing control worker." >&2; exit 2
+    }
+  done
+fi
+
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo "strict-PQ product client missing" >&2; exit 1; }
 "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null || {
@@ -86,11 +94,13 @@ fetch_install(){
   trap - RETURN
 }
 fetch_install node-metrics-agent.sh /usr/local/sbin/xmesh-node-metrics 0700
-fetch_install node-control-agent.sh /usr/local/sbin/xmesh-node-control 0700
 fetch_install xray-stats-collector.py /usr/local/libexec/xmesh-xray-stats-collector.py 0700
 
 grep -Fq '/api/v1/metrics/ingest' /usr/local/sbin/xmesh-node-metrics || { echo "invalid metrics worker" >&2; exit 1; }
-grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  fetch_install node-control-agent.sh /usr/local/sbin/xmesh-node-control 0700
+  grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
+fi
 
 install -d -o root -g root -m 0700 /etc/xmesh-node-metrics /var/lib/xmesh-node-metrics /var/lib/xmesh-node-control /var/lib/xmesh-xray-sync
 cat > /etc/xmesh-node-metrics.env <<EOF
@@ -206,6 +216,7 @@ Unit=xmesh-node-metrics.service
 WantedBy=timers.target
 EOF
 
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
 cat > /etc/systemd/system/xmesh-node-control.service <<EOF
 [Unit]
 Description=XMesh v6 control over strict-PQ product transport
@@ -215,8 +226,6 @@ ConditionPathExists=/var/lib/xmesh-agent/product/active.json
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/xmesh-node-metrics.env
-EnvironmentFile=-/etc/xmesh-quota-wal.env
-Environment="XMESH_QUOTA_V2_WAL_STAGE_AGENT=$WAL_STAGE_AGENT"
 Environment="PATH=$STRICT_PATH"
 ExecStart=/usr/local/sbin/xmesh-node-control
 User=root
@@ -247,6 +256,8 @@ Unit=xmesh-node-control.service
 [Install]
 WantedBy=timers.target
 EOF
+
+fi
 
 cat > /etc/systemd/system/xmesh-node-user-meter.service <<'EOF'
 [Unit]
@@ -297,15 +308,19 @@ systemctl daemon-reload
 OPERATIONAL_TIMERS=(
   xmesh-xray-sync.timer
   xmesh-node-metrics.timer
-  xmesh-node-control.timer
   xmesh-node-user-meter.timer
 )
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  OPERATIONAL_TIMERS+=(xmesh-node-control.timer)
+fi
 systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null
 
 # Heartbeat/metrics are independent of whether the very first Xray policy can
 # be applied. Start them now so Nexus can keep observing the enrolled node.
 systemctl start xmesh-node-metrics.service || true
-systemctl start xmesh-node-control.service || true
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  systemctl start xmesh-node-control.service || true
+fi
 
 # First reconciliation is synchronous. If there is no profile yet it exits
 # cleanly while leaving Xray stopped. On any other failure arm the timers before
