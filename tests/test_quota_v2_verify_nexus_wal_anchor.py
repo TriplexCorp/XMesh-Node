@@ -168,7 +168,7 @@ class NexusExternalWalAnchorTests(unittest.TestCase):
             ("inventorySha256","f"*64),
             ("inventoryTailDigest","f"*64),
             ("originalNodeWitnessSha256","f"*64),
-            ("oldContainerId","a"*64),
+            ("oldContainerId","b"*64),
             ("oldStartedAt","2026-11-20T00:00:00Z"),
             ("schemaVersion",2),
         ):
