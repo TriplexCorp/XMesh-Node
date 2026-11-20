@@ -77,8 +77,16 @@ func configureObservedCheckpoint(directory string) error {
     }
     processID,err:=currentRuntimeIdentity()
     if err!=nil{return err}
-    // A recovered durable fence must be installed before Xray admits users.
+    // Every fsynced historic byte-intent file is inspected BEFORE any new
+    // session is admitted; a torn tail or symlink fails the whole runtime.
+    // This does not restore a previous process's in-memory StatsService:
+    // the ledger supplies a conservative floor, not a settled final meter.
+    if err:=verifyMeterJournalDirectory(directory);err!=nil{return err}
     if err:=restoreDurableFences(directory);err!=nil{return err}
+    gate.Lock()
+    gate.runtimeID=processID
+    gate.meterTails=map[string]durableMeterTail{}
+    gate.Unlock()
     observed.Lock()
     defer observed.Unlock()
     observed.directory = directory
@@ -358,6 +366,13 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     // Re-enumerate before publication to reject any discovered extra alias.
     if err:=verifyObservedCounterRegistry(observed.manager,email,seenEmails);err!=nil {
         return empty,err
+    }
+    // Every observed byte must have had a persisted, monotonic, exact
+    // source/direction intent BEFORE the transport was allowed to send.
+    // An earlier process's recorded floor is not silently attributed to
+    // this new runtime. This is a conservative nonterminal sanity check.
+    if err:=assertMeterLedgerMatchesCounters(seenEmails,read);err!=nil {
+        return empty,fmt.Errorf("cannot reconcile Xray StatsService to fsynced metered intents: %w",err)
     }
     record:=observedCheckpoint{
         checkpointScope:scope,
