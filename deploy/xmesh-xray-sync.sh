@@ -78,6 +78,25 @@ case "$REVOCATION_STATUS" in
  clear) ;;
  *) echo "Invalid quota-v2 denial status" >&2;exit 1 ;;
 esac
+# The staged WAL gate qualifies an existing WAL-capable runtime before any
+# desired policy is fetched or applied. The EXIT trap enforces physical cutoff.
+WAL_RECONCILE="${XMESH_QUOTA_V2_WAL_RECONCILE:-0}"
+case "$WAL_RECONCILE" in
+ 1)
+  if [[ "$REVOCATION_FAIL_CLOSED" == true ]];then
+   echo "Pending revocation prevents staged WAL reconciliation." >&2;exit 1
+  fi
+  if ! docker inspect -f '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' xmesh-managed-xray |
+       grep -qx 'true no';then
+   echo "Staged WAL reconciliation requires a running managed Xray with restart disabled." >&2;exit 1
+  fi
+  timeout 100s /usr/local/sbin/xmesh-quota-wal sync --panel "$XMESH_API_URL" --node-id "$XMESH_NODE_ID" || {
+   echo "External WAL continuity could not be verified." >&2;exit 1
+  }
+  ;;
+ 0) ;;
+ *) echo "Invalid WAL reconciliation mode." >&2;exit 1 ;;
+esac
 # The signed desired-config request carries the authoritative local guard
 # journal. Only the root-owned, already-persisted totals may become quota-v2
 # acknowledgements; an absent ledger is valid only for first enrollment.
@@ -489,7 +508,8 @@ PYPIN
  )" || { echo "Invalid immutable Xray release pin" >&2;exit 1; }
  docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "Pinned Xray image missing locally; refusing tag drift" >&2;exit 1; }
 fi
-if [[ "$OFFLINE_POLICY" == true ]];then
+if [[ "$WAL_RECONCILE" == 1 || "$OFFLINE_POLICY" == true ]];then
+ # A staged WAL runtime or disconnected node requires its current local image.
  # A disconnected node must never download or switch to a different Xray image.
  # Reconcile cached authorizations using the exact locally installed image.
  IMAGE="$(docker inspect -f '{{.Image}}' xmesh-managed-xray 2>/dev/null)" || {
@@ -737,6 +757,10 @@ if [[ "$NEW_HASH" == "$OLD_HASH" && ! -f "$STATE/geo-changed" && "$TLS_MOUNT_OK"
 fi
  echo "Xray configuration unchanged, container healthy, router reconciled."
  exit 0
+fi
+if [[ "$WAL_RECONCILE" == 1 ]];then
+ echo "Staged WAL reconciliation requires separate qualification of any replacement Xray." >&2
+ exit 1
 fi
 # Never interrupt unrelated processes on the requested local port.
 if ! docker inspect xmesh-managed-xray >/dev/null 2>&1; then

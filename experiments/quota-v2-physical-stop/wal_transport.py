@@ -16,6 +16,7 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "xray-dataplane-fence"))
 
 import journal_integrity as journal
+import meter_inventory_audit as registry
 import sign_observation as observed
 import verify_nexus_wal_anchor as verifier
 import witness_inventory as producer
@@ -126,6 +127,7 @@ def run(action, panel, node_id):
     if os.geteuid() != 0:
         raise ValueError("WAL evidence requires the installed root-owned agent")
     os.umask(0o077)
+    runtime, local = _bound_journal()
     with tempfile.TemporaryDirectory(prefix="xmesh-wal-transport-") as temp:
         root = Path(temp)
         evidence = [PRODUCT, "wal-evidence", "--panel", panel, "--node-id", str(node_id)]
@@ -135,7 +137,6 @@ def run(action, panel, node_id):
         node_pub, panel_pub = root / "node.pem", root / "nexus.pem"
         _write_public(identity["publicKey"], node_pub)
         _write_public(_panel_pin(), panel_pub)
-        runtime, local = _bound_journal()
 
         def product_sign(_, message):
             payload = root / "witness.json"
@@ -147,29 +148,54 @@ def run(action, panel, node_id):
                 raise ValueError("active product key changed while signing")
             return reply["signature"]
 
-        expected_receipt = None
-        if action == "store":
-            witness, inventory = producer.produce_witness(
-                node_id, runtime, local, None, node_pub, sign=product_sign)
-            if len(inventory) > INDEX_LIMIT:
-                raise ValueError("full WAL index exceeds the XSP/2 transfer cap")
-            stored = observed.strict_json(_post(root, {
-                "operation": "store", "nodeId": node_id,
-                "witness": base64.b64encode(witness).decode("ascii"),
-                "inventory": base64.b64encode(inventory).decode("ascii"),
-            }))
-            if not isinstance(stored, dict) or set(stored) != {"receipt"}:
-                raise ValueError("invalid WAL store acknowledgment")
-            expected_receipt = _b64(stored["receipt"], 4096)
+        return sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub,
+                               product_sign, lambda request: _post(root, request))
 
+
+def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, post):
+    def current(expected_receipt=None):
         challenge = secrets.token_hex(32)
-        response = _post(root, {"operation": "head", "nodeId": node_id, "challenge": challenge})
-        return verify_bundle(response, challenge, node_id, node_pub, panel_pub, local, expected_receipt)
+        response = post({"operation": "head", "nodeId": node_id, "challenge": challenge})
+        proof = verify_bundle(response, challenge, node_id, node_pub, panel_pub, local,
+                              expected_receipt)
+        index = _b64(observed.strict_json(response)["inventory"], INDEX_LIMIT)
+        return proof, index
+
+    prior = b""
+    if action in {"head", "sync"}:
+        proof, prior = current()
+        if action == "head":
+            return proof
+        fd = journal._validate_directory(local)
+        try:
+            local_index = registry._read_inventory(fd)
+        finally:
+            os.close(fd)
+        if local_index == prior:
+            return proof
+        if local_index is None or not local_index.startswith(prior):
+            raise ValueError("local WAL index changed after remote verification")
+
+    witness, inventory = producer.produce_witness(
+        node_id, runtime, local, None, node_pub, sign=sign)
+    if len(inventory) > INDEX_LIMIT:
+        raise ValueError("full WAL index exceeds the XSP/2 transfer cap")
+    if prior and (len(inventory) <= len(prior) or not inventory.startswith(prior)):
+        raise ValueError("local WAL snapshot no longer extends the verified remote head")
+    stored = observed.strict_json(post({
+        "operation": "store", "nodeId": node_id,
+        "witness": base64.b64encode(witness).decode("ascii"),
+        "inventory": base64.b64encode(inventory).decode("ascii"),
+    }))
+    if not isinstance(stored, dict) or set(stored) != {"receipt"}:
+        raise ValueError("invalid WAL store acknowledgment")
+    proof, _ = current(_b64(stored["receipt"], 4096))
+    return proof
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("head", "store"))
+    parser.add_argument("operation", choices=("head", "store", "sync"))
     parser.add_argument("--panel", required=True)
     parser.add_argument("--node-id", required=True, type=int)
     args = parser.parse_args()

@@ -22,6 +22,16 @@ AGENT_VERSION_FILE="$ROOT/AGENT_VERSION"
 [[ -f "$AGENT_VERSION_FILE" && ! -L "$AGENT_VERSION_FILE" ]] || { echo "AGENT_VERSION file missing" >&2; exit 1; }
 AGENT_VERSION="$(tr -d '\r\n' < "$AGENT_VERSION_FILE")"
 [[ "$AGENT_VERSION" =~ ^control-v6\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid Agent release version: $AGENT_VERSION" >&2; exit 1; }
+WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
+NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
+[[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
+  echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
+}
+if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
+  if [[ "$AGENT_VERSION" != control-v6.0.25 || "$WAL_STAGE_AGENT" != 1 || ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
+    echo "Agent 6.0.25 WAL rehearsal requires explicit staging and an exact Nexus revision." >&2; exit 2
+  fi
+fi
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo "strict-PQ product client missing" >&2; exit 1; }
 "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null || {
@@ -47,7 +57,7 @@ for helper in xmesh-policy-guard.py xmesh-policy-guard-base.py xmesh-quota-revoc
 done
 install -o root -g root -m 0700 "$ROOT/deploy/xmesh-xray-sync.sh" /usr/local/sbin/xmesh-xray-sync
 # Install the nonauthorizing WAL operator command beside its reviewed modules.
-# The normal reconciler does not enable experimental Xray WAL recovery.
+# The optional systemd environment file enables staged WAL verification.
 WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
 for family in quota-v2-physical-stop xray-dataplane-fence; do
   install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
@@ -64,10 +74,6 @@ fi
 
 # Metrics/control implementations live with Nexus. During branch integration a
 # reviewed ref may be supplied explicitly; production defaults to main.
-NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
-[[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
-  echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
-}
 RAW="https://raw.githubusercontent.com/TriplexCorp/XMesh-Nexus/$NEXUS_REF/deploy"
 fetch_install(){
   local remote="$1" target="$2" mode="$3" tmp
@@ -122,6 +128,7 @@ ConditionPathExists=/var/lib/xmesh-agent/product/active.json
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/xmesh-node-metrics.env
+EnvironmentFile=-/etc/xmesh-quota-wal.env
 Environment="PATH=$STRICT_PATH"
 ExecStart=/usr/local/sbin/xmesh-xray-sync
 User=root
@@ -208,6 +215,8 @@ ConditionPathExists=/var/lib/xmesh-agent/product/active.json
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/xmesh-node-metrics.env
+EnvironmentFile=-/etc/xmesh-quota-wal.env
+Environment="XMESH_QUOTA_V2_WAL_STAGE_AGENT=$WAL_STAGE_AGENT"
 Environment="PATH=$STRICT_PATH"
 ExecStart=/usr/local/sbin/xmesh-node-control
 User=root

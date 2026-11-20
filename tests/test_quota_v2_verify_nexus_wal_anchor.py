@@ -128,6 +128,46 @@ class NexusExternalWalAnchorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rolled back"):
             verify(raw)
 
+    def test_sync_requires_verified_existing_head_and_skips_unchanged_upload(self):
+        def reply(challenge):
+            receipt = self.signed()
+            head = self.signed({
+                "schemaVersion": 1, "kind": "xmesh.quota-v2.external-wal-head",
+                "nodeId": self.node, "challenge": challenge, **self.head,
+                "receiptSha256": hashlib.sha256(receipt).hexdigest(),
+            }, domain=wal_transport.HEAD_DOMAIN)
+            return signed.canonical({
+                name: base64.b64encode(blob).decode("ascii")
+                for name, blob in (
+                    ("receipt", receipt), ("head", head),
+                    ("witness", self.source), ("inventory", self.raw),
+                )
+            })
+
+        def call(post):
+            return wal_transport.sync_checkpoint(
+                "sync", self.node, {}, str(self.fi.directory), self.node_pub, self.pub,
+                lambda *_: self.fail("unexpected witness signing"), post,
+            )
+
+        def post(body):
+            self.assertEqual(body["operation"], "head")
+            return reply(body["challenge"])
+
+        proof = call(post)
+        self.assertTrue(proof["offhostFullBirthIndexHeadMatched"])
+        self.assertFalse(proof["canResume"])
+
+        def unavailable(body):
+            self.assertEqual(body["operation"], "head")
+            raise OSError("fixture lost connection")
+
+        with self.assertRaisesRegex(OSError, "lost connection"):
+            call(unavailable)
+        (self.fi.directory / "xmesh-meter-inventory-v1.jsonl").unlink()
+        with self.assertRaisesRegex(ValueError, "rolled back"):
+            call(post)
+
     def test_current_signed_nexus_offhost_head_verified_but_non_authorizing(self):
         receipt=self.signed()
         result=self.check(receipt)
