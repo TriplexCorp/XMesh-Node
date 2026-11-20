@@ -17,6 +17,8 @@ from pathlib import Path
 import re
 import stat
 
+import meter_inventory_audit
+
 JOURNAL_DEST = "/run/xmesh-xray-audit"
 MAX_FILE = 4096
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -156,6 +158,7 @@ def _read_meter_wal(dfd, name):
                 (before.st_dev,before.st_ino,before.st_size)):
             raise ValueError("old-Xray byte WAL changed while reading")
         previous = None
+        first_digest = None
         for line in raw[:-1].split(b"\n"):
             if not 0 < len(line) <= 1024:
                 raise ValueError("Xray WAL record is unbounded or empty")
@@ -198,6 +201,7 @@ def _read_meter_wal(dfd, name):
                     _canonical_go(baseline)).hexdigest():
                 raise ValueError("old-Xray WAL hash chain modified")
             if previous is None:
+                first_digest = record["digest"]
                 if (record["sequence"] != 1 or
                         record["previousBytes"] != 0 or
                         record["previousDigest"] != "0"*64):
@@ -211,7 +215,7 @@ def _read_meter_wal(dfd, name):
             previous = record
         if previous is None:
             raise ValueError("empty Xray byte intent WAL")
-        return previous, hashlib.sha256(raw).hexdigest()
+        return previous, hashlib.sha256(raw).hexdigest(), first_digest
     finally:
         os.close(fd)
 
@@ -251,10 +255,18 @@ def _verify_conservative_meter_wal(dfd, checkpoint):
     meters=[name for name in names if name.startswith("meter-")]
     if len(meters)>512:
         raise ValueError("unbounded Xray byte WAL inventory")
+    # Independent fsynced file inventory catches deletion of even the
+    # entire old-process WAL, which directory-only metering cannot see.
+    # Registry record and WAL first digest are both authenticated locally.
+    # The signed stop binds only this user's inventory entries: new WALs
+    # from unrelated online users do not destabilize the same-user proof.
+    indexed,verified_wals=meter_inventory_audit.verify_meter_inventory(
+        dfd,meters,_read_meter_wal,_canonical_go)
+    selected_births=[]
     for filename in meters:
         if not re.fullmatch(r"meter-[a-f0-9]{64}\.jsonl",filename):
             raise ValueError("unexpected Xray byte journal filename")
-        last,content_hash=_read_meter_wal(dfd,filename)
+        last,content_hash,first_digest=verified_wals[filename]
         email=last["email"]
         # Every historical file is integrity checked; old runtime bytes of
         # this SAME account must never disappear from a claimed current PID.
@@ -271,12 +283,14 @@ def _verify_conservative_meter_wal(dfd, checkpoint):
             raise ValueError("fsynced Xray byte WAL disagrees with observed counter")
         seen[key]=last["nextBytes"]
         included.append(filename.encode("ascii")+b":"+content_hash.encode("ascii")+b"\n")
+        selected_births.append(_canonical_go(indexed[filename]))
     for key,bytes_count in expected.items():
         if bytes_count != 0 and seen.get(key) != bytes_count:
             raise ValueError("nonzero Xray counter lacks pretransmit fsynced WAL")
         if bytes_count == 0 and key in seen:
             raise ValueError("unexpected positive precharge for zero-byte Xray meter")
-    return b"".join(included)
+    return (b"".join(included)+b"|fsynced-meter-inventory-v1|"+
+            b"".join(selected_births))
 
 
 def verify_poststop_journal(checkpoint, journal_dir, docker):
