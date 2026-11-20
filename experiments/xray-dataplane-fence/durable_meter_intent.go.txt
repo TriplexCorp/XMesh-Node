@@ -35,6 +35,7 @@ type durableMeterStep struct {
     Digest string `json:"digest"`
 }
 type durableMeterTail struct {
+    firstDigest string
     last durableMeterStep
     size int64
     dev uint64
@@ -128,6 +129,7 @@ func readMeterTail(path string) (durableMeterTail,error) {
             return tail,errors.New("ambiguous, duplicate-key or noncanonical meter WAL")
         }
         if err=verifyMeterStep(step,previous);err!=nil{return tail,err}
+        if previous==nil{tail.firstDigest=step.Digest}
         last:=step
         previous=&last
     }
@@ -162,7 +164,10 @@ func verifyMeterJournalDirectory(dir string) error {
             return fmt.Errorf("invalid old Xray meter journal %q: %w",name,err)
         }
     }
-    return nil
+    // Every byte-bearing WAL must have a separate, fsynced, hash-chained
+    // birth record. A missing old file is unsafe even though a plain
+    // directory listing would otherwise silently forget it.
+    return verifyMeterInventory(dir)
 }
 
 // Caller holds gate.Mutex. The old atomic StatsService value is checked
@@ -234,8 +239,16 @@ func commitMeterIntentBeforeMutation(email,direction string,delta,current int64)
         if err=experimentalMeterDirectorySync(gate.journalDir);err!=nil {
             return fmt.Errorf("cannot persist first meter filename: %w",err)
         }
+        // A network write is not allowed until BOTH its first WAL record
+        // and its independent WAL inventory anchor have reached fsync.
+        if err=appendMeterInventory(gate.journalDir,step);err!=nil {
+            return fmt.Errorf("cannot persist first byte WAL inventory: %w",err)
+        }
     }
+    firstDigest:=tail.firstDigest
+    if created{firstDigest=step.Digest}
     gate.meterTails[path]=durableMeterTail{
+        firstDigest:firstDigest,
         last:step,size:st.Size+int64(len(data)),
         dev:uint64(st.Dev),ino:st.Ino,
     }
