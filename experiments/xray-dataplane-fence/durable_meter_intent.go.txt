@@ -1,0 +1,266 @@
+// CI-ONLY conservative Xray byte-intent WAL. NOT A FINAL METER OR REFUND.
+// Every trusted per-user Count.Add is fsynced BEFORE raw atomic mutation
+// and before its enclosing SizeStatWriter hands bytes to the network.
+// Crashes can overcharge an interrupted write, never lose a committed
+// write in the kernel while omitting its precharge journal intent.
+// This instrumented code is NOT enabled in a shipping Xray binary.
+package xmeshdrain
+
+import (
+    "bytes"
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "os"
+    "path/filepath"
+    "strings"
+    "syscall"
+)
+
+const meterLedgerMaxBytes = int64(64 << 20)
+const meterLedgerMaxLine = 1024
+
+type durableMeterStep struct {
+    SchemaVersion int `json:"schemaVersion"`
+    RuntimeID string `json:"runtimeId"`
+    Email string `json:"email"`
+    Direction string `json:"direction"`
+    Sequence uint64 `json:"sequence"`
+    PreviousBytes uint64 `json:"previousBytes"`
+    NextBytes uint64 `json:"nextBytes"`
+    PreviousDigest string `json:"previousDigest"`
+    Digest string `json:"digest"`
+}
+type durableMeterTail struct {
+    last durableMeterStep
+    size int64
+    dev uint64
+    ino uint64
+}
+
+var experimentalMeterFileSync = func(f *os.File) error{return f.Sync()}
+var experimentalMeterDirectorySync = syncFenceDirectory
+
+func meterLedgerPath(dir,runID,email,direction string) string {
+    hash:=sha256.Sum256([]byte(runID+"\x00"+email+"\x00"+direction))
+    return filepath.Join(dir,"meter-"+hex.EncodeToString(hash[:])+".jsonl")
+}
+func meterStepDigest(step durableMeterStep) (string,error) {
+    step.Digest=""
+    payload,err:=json.Marshal(step)
+    if err!=nil{return "",err}
+    digest:=sha256.Sum256(append(payload,'\n'))
+    return hex.EncodeToString(digest[:]),nil
+}
+func verifyMeterStep(step durableMeterStep,previous *durableMeterStep) error {
+    if step.SchemaVersion!=1 || len(step.RuntimeID)!=64 ||
+        len(step.Email)==0 || len(step.Email)>128 ||
+        strings.ContainsAny(step.Email,">\x00\r\n") ||
+        (step.Direction!="uplink" && step.Direction!="downlink") ||
+        step.NextBytes<=step.PreviousBytes ||
+        step.NextBytes>uint64(1<<63-1) {
+        return errors.New("unsafe durable meter intent scope or bytes")
+    }
+    for _,c:=range step.RuntimeID {
+        if !(c>='0'&&c<='9'||c>='a'&&c<='f'){
+            return errors.New("invalid durable meter runtime fingerprint")
+        }
+    }
+    if previous==nil {
+        if step.Sequence!=1 || step.PreviousBytes!=0 ||
+            step.PreviousDigest!=strings.Repeat("0",64) {
+            return errors.New("meter intent ledger first entry not anchored")
+        }
+    }else if step.Sequence!=previous.Sequence+1 ||
+        step.Sequence==0 || step.PreviousBytes!=previous.NextBytes ||
+        step.PreviousDigest!=previous.Digest ||
+        step.Email!=previous.Email || step.Direction!=previous.Direction ||
+        step.RuntimeID!=previous.RuntimeID {
+        return errors.New("meter intent ledger gap or nonmonotonic replay")
+    }
+    expected,err:=meterStepDigest(step)
+    if err!=nil{return err}
+    if expected!=step.Digest{return errors.New("meter intent hash chain differs")}
+    return nil
+}
+
+// Never follow symlinks or accept a second hardlink. Even privileged local
+// same-UID file replacement is caught by per-write dev+inode+size checks.
+func openMeterFile(path string,flags int) (*os.File,syscall.Stat_t,error) {
+    var st syscall.Stat_t
+    fd,err:=syscall.Open(path,flags|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0600)
+    if err!=nil{return nil,st,err}
+    file:=os.NewFile(uintptr(fd),path)
+    if err=syscall.Fstat(fd,&st);err!=nil{_ = file.Close();return nil,st,err}
+    if st.Mode&syscall.S_IFMT!=syscall.S_IFREG ||
+       st.Mode&00777!=0600 || st.Uid!=uint32(os.Geteuid()) ||
+       st.Nlink!=1 || st.Size<0 || st.Size>meterLedgerMaxBytes {
+       _ = file.Close()
+       return nil,st,errors.New("untrusted private meter ledger file inode")
+    }
+    return file,st,nil
+}
+func readMeterTail(path string) (durableMeterTail,error) {
+    var tail durableMeterTail
+    file,st,err:=openMeterFile(path,syscall.O_RDONLY)
+    if err!=nil{return tail,err}
+    defer file.Close()
+    if st.Size==0{return tail,errors.New("empty or crash-truncated meter WAL")}
+    raw,err:=io.ReadAll(io.LimitReader(file,meterLedgerMaxBytes+1))
+    if err!=nil{return tail,err}
+    if int64(len(raw))!=st.Size || !bytes.HasSuffix(raw,[]byte{'\n'}) {
+        return tail,errors.New("torn meter WAL tail")
+    }
+    lines:=bytes.Split(raw[:len(raw)-1],[]byte{'\n'})
+    if len(lines)==0{return tail,errors.New("missing metered WAL entries")}
+    var previous *durableMeterStep
+    for _,line:=range lines {
+        if len(line)==0 || len(line)>meterLedgerMaxLine {
+            return tail,errors.New("invalid meter WAL line length")
+        }
+        var step durableMeterStep
+        if err=json.Unmarshal(line,&step);err!=nil{return tail,err}
+        canonical,err:=json.Marshal(step)
+        if err!=nil || !bytes.Equal(canonical,line) {
+            return tail,errors.New("ambiguous, duplicate-key or noncanonical meter WAL")
+        }
+        if err=verifyMeterStep(step,previous);err!=nil{return tail,err}
+        last:=step
+        previous=&last
+    }
+    if previous==nil{return tail,errors.New("empty meter WAL chain")}
+    want:=meterLedgerPath(filepath.Dir(path),previous.RuntimeID,previous.Email,previous.Direction)
+    if want!=path{return tail,errors.New("meter WAL hash filename conflicts with record")}
+    after,err:=file.Stat()
+    if err!=nil{return tail,err}
+    sys,ok:=after.Sys().(*syscall.Stat_t)
+    if !ok || sys.Dev!=st.Dev || sys.Ino!=st.Ino || sys.Size!=st.Size {
+        return tail,errors.New("meter WAL changed during verification")
+    }
+    tail.last=*previous
+    tail.size=st.Size
+    tail.dev=uint64(st.Dev)
+    tail.ino=st.Ino
+    return tail,nil
+}
+
+// Check every previously stored runtime, including processes already dead.
+// A malformed old file or orphan/symlink cannot silently fall off the audit.
+func verifyMeterJournalDirectory(dir string) error {
+    entries,err:=os.ReadDir(dir)
+    if err!=nil{return err}
+    for _,entry:=range entries {
+        name:=entry.Name()
+        if !strings.HasPrefix(name,"meter-"){continue}
+        if !strings.HasSuffix(name,".jsonl"){
+            return fmt.Errorf("invalid Xray meter journal filename %q",name)
+        }
+        if _,err:=readMeterTail(filepath.Join(dir,name));err!=nil{
+            return fmt.Errorf("invalid old Xray meter journal %q: %w",name,err)
+        }
+    }
+    return nil
+}
+
+// Caller holds gate.Mutex. The old atomic StatsService value is checked
+// against the durable previous value, not treated as authoritative final
+// bytes. Journal fsync + directory fsync precede Counter.Add and delivery.
+func commitMeterIntentBeforeMutation(email,direction string,delta,current int64) error {
+    if gate.journalDir=="" || gate.runtimeID=="" || delta<=0 || current<0 {
+        return errors.New("Xray metered intent runtime not configured")
+    }
+    if delta>int64(1<<63-1)-current{return errors.New("metered intent overflow")}
+    path:=meterLedgerPath(gate.journalDir,gate.runtimeID,email,direction)
+    if gate.meterTails==nil{gate.meterTails=map[string]durableMeterTail{}}
+    tail,cached:=gate.meterTails[path]
+    created:=false
+    if !cached {
+        loaded,err:=readMeterTail(path)
+        if err==nil {
+            tail=loaded
+        }else if !os.IsNotExist(err){
+            return fmt.Errorf("unsafe existing Xray meter ledger: %w",err)
+        }else{created=true}
+    }
+    if created {
+        if current!=0 {return errors.New("Xray counter lacks required durable first byte intent")}
+    } else if tail.last.NextBytes!=uint64(current) {
+        return errors.New("Xray raw StatsService counter rolled back behind fsynced WAL")
+    }
+    var prior uint64
+    var seq uint64=1
+    prevDigest:=strings.Repeat("0",64)
+    if !created {
+        prior=tail.last.NextBytes
+        seq=tail.last.Sequence+1
+        prevDigest=tail.last.Digest
+    }
+    if seq==0{return errors.New("meter WAL sequence exhausted")}
+    step:=durableMeterStep{
+        SchemaVersion:1,RuntimeID:gate.runtimeID,
+        Email:email,Direction:direction,
+        Sequence:seq,PreviousBytes:prior,NextBytes:uint64(current+delta),
+        PreviousDigest:prevDigest,
+    }
+    digest,err:=meterStepDigest(step)
+    if err!=nil{return err}
+    step.Digest=digest
+    data,err:=json.Marshal(step)
+    if err!=nil{return err}
+    data=append(data,'\n')
+    if len(data)>meterLedgerMaxLine || tail.size+int64(len(data))>meterLedgerMaxBytes {
+        return errors.New("meter WAL capacity exhausted; fail closed")
+    }
+    flags:=syscall.O_WRONLY|syscall.O_APPEND
+    if created{flags|=syscall.O_CREAT|syscall.O_EXCL}
+    file,st,err:=openMeterFile(path,flags)
+    if err!=nil{return err}
+    if (!created && (uint64(st.Dev)!=tail.dev || st.Ino!=tail.ino ||
+                      st.Size!=tail.size)) ||
+       (created && st.Size!=0) {
+        _=file.Close()
+        return errors.New("Xray meter WAL inode replaced or size changed")
+    }
+    count,writeErr:=file.Write(data)
+    if writeErr==nil && count!=len(data){writeErr=io.ErrShortWrite}
+    if writeErr==nil{writeErr=experimentalMeterFileSync(file)}
+    closeErr:=file.Close()
+    if writeErr!=nil{return fmt.Errorf("cannot fsync metered byte intent: %w",writeErr)}
+    if closeErr!=nil{return closeErr}
+    if created {
+        if err=experimentalMeterDirectorySync(gate.journalDir);err!=nil {
+            return fmt.Errorf("cannot persist first meter filename: %w",err)
+        }
+    }
+    gate.meterTails[path]=durableMeterTail{
+        last:step,size:st.Size+int64(len(data)),
+        dev:uint64(st.Dev),ino:st.Ino,
+    }
+    return nil
+}
+
+func assertMeterLedgerMatchesCounters(aliases []string, read func(string,string)(uint64,error)) error {
+    if gate.runtimeID=="" || gate.journalDir=="" {
+        return errors.New("meter WAL not configured")
+    }
+    for _,alias:=range aliases {
+        for _,direction:=range []string{"uplink","downlink"} {
+            counter,err:=read(alias,direction)
+            if err!=nil{return err}
+            path:=meterLedgerPath(gate.journalDir,gate.runtimeID,alias,direction)
+            tail,err:=readMeterTail(path)
+            if os.IsNotExist(err) {
+                if counter==0{continue}
+                return errors.New("nonzero Xray StatsService counter without a durable byte intent")
+            }
+            if err!=nil{return err}
+            if tail.last.NextBytes!=counter {
+                return fmt.Errorf("fsynced byte-intent floor differs from Xray counter for %s/%s",alias,direction)
+            }
+        }
+    }
+    return nil
+}
