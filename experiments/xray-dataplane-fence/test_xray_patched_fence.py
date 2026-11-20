@@ -33,8 +33,8 @@ EMAIL_A_UNSAFE = "xmesh-u101--vless-unsafe"
 EMAIL_A_USER_KEY = "xmesh-u101"
 EMAIL_B = "xmesh-u102--vless-share"
 # Run a real patched-Xray process per transport. Production remains untouched.
-TRANSPORTS = ("tcp", "ws", "xhttp", "xhttp-stream-up",
-              "xhttp-stream-one", "mux-tcp", "tls-vision")
+TRANSPORTS = ("tls-vision", "tcp", "ws", "xhttp", "xhttp-stream-up",
+              "xhttp-stream-one", "mux-tcp")
 
 
 def make_stream_settings(transport):
@@ -381,7 +381,12 @@ def run(xray, transport, *, denied_direction=None):
         server_json.write_text(json.dumps(server_config),encoding="utf-8")
         client_json.write_text(json.dumps(client_config),encoding="utf-8")
         for config in (server_json,client_json):
-            command(xray,"run","-test","-config",str(config))
+            tested=command(xray,"run","-test","-config",str(config),check=False)
+            if tested.returncode:
+                raise AssertionError(
+                    f"Disposable {transport} {config.name} Xray config rejected:"
+                    f" exit={tested.returncode}, stdout={tested.stdout[-2500:]!r},"
+                    f" stderr={tested.stderr[-2500:]!r}")
         log_a=(root/"server.log").open("w+")
         log_b=(root/"client.log").open("w+")
         server=None
