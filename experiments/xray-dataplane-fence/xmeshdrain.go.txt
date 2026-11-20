@@ -316,7 +316,9 @@ func MayDeliverMeterRead(email string) bool {
     gate.Lock()
     defer gate.Unlock()
     u:=gate.users[canonicalMeterUser(email)]
-    return u!=nil && !u.fenced && !u.lateCounterMutation
+    // A pre-fence counter discontinuity poisons settlement/observation,
+// but does not itself revoke an unrelated, still-authorized live stream.
+    return u!=nil && !u.fenced
 }
 
 // Caller must hold gate.Mutex. Do not report a drained user while any
