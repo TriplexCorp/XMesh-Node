@@ -296,6 +296,70 @@ func TestSelectiveFenceAndRepeatNeverRefund(t *testing.T) {
     RouteFinish(ctx(14))
 }
 
+// A transport cancellation may finish its worker and route callbacks before
+// the underlying Close returns. We must not claim a completed stop during that
+// gap, even if the last logical session and all meter calls are gone.
+func TestFenceWaitsForTransportCancellationCallback(t *testing.T) {
+    resetGate()
+    sessionCtx:=ctx(921)
+    stopStarted:=make(chan struct{})
+    releaseStop:=make(chan struct{})
+    var releaseOnce sync.Once
+    unblock:=func(){releaseOnce.Do(func(){close(releaseStop)})}
+    defer unblock()
+    if err:=Register(sessionCtx,"slow-close",func(){
+        Finish(sessionCtx)
+        RouteFinish(sessionCtx)
+        close(stopStarted)
+        <-releaseStop
+    });err!=nil{t.Fatal(err)}
+    type response struct { snapshot result; err error }
+    completed:=make(chan response,1)
+    deadline,cancel:=context.WithTimeout(context.Background(),150*time.Millisecond)
+    defer cancel()
+    go func(){
+        snapshot,err:=fence(deadline,"slow-close")
+        completed<-response{snapshot,err}
+    }()
+    select {
+    case <-stopStarted:
+    case <-time.After(2*time.Second):
+        t.Fatal("stop callback did not execute")
+    }
+    gate.Lock()
+    u:=gate.users["slow-close"]
+    active,stopping,closed:=len(u.active),u.stopping,u.closed
+    gate.Unlock()
+    if active!=0 || stopping!=1 || closed {
+        t.Fatalf("stop barrier ignored unfinished callback: active=%d stopping=%d closed=%v",
+            active,stopping,closed)
+    }
+    select {
+    case got:=<-completed:
+        if !errors.Is(got.err,context.DeadlineExceeded) || got.snapshot.Drained ||
+            got.snapshot.FinalMeterVerified || got.snapshot.Refundable {
+            t.Fatalf("unfinished close produced acknowledged drain: %+v",got)
+        }
+    case <-time.After(2*time.Second):
+        t.Fatal("unfinished callback did not time out")
+    }
+    if err:=Register(ctx(922),"slow-close",func(){});!errors.Is(err,errFenced) {
+        t.Fatalf("timeout reopened user admission: %v",err)
+    }
+    unblock()
+    finalCtx,finalCancel:=context.WithTimeout(context.Background(),2*time.Second)
+    defer finalCancel()
+    done,err:=fence(finalCtx,"slow-close")
+    if err!=nil || !done.Drained || done.Active!=0 ||
+        done.FinalMeterVerified || done.Refundable {
+        t.Fatalf("callback completion was not idempotently recovered: %+v %v",done,err)
+    }
+    gate.Lock()
+    remaining:=gate.users["slow-close"].stopping
+    gate.Unlock()
+    if remaining!=0 {t.Fatalf("stop callbacks leaked: %d",remaining)}
+}
+
 func TestFenceTimeoutKeepsAdmissionClosed(t *testing.T) {
     resetGate()
     s := ctx(15)
