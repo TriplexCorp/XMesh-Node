@@ -197,12 +197,12 @@ def run(xray):
                                      stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
             wait_replaced_socket(control,server2)
             retry_socks_echo(socks_a,echo_port,False)
-            # C used bytes in the second Xray process. At the third runtime
-            # its previous pretransmit WAL is likewise unresolved. A/B/C
-            # all remain denied; D has never transmitted and may enter.
+            # B was never revoked, but it transmitted bytes in the OLD
+            # incarnation. Its reset StatsService is not a valid rollover.
+            # Both A and B remain denied until Node has an externally
+            # verified conservative carryforward. Untouched C still works.
             retry_socks_echo(socks_b,echo_port,False)
-            retry_socks_echo(socks_c,echo_port,False)
-            retry_socks_echo(socks_d,echo_port,True)
+            retry_socks_echo(socks_c,echo_port,True)
             refusal=request_fence(control,EMAIL_A,revocation,expected_status=409)
             assert b"checkpoint" in refusal,refusal
             other=request_fence(control,EMAIL_A,str(uuid.uuid4()),expected_status=409)
@@ -259,12 +259,12 @@ def run(xray):
             wait_replaced_socket(control,server5)
             assert not pending.exists(), "Recovered linked pending file was not reconciled"
             retry_socks_echo(socks_a,echo_port,False)
-            # B was never revoked, but it transmitted bytes in the OLD
-            # incarnation. Its reset StatsService is not a valid rollover.
-            # Both A and B remain denied until Node has an externally
-            # verified conservative carryforward. Untouched C still works.
+            # C used bytes in the second Xray process. At the third runtime
+            # its previous pretransmit WAL is likewise unresolved. A/B/C
+            # all remain denied; D has never transmitted and may enter.
             retry_socks_echo(socks_b,echo_port,False)
-            retry_socks_echo(socks_c,echo_port,True)
+            retry_socks_echo(socks_c,echo_port,False)
+            retry_socks_echo(socks_d,echo_port,True)
             assert json.loads(marker.read_text())==persisted
             assert not observed.exists()
             report={
