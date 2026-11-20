@@ -236,7 +236,7 @@ class ConservativeRolloverProposalTests(unittest.TestCase):
                     return signature
                 try:
                     with patch.object(rollover.observed,"sign_bytes",side_effect=after_sign):
-                        with self.assertRaisesRegex(ValueError,"replaced|changed|differs|meter"):
+                        with self.assertRaisesRegex(ValueError,"replaced|changed|differs|meter|WAL"):
                             self.prepare(docker=after)
                 finally:
                     path.write_bytes(raw)
