@@ -9,12 +9,13 @@ state=/var/lib/xmesh-xray-sync
 settings=/etc/xmesh-node-metrics.env
 identity=/etc/xmesh-node-metrics
 marker=/usr/local/libexec/xmesh-quota-revocation-marker.py
+guard=/usr/local/libexec/xmesh-policy-guard-base.py
 worker=/usr/local/sbin/xmesh-quota-wal
 helpers=/usr/local/libexec/xmesh-quota-wal
 name=xmesh-managed-xray
 docker info >/dev/null
 if docker inspect "$name" >/dev/null 2>&1;then exit 2;fi
-for path in "$state" "$settings" "$identity" "$marker" "$worker" "$helpers";do
+for path in "$state" "$settings" "$identity" "$marker" "$guard" "$worker" "$helpers";do
     [[ ! -e "$path" && ! -L "$path" ]] || exit 2
 done
 scratch="$(mktemp -d)"
@@ -27,11 +28,12 @@ cleanup(){
         docker logs --tail 20 "$name" >&2 || true
     fi
     docker rm -f "$name" >/dev/null 2>&1 || true
-    rm -rf -- "$scratch" "$state" "$settings" "$identity" "$marker" "$worker" "$helpers"
+    rm -rf -- "$scratch" "$state" "$settings" "$identity" "$marker" "$guard" "$worker" "$helpers"
 }
 trap cleanup EXIT
 install -d -m 0700 "$identity" "$helpers/quota-v2-physical-stop" "$helpers/xray-dataplane-fence"
 install -D -m 0700 "$root/deploy/xmesh-quota-revocation-marker.py" "$marker"
+install -D -m 0700 "$root/deploy/xmesh-policy-guard-base.py" "$guard"
 for file in quota-v2-physical-stop/{wal_transport,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor};do
     install -m 0700 "$root/experiments/$file.py" "$helpers/$file.py"
 done
