@@ -221,8 +221,11 @@ func RequireMeteringCoverage(uplinkEnabled, downlinkEnabled bool, counterReady f
     return nil
 }
 
-// Positive user-byte mutations MUST originate in the exact metered inbound
-// alias+direction. An out-of-band counter Add (even before revocation), a
+// Positive user-byte mutations MUST originate from the explicit metered
+// counter method AND match the exact in-flight inbound alias+direction.
+// A direct Counter.Add() is never authorized merely because another goroutine
+// is currently writing that same alias. The trusted provenance bit is set
+// only inside the experimentally instrumented StatsService metered method. An out-of-band counter Add (even before revocation), a
 // raw Set/negative Add, and a post-fence mutation all poison future settlement
 // BEFORE the value changes. This is a crash-durable NONFINAL taint, not proof
 // that all Xray transports or kernel queues have stopped.
@@ -237,7 +240,7 @@ func meterDirection(directions []string, fallback string) string {
     if len(directions)==1 {return directions[0]}
     return fallback // Only legacy unit-fixture callers omit an explicit direction.
 }
-func auditRawCounter(name string, preFenceUnsafe bool, overflow func() bool, mutate func() int64) int64 {
+func auditRawCounter(name string, preFenceUnsafe bool, trustedMeterOrigin bool, overflow func() bool, mutate func() int64) int64 {
     if !enabled {return mutate()}
     raw,ok:=strings.CutPrefix(name,"user>>>")
     if !ok {return mutate()}
@@ -249,7 +252,7 @@ func auditRawCounter(name string, preFenceUnsafe bool, overflow func() bool, mut
     defer gate.Unlock()
     u:=ensureUser(canonicalMeterUser(email))
     exceeds:=overflow!=nil && overflow()
-    if u.fenced || preFenceUnsafe || exceeds || u.meterOps[name]<=0 {
+    if u.fenced || preFenceUnsafe || exceeds || !trustedMeterOrigin || u.meterOps[name]<=0 {
         u.lateCounterMutation=true
         if err:=commitDurableCounterTaint(gate.journalDir,canonicalMeterUser(email));err!=nil {
             panic(fmt.Sprintf("experimental Xray counter taint cannot be persisted; deny: %v",err))
@@ -263,13 +266,13 @@ func auditRawCounter(name string, preFenceUnsafe bool, overflow func() bool, mut
     return mutate()
 }
 func AuditRawCounterMutation(name string, preFenceUnsafe bool, mutate func() int64) int64 {
-    return auditRawCounter(name,preFenceUnsafe,nil,mutate)
+    return auditRawCounter(name,preFenceUnsafe,false,nil,mutate)
 }
 // AuditRawCounterAdd checks the old signed 64-bit StatsService byte value and
 // the new delta under the SAME gate as fence and checkpoint publication.
-func AuditRawCounterAdd(name string,delta int64,current func() int64,mutate func() int64) int64 {
+func AuditRawCounterAdd(name string,delta int64,trustedMeterOrigin bool,current func() int64,mutate func() int64) int64 {
     if delta==0 {return mutate()}
-    return auditRawCounter(name,delta<0,func() bool {
+    return auditRawCounter(name,delta<0,trustedMeterOrigin,func() bool {
         if delta<=0 {return false}
         n:=current()
         return n<0 || n>int64(1<<63-1)-delta
