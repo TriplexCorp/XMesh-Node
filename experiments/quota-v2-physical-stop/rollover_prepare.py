@@ -17,7 +17,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
+
+# Run both as a direct script and as an imported audit module; the signer
+# intentionally lives in a separate disposable experiment tree.
+HERE=Path(__file__).resolve().parent
+sys.path.insert(0,str(HERE.parent/"xray-dataplane-fence"))
 
 import attestor
 import journal_integrity
