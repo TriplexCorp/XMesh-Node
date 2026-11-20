@@ -1,0 +1,239 @@
+package xmeshdrain
+
+import (
+    "bytes"
+    "errors"
+    "os"
+    "path/filepath"
+    "strings"
+    "sync"
+    "sync/atomic"
+    "testing"
+
+    "github.com/xtls/xray-core/features/stats"
+)
+
+func testMeterCounter(t *testing.T,email,direction string) (string,stats.Counter) {
+    t.Helper()
+    dir,manager:=setupUnfencedMeter(t)
+    counter,err:=manager.RegisterCounter(rawMeterName(email,direction))
+    if err!=nil{t.Fatal(err)}
+    return dir,counter
+}
+func testMeterAdd(t *testing.T,c stats.Counter,email,direction string,n int64) {
+    t.Helper()
+    if err:=BeginMeterWrite(email,direction);err!=nil{t.Fatal(err)}
+    defer EndMeterWrite(email,direction)
+    audited,ok:=c.(interface{ExperimentalAddMetered(int64)int64})
+    if !ok{t.Fatal("experimental source-gated meter is missing")}
+    audited.ExperimentalAddMetered(n)
+}
+func meterTestFile(t *testing.T,dir,email,direction string) string {
+    t.Helper()
+    gate.Lock()
+    runID:=gate.runtimeID
+    gate.Unlock()
+    if runID==""{t.Fatal("missing bound runtime identity")}
+    return meterLedgerPath(dir,runID,email,direction)
+}
+
+func TestMeterFsyncIntentBeforeStatsServiceOrNetworkTransfer(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    dir,c:=testMeterCounter(t,email,"downlink")
+    originalFileSync:=experimentalMeterFileSync
+    originalDirSync:=experimentalMeterDirectorySync
+    defer func(){
+        experimentalMeterFileSync=originalFileSync
+        experimentalMeterDirectorySync=originalDirSync
+    }()
+    var fileSyncs,dirSyncs atomic.Int64
+    experimentalMeterFileSync=func(f *os.File) error {
+        if c.Value()!=0 && fileSyncs.Load()==0 {
+            t.Error("raw counter changed before WAL file fsync")
+        }
+        fileSyncs.Add(1)
+        return f.Sync()
+    }
+    experimentalMeterDirectorySync=func(dir string)error{
+        if c.Value()!=0 && dirSyncs.Load()==0 {
+            t.Error("raw counter changed before first WAL filename fsync")
+        }
+        dirSyncs.Add(1)
+        return syncFenceDirectory(dir)
+    }
+    testMeterAdd(t,c,email,"downlink",19)
+    testMeterAdd(t,c,email,"downlink",23)
+    if c.Value()!=42 || fileSyncs.Load()!=2 || dirSyncs.Load()!=1 {
+        t.Fatalf("byte-intent journaling skipped: value=%d fsyncs=%d dirsyncs=%d",
+            c.Value(),fileSyncs.Load(),dirSyncs.Load())
+    }
+    tail,err:=readMeterTail(meterTestFile(t,dir,email,"downlink"))
+    if err!=nil{t.Fatal(err)}
+    if tail.last.Sequence!=2 || tail.last.NextBytes!=42 ||
+        tail.last.PreviousBytes!=19 {
+        t.Fatalf("wrong conservative metered floor: %+v",tail.last)
+    }
+    if err:=assertMeterLedgerMatchesCounters([]string{email},
+        func(alias,dir string)(uint64,error){
+            if dir=="downlink"{return uint64(c.Value()),nil}
+            return 0,nil
+        });err!=nil{t.Fatal(err)}
+}
+
+func TestMeterFsyncFailureNeverAdvancesRawCounter(t *testing.T) {
+    for _,kind:=range []string{"file","directory"}{
+        t.Run(kind,func(t *testing.T){
+            email:="xmesh-u101--vless-main"
+            dir,c:=testMeterCounter(t,email,"uplink")
+            originalFile:=experimentalMeterFileSync
+            originalDir:=experimentalMeterDirectorySync
+            defer func(){
+                experimentalMeterFileSync=originalFile
+                experimentalMeterDirectorySync=originalDir
+            }()
+            failed:=errors.New("injected fsync failure")
+            if kind=="file"{
+                experimentalMeterFileSync=func(*os.File)error{return failed}
+            }else{
+                experimentalMeterDirectorySync=func(string)error{return failed}
+            }
+            if err:=BeginMeterWrite(email,"uplink");err!=nil{t.Fatal(err)}
+            var observed interface{}
+            func(){
+                defer func(){observed=recover()}()
+                c.(interface{ExperimentalAddMetered(int64)int64}).ExperimentalAddMetered(88)
+            }()
+            EndMeterWrite(email,"uplink")
+            if observed==nil{t.Fatal("uncommitted byte intent allowed traffic")}
+            if c.Value()!=0{t.Fatal("fsync failed but Xray counter already advanced")}
+            // A torn record must fail at boot. A fully written record may
+            // recover as a CONSERVATIVE precharge even if the packet was
+            // never sent; this can only reduce a future refund.
+            experimentalMeterFileSync=originalFile
+            experimentalMeterDirectorySync=originalDir
+            if err:=verifyMeterJournalDirectory(dir);err!=nil{
+                // A torn WAL is an acceptable fail-closed outcome.
+                resetGate()
+                if err:=configureObservedCheckpoint(dir);err==nil{
+                    t.Fatal("torn WAL unexpectedly accepted at startup")
+                }
+            }else{
+                tail,err:=readMeterTail(meterTestFile(t,dir,email,"uplink"))
+                if err!=nil || tail.last.NextBytes!=88 {
+                    t.Fatalf("valid but uncharged crash-intent not conservative: %+v %v",tail,err)
+                }
+            }
+        })
+    }
+}
+
+func TestOldRuntimeWALCorruptionOrSymlinkDeniesXrayRestart(t *testing.T) {
+    for _,kind:=range []string{
+        "truncate","duplicate-key","changed-bytes","symlink",
+        "wrong-sequence","foreign-name","group-readable",
+    } {
+        t.Run(kind,func(t *testing.T){
+            email:="xmesh-u101--vless-main"
+            dir,c:=testMeterCounter(t,email,"downlink")
+            testMeterAdd(t,c,email,"downlink",27)
+            name:=meterTestFile(t,dir,email,"downlink")
+            raw,err:=os.ReadFile(name)
+            if err!=nil{t.Fatal(err)}
+            switch kind {
+            case "truncate":
+                raw=raw[:len(raw)-1]
+            case "duplicate-key":
+                raw=bytes.Replace(raw,[]byte(`"sequence":1`),
+                    []byte(`"sequence":2,"sequence":1`),1)
+            case "changed-bytes":
+                raw=bytes.Replace(raw,[]byte(`"nextBytes":27`),
+                    []byte(`"nextBytes":29`),1)
+            case "wrong-sequence":
+                raw=bytes.Replace(raw,[]byte(`"sequence":1`),
+                    []byte(`"sequence":7`),1)
+            case "symlink":
+                if err:=os.Remove(name);err!=nil{t.Fatal(err)}
+                if err:=os.Symlink("/dev/null",name);err!=nil{t.Fatal(err)}
+            case "foreign-name":
+                if err:=os.Rename(name,filepath.Join(dir,"meter-"+strings.Repeat("a",64)+".jsonl"));err!=nil{t.Fatal(err)}
+            case "group-readable":
+                if err:=os.Chmod(name,0640);err!=nil{t.Fatal(err)}
+            }
+            if kind=="truncate" || kind=="duplicate-key" ||
+                kind=="changed-bytes" || kind=="wrong-sequence" {
+                if err:=os.WriteFile(name,raw,0600);err!=nil{t.Fatal(err)}
+            }
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatal("crash-restored WAL corruption or inode substitution admitted")
+            }
+        })
+    }
+}
+
+func TestConcurrentAuthenticatedWritesProduceGaplessPrivateByteWAL(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    dir,c:=testMeterCounter(t,email,"downlink")
+    const writers=12
+    const each=25
+    var wg sync.WaitGroup
+    errCh:=make(chan error,writers)
+    for i:=0;i<writers;i++{
+        wg.Add(1)
+        go func(){
+            defer wg.Done()
+            audited:=c.(interface{ExperimentalAddMetered(int64)int64})
+            for j:=0;j<each;j++{
+                if err:=BeginMeterWrite(email,"downlink");err!=nil{
+                    errCh<-err;return
+                }
+                audited.ExperimentalAddMetered(1)
+                EndMeterWrite(email,"downlink")
+            }
+        }()
+    }
+    wg.Wait()
+    close(errCh)
+    for err:=range errCh {if err!=nil{t.Fatal(err)}}
+    tail,err:=readMeterTail(meterTestFile(t,dir,email,"downlink"))
+    if err!=nil{t.Fatal(err)}
+    if tail.last.Sequence!=writers*each ||
+        tail.last.NextBytes!=writers*each ||
+        c.Value()!=writers*each{
+        t.Fatalf("race lost committed bytes: %+v raw=%d",tail.last,c.Value())
+    }
+    // On a simulated power loss, the old log is still independently
+    // readable even though the Xray StatsService memory is discarded.
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    if err:=verifyMeterJournalDirectory(dir);err!=nil{t.Fatal(err)}
+}
+
+func TestMeterLedgerGapOrUnchargedCounterRefusesCheckpoint(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    dir,_:=setupCheckpoint(t,email,30,20)
+    // Ordinary managed counters were created by tracked, fsynced writes.
+    up:=observed.manager.GetCounter(rawMeterName(email,"uplink"))
+    file:=meterTestFile(t,dir,email,"uplink")
+    tail,err:=readMeterTail(file)
+    if err!=nil||tail.last.NextBytes!=30{t.Fatalf("no recorded uplink: %v",err)}
+    scope:=testScope(email,testRevocation)
+    if _,err:=persistObservedCheckpoint(scope);err!=nil{t.Fatal(err)}
+    // An out-of-band value change is separately tainted and must never be
+    // legitimized simply because the WAL and raw counters later coincide.
+    up.Add(5)
+    up.Set(30)
+    if _,err:=persistObservedCheckpoint(scope);err==nil {
+        t.Fatal("post-fence raw mutation bypassed WAL and was accepted")
+    }
+}
+
+func TestUncertainValidWALCannotDeclareFinalMeter(t *testing.T) {
+    email:="xmesh-u101--vless-main"
+    _,_ = setupCheckpoint(t,email,13,14)
+    record,err:=persistObservedCheckpoint(testScope(email,testRevocation))
+    if err!=nil{t.Fatal(err)}
+    if record.FinalMeterVerified || record.RefundableBytes!=0 || !record.Drained {
+        t.Fatalf("conservative intent misclassified as post-stop final meter: %+v",record)
+    }
+}
