@@ -86,9 +86,10 @@ def run(xray):
         echo=EchoServer(("127.0.0.1",0),EchoHandler)
         threading.Thread(target=echo.serve_forever,daemon=True).start()
         echo_port=echo.server_address[1]
-        vless_port,api_port,socks_a,socks_b,socks_c=(reserve_port() for _ in range(5))
-        uuid_a,uuid_b,uuid_c=(str(uuid.uuid4()) for _ in range(3))
+        vless_port,api_port,socks_a,socks_b,socks_c,socks_d=(reserve_port() for _ in range(6))
+        uuid_a,uuid_b,uuid_c,uuid_d=(str(uuid.uuid4()) for _ in range(4))
         email_c="xmesh-u103--vless-spare"
+        email_d="xmesh-u104--vless-unused"
         server_cfg={
             "log":{"loglevel":"warning"},
             "api":{"tag":"xmesh_stats_api","services":["StatsService"]},
@@ -100,6 +101,7 @@ def run(xray):
                      {"id":uuid_a,"email":EMAIL_A,"level":0},
                      {"id":uuid_b,"email":EMAIL_B,"level":0},
                      {"id":uuid_c,"email":email_c,"level":0},
+                     {"id":uuid_d,"email":email_d,"level":0},
                  ]},"streamSettings":{"network":"tcp","security":"none"}},
                 {"tag":"xmesh_stats_in","listen":"127.0.0.1","port":api_port,
                  "protocol":"dokodemo-door","settings":{
@@ -125,12 +127,15 @@ def run(xray):
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
                 {"tag":"socks-c","listen":"127.0.0.1","port":socks_c,
                  "protocol":"socks","settings":{"auth":"noauth","udp":False}},
+                {"tag":"socks-d","listen":"127.0.0.1","port":socks_d,
+                 "protocol":"socks","settings":{"auth":"noauth","udp":False}},
             ],
             "outbounds":[outbound("user-a",uuid_a),outbound("user-b",uuid_b),
-                         outbound("user-c",uuid_c)],
+                         outbound("user-c",uuid_c),outbound("user-d",uuid_d)],
             "routing":{"rules":[
                 {"type":"field","inboundTag":["socks-b"],"outboundTag":"user-b"},
-                {"type":"field","inboundTag":["socks-c"],"outboundTag":"user-c"}]},
+                {"type":"field","inboundTag":["socks-c"],"outboundTag":"user-c"},
+                {"type":"field","inboundTag":["socks-d"],"outboundTag":"user-d"}]},
         }
         server_json,client_json=root/"server.json",root/"client.json"
         server_json.write_text(json.dumps(server_cfg))
@@ -192,12 +197,12 @@ def run(xray):
                                      stdout=log_server,stderr=subprocess.STDOUT,env=server_env)
             wait_replaced_socket(control,server2)
             retry_socks_echo(socks_a,echo_port,False)
-            # B was never revoked, but it transmitted bytes in the OLD
-            # incarnation. Its reset StatsService is not a valid rollover.
-            # Both A and B remain denied until Node has an externally
-            # verified conservative carryforward. Untouched C still works.
+            # C used bytes in the second Xray process. At the third runtime
+            # its previous pretransmit WAL is likewise unresolved. A/B/C
+            # all remain denied; D has never transmitted and may enter.
             retry_socks_echo(socks_b,echo_port,False)
-            retry_socks_echo(socks_c,echo_port,True)
+            retry_socks_echo(socks_c,echo_port,False)
+            retry_socks_echo(socks_d,echo_port,True)
             refusal=request_fence(control,EMAIL_A,revocation,expected_status=409)
             assert b"checkpoint" in refusal,refusal
             other=request_fence(control,EMAIL_A,str(uuid.uuid4()),expected_status=409)
@@ -269,6 +274,8 @@ def run(xray):
                 "revokedUserDeniedOnRestart":True,
                 "unreconciledUnrevokedUserDeniedOnRestart":True,
                 "newUnspentUserAliveOnRestart":True,
+                "secondRestartBlocksOldPreviouslyCleanC":True,
+                "newUnspentUserDAvailableOnThirdRuntime":True,
                 "noMeterOrRefundAfterCrash":True,
                 "tamperedDenialPreventsStartup":True,
                 "noncanonicalDenialPreventsStartup":True,
