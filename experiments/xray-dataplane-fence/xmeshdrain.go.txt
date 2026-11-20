@@ -196,6 +196,28 @@ func ScopedEmail(ctx context.Context) string {
     return session.InboundFromContext(ctx).User.Email
 }
 
+// RequireMeteringCoverage fails closed BEFORE registering an authenticated
+// billable stream. Xray normally skips SizeStatWriter/TimeoutWrapperReader
+// counters if a user's policy disables either direction, or if stats counter
+// registration fails. Admitting that stream would allow real unmetered bytes
+// even though a later observed-only checkpoint might reject missing counters.
+//
+// Caller is already inside RequireInboundCoverage + IsTrackedInbound and must
+// close both transport links if validation fails. The counter lookup itself
+// is from Xray's real StatsService, not a caller-supplied claimed boolean.
+func RequireMeteringCoverage(uplinkEnabled, downlinkEnabled bool, counterReady func(string) bool) error {
+    if !enabled { return nil }
+    if !uplinkEnabled || !downlinkEnabled || counterReady == nil {
+        return errors.New("experimental Xray: mandatory user uplink/downlink stats disabled")
+    }
+    for _, direction := range []string{"uplink", "downlink"} {
+        if !counterReady(direction) {
+            return fmt.Errorf("experimental Xray: missing mandatory %s user meter", direction)
+        }
+    }
+    return nil
+}
+
 // AuditRawCounterMutation interlocks ALL experimental StatsService raw user
 // byte mutations with the fence and snapshot journal, even when called outside
 // known transport wrappers. Any Set() or negative Add() taints the user EVEN
