@@ -178,8 +178,9 @@ def await_socket(path, process):
     raise AssertionError("Patched Xray did not start private Unix control socket")
 
 
-def run(xray, transport):
+def run(xray, transport, *, denied_direction=None):
     assert transport in TRANSPORTS
+    assert denied_direction in (None, "uplink", "downlink")
     assert os.getenv("GITHUB_ACTIONS") == "true"
     assert os.getenv("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
     assert Path(xray).is_file()
@@ -279,6 +280,15 @@ def run(xray, transport):
                                 {"type":"field","inboundTag":["socks-blank"],
                                  "outboundTag":"user-blank"}]}
         }
+        if denied_direction is not None:
+            # Real VLESS user A has one mandatory stats direction disabled.
+            # B stays correctly metered on a distinct Xray policy level.
+            # Neither A nor A's CDN alias may transmit uncharged bytes.
+            server_config["policy"]["levels"]["1"] = dict(
+                server_config["policy"]["levels"]["0"])
+            server_config["policy"]["levels"]["0"][
+                "statsUser" + denied_direction.capitalize()] = False
+            server_config["inbounds"][0]["settings"]["clients"][1]["level"] = 1
         server_json=root/"server.json"
         client_json=root/"client.json"
         server_json.write_text(json.dumps(server_config),encoding="utf-8")
@@ -310,6 +320,35 @@ def run(xray, transport):
             client_env.pop("XMESH_EXPERIMENTAL_DRAIN",None)
             client=subprocess.Popen([xray,"run","-config",str(client_json)],
                                     stdout=log_b,stderr=subprocess.STDOUT,env=client_env)
+            if denied_direction is not None:
+                # Exercise BOTH dispatch paths on the real patched binary:
+                # main VLESS and secondary CDN VLESS. A completed SOCKS
+                # handshake alone is insufficient; reject echoed payload.
+                for socks_port in (socks_a, socks_cdn):
+                    try:
+                        denied = connect_socks(
+                            socks_port, echo.server_address[1], "127.0.0.1")
+                    except (OSError, AssertionError):
+                        pass
+                    else:
+                        try:
+                            assert not probe_echo(denied), (
+                                "Unmetered authenticated VLESS traffic escaped "
+                                "the admission gate: " + denied_direction)
+                        finally:
+                            denied.close()
+                # Policy mismatch for A must not deny independently metered B.
+                b = connect_socks(socks_b, echo.server_address[1], "127.0.0.1")
+                echo_bytes(b, 2048)
+                assert wait_counter(xray, api_port, EMAIL_B) > 0
+                print("EXPERIMENTAL XRAY METER COVERAGE " + json.dumps({
+                    "deniedDirection": denied_direction,
+                    "unmeteredMainDenied": True,
+                    "unmeteredCDNDenied": True,
+                    "independentMeteredUserAllowed": True,
+                    "finalMeterVerified": False, "refundableBytes": 0,
+                }, sort_keys=True), flush=True)
+                return
             a=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
             cdn=connect_socks(socks_cdn,echo.server_address[1],"127.0.0.1")
             b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
@@ -676,3 +715,8 @@ if __name__=="__main__":
     for transport in TRANSPORTS:
         print(f"START PATCHED XRAY TRANSPORT: {transport}", flush=True)
         run(binary, transport)
+    # Mandatory directions are checked against real Xray policy, not only
+    # against test-only Go booleans. Keep this isolated and cheap (TCP only).
+    for direction in ("uplink", "downlink"):
+        print(f"START PATCHED XRAY DISABLED {direction.upper()} STATS", flush=True)
+        run(binary, "tcp", denied_direction=direction)
