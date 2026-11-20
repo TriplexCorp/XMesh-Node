@@ -304,6 +304,21 @@ func EndMeterRead(email string) {
     completeUserIfIdleLocked(u)
 }
 
+// MayDeliverMeterRead is checked AFTER a timed-out asynchronous read has
+// completed and its raw bytes were accounted. A transport can be fenced while
+// the read is blocked; returning its old buffer after the fence would make it
+// available to a detached outbound writer. It is intentionally separate from
+// BeginMeterRead: existing in-flight reads must still finish accounting, while
+// their buffers are discarded if the user's admission has since been revoked.
+// This check is NOT an atomic authorization for downstream delivery.
+func MayDeliverMeterRead(email string) bool {
+    if !enabled || email=="" {return false}
+    gate.Lock()
+    defer gate.Unlock()
+    u:=gate.users[canonicalMeterUser(email)]
+    return u!=nil && !u.fenced && !u.lateCounterMutation
+}
+
 // Caller must hold gate.Mutex. Do not report a drained user while any
 // logical session, metered operation, or transport cancellation is unfinished.
 func completeUserIfIdleLocked(u *userState) {
