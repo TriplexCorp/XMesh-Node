@@ -121,6 +121,9 @@ type userState struct {
     // Count all in-flight per-user metered writes. New writes are rejected
     // atomically once the admission fence is active.
     writes int
+    // Per exact inbound email + direction; unrelated active traffic cannot
+    // authorize a direct StatsService mutation or wrong-direction write.
+    meterOps map[string]int
     // Track asynchronous TimeoutWrapperReader operations through their
     // counter increment, including callbacks resumed AFTER a timeout.
     reads int
@@ -144,7 +147,7 @@ var gate = struct {
 func ensureUser(email string) *userState {
     u := gate.users[email]
     if u == nil {
-        u = &userState{active: make(map[uint64]func()), emails: make(map[string]struct{}), done: make(chan struct{})}
+        u = &userState{active: make(map[uint64]func()), emails: make(map[string]struct{}), meterOps: make(map[string]int), done: make(chan struct{})}
         gate.users[email] = u
     }
     return u
@@ -218,88 +221,113 @@ func RequireMeteringCoverage(uplinkEnabled, downlinkEnabled bool, counterReady f
     return nil
 }
 
-// AuditRawCounterMutation interlocks ALL experimental StatsService raw user
-// byte mutations with the fence and snapshot journal, even when called outside
-// known transport wrappers. Any Set() or negative Add() taints the user EVEN
-// BEFORE the fence: otherwise a pre-stop reset could erase legitimate bytes
-// without being detected by stable post-drain observations. Every Add() after
-// the fence is also tainted. This remains NONFINAL, never a refundable meter.
-func AuditRawCounterMutation(name string, preFenceUnsafe bool, mutate func() int64) int64 {
-    if !enabled { return mutate() }
-    raw, ok := strings.CutPrefix(name, "user>>>")
-    if !ok { return mutate() }
-    email, direction, ok := strings.Cut(raw, ">>>traffic>>>")
-    if !ok || email == "" || (direction != "uplink" && direction != "downlink") {
+// Positive user-byte mutations MUST originate in the exact metered inbound
+// alias+direction. An out-of-band counter Add (even before revocation), a
+// raw Set/negative Add, and a post-fence mutation all poison future settlement
+// BEFORE the value changes. This is a crash-durable NONFINAL taint, not proof
+// that all Xray transports or kernel queues have stopped.
+func rawMeterName(email,direction string) string {
+    if email=="" || (direction!="uplink" && direction!="downlink") {
+        panic("experimental xmesh drain: invalid metered alias or direction")
+    }
+    return "user>>>"+email+">>>traffic>>>"+direction
+}
+func meterDirection(directions []string, fallback string) string {
+    if len(directions)>1 {panic("experimental xmesh drain: multiple meter directions")}
+    if len(directions)==1 {return directions[0]}
+    return fallback // Only legacy unit-fixture callers omit an explicit direction.
+}
+func auditRawCounter(name string, preFenceUnsafe bool, overflow func() bool, mutate func() int64) int64 {
+    if !enabled {return mutate()}
+    raw,ok:=strings.CutPrefix(name,"user>>>")
+    if !ok {return mutate()}
+    email,direction,ok:=strings.Cut(raw,">>>traffic>>>")
+    if !ok || email=="" || (direction!="uplink" && direction!="downlink") {
         return mutate()
     }
     gate.Lock()
     defer gate.Unlock()
-    userKey := canonicalMeterUser(email)
-    u := gate.users[userKey]
-    if preFenceUnsafe && u == nil {
-        // Even a previously unseen user byte counter cannot silently reset
-        // before the first tracked authenticated session is registered.
-        u = ensureUser(userKey)
-    }
-    if u != nil && (u.fenced || preFenceUnsafe) {
-        // Crash-durable marker MUST precede the counter mutation, including
-        // zero-value Set() and negative Add() before a revocation request.
-        // A pre-fence orphan marker prevents unsafe Xray restart until
-        // trusted operator recovery, rather than reopening a lost meter.
-        u.lateCounterMutation = true
-        if err := commitDurableCounterTaint(gate.journalDir, userKey); err != nil {
-            panic(fmt.Sprintf("experimental Xray counter taint cannot be persisted; deny: %v", err))
+    u:=ensureUser(canonicalMeterUser(email))
+    exceeds:=overflow!=nil && overflow()
+    if u.fenced || preFenceUnsafe || exceeds || u.meterOps[name]<=0 {
+        u.lateCounterMutation=true
+        if err:=commitDurableCounterTaint(gate.journalDir,canonicalMeterUser(email));err!=nil {
+            panic(fmt.Sprintf("experimental Xray counter taint cannot be persisted; deny: %v",err))
         }
+    }
+    if exceeds {
+        // int64 wraps from positive to negative; a second wrap may even
+        // appear positive again. Never permit the first ambiguous mutation.
+        panic("experimental Xray raw user byte counter overflow denied")
     }
     return mutate()
 }
-
-// BeginMeterWrite starts one tracked, billable writer operation. It must
-// wrap the entire SizeStatWriter.WriteMultiBuffer call. If already fenced,
-// the caller MUST discard the buffer and prevent downstream transmission.
-func BeginMeterWrite(email string) error {
-    if !enabled || email == "" { return nil }
-    gate.Lock()
-    defer gate.Unlock()
-    u := ensureUser(canonicalMeterUser(email))
-    if u.fenced { return errFenced }
-    u.writes++
-    return nil
+func AuditRawCounterMutation(name string, preFenceUnsafe bool, mutate func() int64) int64 {
+    return auditRawCounter(name,preFenceUnsafe,nil,mutate)
+}
+// AuditRawCounterAdd checks the old signed 64-bit StatsService byte value and
+// the new delta under the SAME gate as fence and checkpoint publication.
+func AuditRawCounterAdd(name string,delta int64,current func() int64,mutate func() int64) int64 {
+    if delta==0 {return mutate()}
+    return auditRawCounter(name,delta<0,func() bool {
+        if delta<=0 {return false}
+        n:=current()
+        return n<0 || n>int64(1<<63-1)-delta
+    },mutate)
 }
 
-func EndMeterWrite(email string) {
-    if !enabled || email == "" { return }
+// BeginMeterWrite covers the entire billable SizeStatWriter.WriteMultiBuffer.
+// No new starts after revocation; the meter alias MUST match the exact raw
+// counter being incremented by this tracked transport write.
+func BeginMeterWrite(email string,directions ...string) error {
+    if !enabled || email=="" {return nil}
+    name:=rawMeterName(email,meterDirection(directions,"downlink"))
     gate.Lock()
     defer gate.Unlock()
-    u := ensureUser(canonicalMeterUser(email))
-    if u.writes <= 0 {
-        panic("experimental xmesh drain: unbalanced tracked meter writes")
+    u:=ensureUser(canonicalMeterUser(email))
+    if u.fenced {return errFenced}
+    u.writes++
+    u.meterOps[name]++
+    return nil
+}
+func EndMeterWrite(email string,directions ...string) {
+    if !enabled || email=="" {return}
+    name:=rawMeterName(email,meterDirection(directions,"downlink"))
+    gate.Lock()
+    defer gate.Unlock()
+    u:=ensureUser(canonicalMeterUser(email))
+    if u.writes<=0 || u.meterOps[name]<=0 {
+        panic("experimental xmesh drain: unbalanced exact-direction metered write")
     }
+    u.meterOps[name]--
     u.writes--
     completeUserIfIdleLocked(u)
 }
 
-// BeginMeterRead is called before a scoped, billable buffer read starts.
-// No new user reads may begin once their admission fence is installed.
+// Every reader counted by WrapLink belongs to the uplink direction. Tracking
+// the exact alias prevents a concurrent CDN uplink read from "authorizing"
+// an unexplained MAIN uplink counter mutation.
 func BeginMeterRead(email string) bool {
-    if !enabled || email=="" { return true }
+    if !enabled || email=="" {return true}
+    name:=rawMeterName(email,"uplink")
     gate.Lock()
     defer gate.Unlock()
     u:=ensureUser(canonicalMeterUser(email))
     if u.fenced {return false}
     u.reads++
+    u.meterOps[name]++
     return true
 }
-
-// EndMeterRead must run AFTER the read result is accounted, even if an
-// async timeout returned earlier. If it is never called, the drain remains
-// incomplete rather than minting a potentially false final meter.
 func EndMeterRead(email string) {
-    if !enabled || email=="" { return }
+    if !enabled || email=="" {return}
+    name:=rawMeterName(email,"uplink")
     gate.Lock()
     defer gate.Unlock()
     u:=ensureUser(canonicalMeterUser(email))
-    if u.reads<=0 {panic("experimental xmesh drain: unbalanced metered reads")}
+    if u.reads<=0 || u.meterOps[name]<=0 {
+        panic("experimental xmesh drain: unbalanced exact-alias metered read")
+    }
+    u.meterOps[name]--
     u.reads--
     completeUserIfIdleLocked(u)
 }
