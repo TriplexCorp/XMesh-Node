@@ -19,6 +19,13 @@ for path in "$state" "$settings" "$identity" "$marker" "$worker" "$helpers";do
 done
 scratch="$(mktemp -d)"
 cleanup(){
+    local status=$?
+    if ((status != 0));then
+        for log in "$scratch/health.log" "$scratch/restart.log";do
+            if [[ -f "$log" ]];then cat "$log" >&2;fi
+        done
+        docker logs --tail 20 "$name" >&2 || true
+    fi
     docker rm -f "$name" >/dev/null 2>&1 || true
     rm -rf -- "$scratch" "$state" "$settings" "$identity" "$marker" "$worker" "$helpers"
 }
@@ -40,7 +47,7 @@ cat >"$scratch/config.json" <<'CONFIG'
 CONFIG
 docker run -d --name "$name" --network none --restart=no --user 0:0 --cap-drop ALL \
     --security-opt no-new-privileges --entrypoint xray \
-    -v "$scratch/config.json:/etc/xray/config.json:ro" ghcr.io/xtls/xray-core:26.10.31 \
+    -v "$scratch/config.json:/etc/xray/config.json:ro" ghcr.io/xtls/xray-core:26.10.31@sha256:ceabeac03a89d991d2a247361825c1d1d2e9c91cd5dc010f298c7dc0c2f325c9 \
     run -config /etc/xray/config.json >/dev/null
 sleep 1
 [[ "$(docker inspect -f '{{.State.Running}}' "$name")" == true ]]

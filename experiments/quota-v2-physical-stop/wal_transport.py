@@ -110,12 +110,19 @@ def _panel_pin():
 
 
 def _bound_journal():
-    raw = subprocess.check_output(["docker", "inspect", "xmesh-managed-xray"], timeout=15)
-    inspected = observed.strict_json(raw)
-    if not isinstance(inspected, list) or len(inspected) != 1:
+    raw = subprocess.check_output([
+        "docker", "inspect", "--type", "container", "--format", "{{json .}}",
+        "xmesh-managed-xray",
+    ], timeout=15)
+    if not 0 < len(raw) <= 128 * 1024:
         raise ValueError("managed Xray inspection unavailable")
-    runtime = inspected[0]
-    mounts = [m for m in runtime.get("Mounts", []) if m.get("Destination") == journal.JOURNAL_DEST]
+    runtime = json.loads(raw, object_pairs_hook=observed.unique_pairs)
+    if not isinstance(runtime, dict):
+        raise ValueError("managed Xray inspection must be one container object")
+    mounts = runtime.get("Mounts")
+    if not isinstance(mounts, list):
+        raise ValueError("managed Xray mount information unavailable")
+    mounts = [m for m in mounts if isinstance(m, dict) and m.get("Destination") == journal.JOURNAL_DEST]
     if len(mounts) != 1 or not isinstance(mounts[0].get("Source"), str):
         raise ValueError("managed Xray has no configured private WAL bind")
     source = mounts[0]["Source"]
