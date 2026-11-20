@@ -50,8 +50,11 @@ jobs:
         run: |
           cd .experimental-xray
           go test -race ./app/xmeshdrain
+          # Stress the revoked-read delivery gate with the race detector.
+          go test -race ./app/xmeshdrain -run 'TestMeterRead' -count=15
           # The async timeout-reader probe exercises exact pinned common/buf.
-          go test -race ./common/buf -run TestExperimental -count=1
+          # Run concurrent-timeout / late-delivery races repeatedly.
+          go test -race ./common/buf -run TestExperimental -count=20
           go build -o /tmp/xmesh-xray-fence-experiment ./main
           /tmp/xmesh-xray-fence-experiment version
       - name: Verify selective active VLESS stream termination while other users continue
