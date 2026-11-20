@@ -1,0 +1,76 @@
+// CI-only recovery of *conservative* accounting debt from dead Xray
+// process incarnations. This is not a final transmitted-byte measurement.
+//
+// A fresh Xray resets StatsService atomics to zero. Without a signed,
+// externally reconciled handoff, allowing the same account to resume simply
+// from the new zero risks silently losing all its previous in-flight bytes.
+// Pending old WAL is a per-account ADMISSION DENY; unrelated users are
+// unaffected. A future separately reviewed signed Node->Nexus rollover must
+// carry the absolute debt forward before any account can be unblocked.
+package xmeshdrain
+
+import (
+    "errors"
+    "fmt"
+    "os"
+    "path/filepath"
+    "strings"
+)
+
+const maxHistoricalMeterFiles = 4096
+const maxHistoricalAccountBytes = uint64(1<<63-1)
+
+type historicMeterDebt struct {
+    bytes uint64
+    files int
+    runtimes map[string]struct{}
+}
+
+// The caller MUST run this before Xray exposes its first listener. A corrupt
+// entry makes the whole process fail closed; a valid OLD runtime suspends
+// only that account. Do not discard historical evidence because it belonged
+// to an earlier operating-system process / Docker runtime.
+func loadUnreconciledHistoricMeterDebts(dir, currentRuntime string) (map[string]historicMeterDebt,error) {
+    if dir=="" || len(currentRuntime)!=64 {
+        return nil,errors.New("old-runtime ledger audit missing bound Xray process")
+    }
+    entries,err:=os.ReadDir(dir)
+    if err!=nil{return nil,err}
+    debts:=map[string]historicMeterDebt{}
+    count:=0
+    for _,entry:=range entries {
+        filename:=entry.Name()
+        if !strings.HasPrefix(filename,"meter-"){continue}
+        count++
+        if count>maxHistoricalMeterFiles {
+            return nil,errors.New("unbounded old-Xray byte WAL inventory")
+        }
+        if !strings.HasSuffix(filename,".jsonl") {
+            return nil,fmt.Errorf("unrecognized old-Xray WAL name %q",filename)
+        }
+        tail,err:=readMeterTail(filepath.Join(dir,filename))
+        if err!=nil {
+            return nil,fmt.Errorf("untrusted historical Xray meter %q: %w",filename,err)
+        }
+        if tail.last.RuntimeID==currentRuntime {
+            // Same incarnation may be audited repeatedly by isolated
+            // fixture code. In production this is the current process.
+            continue
+        }
+        account:=canonicalMeterUser(tail.last.Email)
+        if !validCounterTaintUser(account) {
+            return nil,fmt.Errorf("unsafe historical meter account %q",account)
+        }
+        debt:=debts[account]
+        amount:=tail.last.NextBytes
+        if debt.bytes>maxHistoricalAccountBytes-amount{
+            return nil,fmt.Errorf("old-Xray meter debt overflow for %q",account)
+        }
+        if debt.runtimes==nil{debt.runtimes=map[string]struct{}{}}
+        debt.bytes+=amount
+        debt.files++
+        debt.runtimes[tail.last.RuntimeID]=struct{}{}
+        debts[account]=debt
+    }
+    return debts,nil
+}

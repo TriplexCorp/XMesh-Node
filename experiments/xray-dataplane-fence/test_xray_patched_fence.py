@@ -634,6 +634,39 @@ def run(xray, transport, *, denied_direction=None):
             # User B has a different accounting identity, and remains served.
             assert probe_echo(b),"Raw StatsService reset for A blocked unrelated user B"
 
+            if transport=="tcp":
+                # Real Reset_=true on B runs BEFORE B is fenced. Stable
+                # after-fence reads alone cannot recover the erased bytes.
+                # Verify this second account is tainted without affecting A.
+                b_name=f"user>>>{EMAIL_B}>>>traffic>>>uplink"
+                b_prior=command(xray,"api","stats",
+                                f"--server=127.0.0.1:{api_port}",
+                                "-name",b_name,"-reset")
+                b_stat=json.loads(b_prior.stdout)["stat"]
+                assert b_stat["name"]==b_name and int(b_stat["value"])>0,b_stat
+                b_key="xmesh-u102"
+                b_taint=root/("taint-"+hashlib.sha256(b_key.encode()).hexdigest()+".json")
+                assert b_taint.is_file() and b_taint.stat().st_mode&0o077==0
+                b_taint_disk=b_taint.read_bytes()
+                assert json.loads(b_taint_disk)=={
+                    "schemaVersion":1,"canonicalUser":b_key},b_taint_disk
+                # The pre-restart B stream is already closed; use a NEW
+                # real SOCKS/VLESS session to prove B is still admitted here.
+                b_pre_fence=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
+                try:
+                    assert probe_echo(b_pre_fence),"B was denied before its requested fence"
+                finally:
+                    b_pre_fence.close()
+                b_revoke=str(uuid.uuid4())
+                b_refusal=request_fence(socket_file,EMAIL_B,b_revoke,
+                                        expected_status=409,
+                                        scope_override={"userId":102})
+                assert b"unsafe Xray StatsService counter mutation or reset" in b_refusal,b_refusal
+                b_observed=root/("observed-"+hashlib.sha256(b_key.encode()).hexdigest()+".json")
+                assert not b_observed.exists(),"B received a forged post-reset observed meter"
+                assert taint_file.read_bytes()==taint_disk
+                assert b_taint.read_bytes()==b_taint_disk
+
             # Data remains after shutting down the Xray process: this
             # verifies persistence, not a terminal-byte correctness barrier.
             server.terminate()
@@ -669,59 +702,20 @@ def run(xray, transport, *, denied_direction=None):
                     assert not probe_echo(old_a),"Reboot reopened revoked A despite taint"
                 finally:
                     old_a.close()
-                # B must still authenticate and send data after the real
-                # Xray process restart.
-                deadline=time.monotonic()+12
-                b_recovered=False
-                while time.monotonic()<deadline and not b_recovered:
-                    fresh_b=None
-                    try:
-                        fresh_b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
-                        b_recovered=probe_echo(fresh_b)
-                    except (OSError,AssertionError,TimeoutError):
-                        pass
-                    finally:
-                        if fresh_b is not None:
-                            fresh_b.close()
-                    if not b_recovered:
-                        time.sleep(.2)
-                assert b_recovered,"Reboot blocked unrelated user B"
-                # Real Reset_=true on B runs BEFORE B is fenced. Stable
-                # after-fence reads alone cannot recover the erased bytes.
-                # Verify this second account is tainted without affecting A.
-                b_name=f"user>>>{EMAIL_B}>>>traffic>>>uplink"
-                b_prior=command(xray,"api","stats",
-                                f"--server=127.0.0.1:{api_port}",
-                                "-name",b_name,"-reset")
-                b_stat=json.loads(b_prior.stdout)["stat"]
-                assert b_stat["name"]==b_name and int(b_stat["value"])>0,b_stat
-                b_key="xmesh-u102"
-                b_taint=root/("taint-"+hashlib.sha256(b_key.encode()).hexdigest()+".json")
-                assert b_taint.is_file() and b_taint.stat().st_mode&0o077==0
-                b_taint_disk=b_taint.read_bytes()
-                assert json.loads(b_taint_disk)=={
-                    "schemaVersion":1,"canonicalUser":b_key},b_taint_disk
-                # The pre-restart B stream is already closed; use a NEW
-                # real SOCKS/VLESS session to prove B is still admitted here.
-                b_pre_fence=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
-                try:
-                    assert probe_echo(b_pre_fence),"B was denied before its requested fence"
-                finally:
-                    b_pre_fence.close()
-                b_revoke=str(uuid.uuid4())
-                b_refusal=request_fence(socket_file,EMAIL_B,b_revoke,
+                # B spent real bytes BEFORE the prior Xray stopped.
+                # A new PID starts with raw StatsService=0, so it cannot
+                # safely readmit B without a signed conservative rollover.
+                assert_rejected(socks_b,
+                    "New Xray PID forgot B's earlier byte intentions")
+                assert b_taint.read_bytes()==b_taint_disk
+                b_restart=request_fence(socket_file,EMAIL_B,b_revoke,
                                         expected_status=409,
                                         scope_override={"userId":102})
-                assert b"unsafe Xray StatsService counter mutation or reset" in b_refusal,b_refusal
-                b_observed=root/("observed-"+hashlib.sha256(b_key.encode()).hexdigest()+".json")
-                assert not b_observed.exists(),"B received a forged post-reset observed meter"
-                assert taint_file.read_bytes()==taint_disk
-                server.terminate()
-                server.wait(timeout=5)
-                assert taint_file.read_bytes()==taint_disk
-                assert b_taint.read_bytes()==b_taint_disk
+                assert b"unsafe Xray StatsService counter mutation or reset" in b_restart,b_restart
                 # A second real Linux Xray incarnation must restore BOTH
                 # independent fenced users and B's pre-fence taint.
+                server.terminate()
+                server.wait(timeout=5)
                 server=subprocess.Popen([xray,"run","-config",str(server_json)],
                                         stdout=log_a,stderr=subprocess.STDOUT,env=env)
                 deadline=time.monotonic()+15

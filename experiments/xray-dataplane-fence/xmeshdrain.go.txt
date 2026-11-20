@@ -25,6 +25,7 @@ import (
 )
 
 var errFenced = errors.New("experimental xmesh drain: user is fenced")
+var errHistoricMeterDebt = errors.New("experimental xmesh drain: unresolved prior-runtime conservative byte debt")
 var errNoSessionID = errors.New("experimental xmesh drain: missing session ID")
 var errNoUserID = errors.New("experimental xmesh drain: missing authenticated user email")
 var errDuplicateSession = errors.New("experimental xmesh drain: duplicate live session ID")
@@ -114,6 +115,13 @@ type trackedSession struct {
 }
 type userState struct {
     fenced bool
+    // A previous Xray incarnation has fsynced user byte intents which the
+    // new zeroed StatsService does not yet include. Deny admission until a
+    // separately reviewed signed Node->Nexus absolute rollover exists.
+    historicDebtUnresolved bool
+    historicDebtBytes uint64
+    historicRuntimeCount int
+    historicJournalCount int
     active map[uint64]func()
     // Capture all authenticated per-inbound Xray emails seen for this stable
     // billing user. This set is NOT a proof of complete signed topology.
@@ -184,6 +192,9 @@ func Register(ctx context.Context, email string, stop func()) error {
     u := ensureUser(canonicalMeterUser(email))
     if u.fenced {
         return errFenced
+    }
+    if u.historicDebtUnresolved {
+        return errHistoricMeterDebt
     }
     if existing := gate.sessions[id]; existing != nil {
         if existing.email != canonicalMeterUser(email) {
@@ -259,6 +270,12 @@ func auditRawCounter(name string, preFenceUnsafe bool, trustedMeterOrigin bool, 
     gate.Lock()
     defer gate.Unlock()
     u:=ensureUser(canonicalMeterUser(email))
+    // An unacknowledged OLD process is not even entitled to mutate the new
+    // zeroed meter. Its fsynced WAL remains authoritative conservative
+    // evidence, not something a same-alias new stream can overwrite.
+    if u.historicDebtUnresolved {
+        panic("experimental Xray: attempted metering with unresolved historic runtime debt")
+    }
     exceeds:=overflow!=nil && overflow()
     if u.fenced || preFenceUnsafe || exceeds || !trustedMeterOrigin || u.meterOps[name]<=0 {
         u.lateCounterMutation=true
@@ -311,6 +328,7 @@ func BeginMeterWrite(email string,directions ...string) error {
     defer gate.Unlock()
     u:=ensureUser(canonicalMeterUser(email))
     if u.fenced {return errFenced}
+    if u.historicDebtUnresolved {return errHistoricMeterDebt}
     u.writes++
     u.meterOps[name]++
     return nil
@@ -338,7 +356,7 @@ func BeginMeterRead(email string) bool {
     gate.Lock()
     defer gate.Unlock()
     u:=ensureUser(canonicalMeterUser(email))
-    if u.fenced {return false}
+    if u.fenced || u.historicDebtUnresolved {return false}
     u.reads++
     u.meterOps[name]++
     return true
@@ -365,7 +383,7 @@ func NoteBufferedSpliceCandidate(email string) {
     gate.Lock()
     defer gate.Unlock()
     u:=ensureUser(canonicalMeterUser(email))
-    if !u.fenced {
+    if !u.fenced && !u.historicDebtUnresolved {
         u.bufferedSpliceCandidates++
     }
 }
@@ -384,7 +402,7 @@ func MayDeliverMeterRead(email string) bool {
     u:=gate.users[canonicalMeterUser(email)]
     // A pre-fence counter discontinuity poisons settlement/observation,
 // but does not itself revoke an unrelated, still-authorized live stream.
-    return u!=nil && !u.fenced
+    return u!=nil && !u.fenced && !u.historicDebtUnresolved
 }
 
 // Caller must hold gate.Mutex. Do not report a drained user while any
@@ -448,6 +466,11 @@ type result struct {
     Refundable bool `json:"refundable"`
     // CI diagnostic, never a cryptographic or financial proof.
     BufferedSpliceCandidates int `json:"bufferedSpliceCandidates"`
+    // Diagnostic only; never a terminal/repayable balance.
+    UnreconciledHistoricRuntime bool `json:"unreconciledHistoricRuntime"`
+    ConservativeHistoricDebtBytes uint64 `json:"conservativeHistoricDebtBytes"`
+    HistoricRuntimeCount int `json:"historicRuntimeCount"`
+    HistoricJournalCount int `json:"historicJournalCount"`
     // This record is fsynced but explicitly NOT authoritative final traffic.
     ObservedCheckpoint *observedCheckpoint `json:"observedCheckpoint,omitempty"`
 }
@@ -458,6 +481,10 @@ func state(email string, u *userState) result {
         Drained: u.closed && len(u.active) == 0 && u.writes == 0 && u.reads == 0 && u.stopping == 0,
         FinalMeterVerified: false, Refundable: false,
         BufferedSpliceCandidates:u.bufferedSpliceCandidates,
+        UnreconciledHistoricRuntime:u.historicDebtUnresolved,
+        ConservativeHistoricDebtBytes:u.historicDebtBytes,
+        HistoricRuntimeCount:u.historicRuntimeCount,
+        HistoricJournalCount:u.historicJournalCount,
     }
 }
 

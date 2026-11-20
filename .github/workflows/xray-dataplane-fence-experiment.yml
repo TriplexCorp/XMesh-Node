@@ -53,6 +53,10 @@ jobs:
           # Validate fsync-before-mutation WAL, crash-visible conservative
           # precharges, exact inbound/direction hashes and replay gaps.
           go test -race ./app/xmeshdrain -run 'TestMeterFsync|TestOldRuntimeWAL|TestConcurrentAuthenticatedWrites|TestMeterLedgerGap|TestUncertainValidWAL' -count=3
+          # Two old runtime incarnations and both main+CDN aliases must
+          # never reopen with a fresh zero StatsService. A genuinely unused
+          # third user must still remain available after old-PID SIGKILL.
+          go test -race ./app/xmeshdrain -run 'TestUnreconciledOldRun|TestHistoricWAL' -count=12
           # A real audited StatsService may not accept out-of-origin raw
           # byte increments or overflow, even with another inbound active.
           go test -race ./app/xmeshdrain -run 'TestRawUserByteAdd|TestTrackedExactAlias|TestRawCounterOverflow' -count=15
