@@ -92,7 +92,7 @@ func BindStatsManager(manager stats.Manager) {
     audited, ok := manager.(interface {
         SetExperimentalCounterMutationAudit(
             func(string, bool, func() int64) int64,
-            func(string, int64, func() int64, func() int64) int64,
+            func(string, int64, bool, func() int64, func() int64) int64,
         ) error
     })
     if !ok { panic("experimental StatsService missing mandatory counter origin/overflow audit") }
