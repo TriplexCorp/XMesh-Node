@@ -50,6 +50,9 @@ jobs:
         run: |
           cd .experimental-xray
           go test -race ./app/xmeshdrain
+          # Validate fsync-before-mutation WAL, crash-visible conservative
+          # precharges, exact inbound/direction hashes and replay gaps.
+          go test -race ./app/xmeshdrain -run 'TestMeterFsync|TestOldRuntimeWAL|TestConcurrentAuthenticatedWrites|TestMeterLedgerGap|TestUncertainValidWAL' -count=3
           # A real audited StatsService may not accept out-of-origin raw
           # byte increments or overflow, even with another inbound active.
           go test -race ./app/xmeshdrain -run 'TestRawUserByteAdd|TestTrackedExactAlias|TestRawCounterOverflow' -count=15
