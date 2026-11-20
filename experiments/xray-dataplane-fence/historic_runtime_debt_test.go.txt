@@ -1,0 +1,143 @@
+package xmeshdrain
+
+import (
+    "context"
+    "encoding/json"
+    "errors"
+    "os"
+    "path/filepath"
+    "strings"
+    "testing"
+)
+
+func testHistoricWAL(t *testing.T,dir,runtimeID,email,direction string,amount uint64) string {
+    t.Helper()
+    previous:=strings.Repeat("0",64)
+    step:=durableMeterStep{
+        SchemaVersion:1,RuntimeID:runtimeID,Email:email,Direction:direction,
+        Sequence:1,PreviousBytes:0,NextBytes:amount,
+        PreviousDigest:previous,
+    }
+    digest,err:=meterStepDigest(step)
+    if err!=nil{t.Fatal(err)}
+    step.Digest=digest
+    b,err:=json.Marshal(step)
+    if err!=nil{t.Fatal(err)}
+    file:=meterLedgerPath(dir,runtimeID,email,direction)
+    fd,err:=os.OpenFile(file,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600)
+    if err!=nil{t.Fatal(err)}
+    if _,err=fd.Write(append(b,'\n'));err!=nil{fd.Close();t.Fatal(err)}
+    if err=fd.Sync();err!=nil{fd.Close();t.Fatal(err)}
+    if err=fd.Close();err!=nil{t.Fatal(err)}
+    if err=syncFenceDirectory(dir);err!=nil{t.Fatal(err)}
+    return file
+}
+func testNewRuntime(t *testing.T,dir string) {
+    t.Helper()
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+}
+func TestUnreconciledOldRunRefusesOnlyThatAccount(t *testing.T) {
+    const main="xmesh-u101--vless-main"
+    const cdn="xmesh-u101--vless-cdn"
+    const newUser="xmesh-u102--vless-main"
+    dir,_:=testMeterCounter(t,newUser,"uplink")
+    oldA:=strings.Repeat("e",64)
+    oldB:=strings.Repeat("f",64)
+    testHistoricWAL(t,dir,oldA,main,"uplink",500)
+    testHistoricWAL(t,dir,oldA,main,"downlink",30)
+    testHistoricWAL(t,dir,oldB,cdn,"downlink",70)
+    testNewRuntime(t,dir)
+
+    gate.Lock()
+    u:=gate.users["xmesh-u101"]
+    if u==nil {
+        gate.Unlock()
+        t.Fatal("old WAL did not restore account-level debt")
+    }
+    report:=state(main,u)
+    gate.Unlock()
+    if !report.UnreconciledHistoricRuntime ||
+        report.ConservativeHistoricDebtBytes!=600 ||
+        report.HistoricRuntimeCount!=2 || report.HistoricJournalCount!=3 ||
+        report.FinalMeterVerified || report.Refundable{
+        t.Fatalf("unresolved old-main+CDN byte history vanished: %+v",report)
+    }
+    if err:=Register(ctx(9201),main,func(){});!errors.Is(err,errHistoricMeterDebt){
+        t.Fatalf("old main was readmitted with reset Xray counters: %v",err)
+    }
+    if err:=Register(ctx(9202),cdn,func(){});!errors.Is(err,errHistoricMeterDebt){
+        t.Fatalf("old CDN alias bypassed user-level debt: %v",err)
+    }
+    if err:=BeginMeterWrite(main,"downlink");!errors.Is(err,errHistoricMeterDebt){
+        t.Fatalf("old user could transmit new downlink: %v",err)
+    }
+    if BeginMeterRead(cdn)||MayDeliverMeterRead(main) {
+        t.Fatal("old user kept unmetered asynchronous reader")
+    }
+    if err:=Register(ctx(9203),newUser,func(){});err!=nil{
+        t.Fatalf("unrelated clean user was incorrectly suspended: %v",err)
+    }
+    if err:=BeginMeterWrite(newUser,"downlink");err!=nil{
+        t.Fatalf("unrelated clean metered transport denied: %v",err)
+    }
+    EndMeterWrite(newUser,"downlink")
+    Finish(ctx(9203))
+    RouteFinish(ctx(9203))
+    // A second restart must not clean a stale old WAL by resetting memory.
+    testNewRuntime(t,dir)
+    gate.Lock()
+    retry:=gate.users["xmesh-u101"]
+    still:=retry!=nil&&retry.historicDebtUnresolved&&retry.historicDebtBytes==600
+    gate.Unlock()
+    if !still{t.Fatal("second restart silently forgave historical debt")}
+}
+func TestHistoricWALSameAccountDifferentAliasesNeverReopens(t *testing.T){
+    dir,_:=testMeterCounter(t,"xmesh-u102--vless-main","uplink")
+    run:=strings.Repeat("b",64)
+    testHistoricWAL(t,dir,run,"xmesh-u101--vless-main","uplink",1)
+    testNewRuntime(t,dir)
+    if err:=Register(ctx(9321),"xmesh-u101--vless-cdn",func(){});
+        !errors.Is(err,errHistoricMeterDebt) {
+        t.Fatalf("new inbound alias reopened old account: %v",err)
+    }
+    // No operator-controlled flag, arbitrary drain or legacy bare string
+    // can authorize a new metered write while old bytes remain pending.
+    var panicked bool
+    func(){
+        defer func(){panicked=recover()!=nil}()
+        AuditRawCounterAdd(rawMeterName("xmesh-u101--vless-cdn","uplink"),1,true,
+            func()int64{return 0},func()int64{return 1})
+    }()
+    if !panicked{t.Fatal("raw stats mutation bypassed unresolved old-runtime debt")}
+}
+func TestHistoricWALCorruptOrOverflowStopsRuntimeBeforeUserAdmission(t *testing.T){
+    for _,kind:=range []string{"corrupt","overflow","too-many"} {
+        t.Run(kind,func(t *testing.T){
+            dir,_:=testMeterCounter(t,"xmesh-u102--vless-main","uplink")
+            runtimeA:=strings.Repeat("a",64)
+            email:="xmesh-u101--vless-main"
+            switch kind {
+            case "corrupt":
+                file:=testHistoricWAL(t,dir,runtimeA,email,"uplink",8)
+                data,err:=os.ReadFile(file)
+                if err!=nil{t.Fatal(err)}
+                data=data[:len(data)-1]
+                if err:=os.WriteFile(file,data,0600);err!=nil{t.Fatal(err)}
+            case "overflow":
+                testHistoricWAL(t,dir,runtimeA,email,"uplink",1<<63-1)
+                testHistoricWAL(t,dir,runtimeA,email,"downlink",1)
+            case "too-many":
+                // A boundary-name overflow cannot sneak in as an ignored
+                // suffix or unrelated file during runtime recovery.
+                if err:=os.WriteFile(
+                    filepath.Join(dir,"meter-invalid-unbounded"),
+                    []byte("unexpected"),0600);err!=nil{t.Fatal(err)}
+            }
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil{
+                t.Fatalf("unsafe old runtime %s was silently permitted",kind)
+            }
+        })
+    }
+}
