@@ -83,18 +83,24 @@ func commitDurableCounterTaint(dir,user string) error {
     pending,err:=os.CreateTemp(dir,".taint-pending-")
     if err!=nil{return err}
     name:=pending.Name()
-    defer os.Remove(name)
+    // A failed publication may be the only crash-durable record of an
+    // unaccounted raw counter change. Never unconditionally unlink it.
     if _,err=pending.Write(append(data,'\n'));err!=nil{
         _=pending.Close()
         return err
     }
     if err=pending.Sync();err!=nil{_ = pending.Close();return err}
     if err=pending.Close();err!=nil{return err}
+    // The pending filename must survive a power cut even if publication
+    // has NOT yet created a final hardlink. fsync(file) is insufficient.
+    if err=experimentalJournalSync(dir);err!=nil{return err}
     // No rename or overwrite: a conflicting immutable taint must block.
-    if err=os.Link(name,path);err!=nil{return fmt.Errorf("unsafe taint link: %w",err)}
-    if err=syncFenceDirectory(dir);err!=nil{return err}
-    if err=os.Remove(name);err!=nil{return err}
-    return syncFenceDirectory(dir)
+    // A failed link/final fsync must leave the pending inode for fail-closed
+    // restart reconciliation; success fsyncs the cleanup as well.
+    if err=publishDurableJournal(dir,name,path);err!=nil{
+        return fmt.Errorf("unsafe taint publication: %w",err)
+    }
+    return nil
 }
 
 // Preserve already validated inode on a post-link/pre-cleanup crash; an
