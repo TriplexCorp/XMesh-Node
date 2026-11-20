@@ -82,10 +82,27 @@ func configureObservedCheckpoint(directory string) error {
     // This does not restore a previous process's in-memory StatsService:
     // the ledger supplies a conservative floor, not a settled final meter.
     if err:=verifyMeterJournalDirectory(directory);err!=nil{return err}
+    // Never silently reset a previously metered user's absolute usage when
+    // Xray starts with a fresh, zeroed StatsService. These durable old
+    // incarnation debts require signed Node->Nexus reconciliation before
+    // that user can be admitted again. Other users remain available.
+    historic,err:=loadUnreconciledHistoricMeterDebts(directory,processID)
+    if err!=nil{return err}
     if err:=restoreDurableFences(directory);err!=nil{return err}
     gate.Lock()
+    if len(gate.sessions)!=0 {
+        gate.Unlock()
+        return errors.New("cannot bind old-Xray byte debt after session admission")
+    }
     gate.runtimeID=processID
     gate.meterTails=map[string]durableMeterTail{}
+    for account,debt:=range historic{
+        u:=ensureUser(account)
+        u.historicDebtUnresolved=true
+        u.historicDebtBytes=debt.bytes
+        u.historicRuntimeCount=len(debt.runtimes)
+        u.historicJournalCount=debt.files
+    }
     gate.Unlock()
     observed.Lock()
     defer observed.Unlock()
