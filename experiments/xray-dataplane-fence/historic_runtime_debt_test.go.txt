@@ -1,7 +1,6 @@
 package xmeshdrain
 
 import (
-    "context"
     "encoding/json"
     "errors"
     "os"
