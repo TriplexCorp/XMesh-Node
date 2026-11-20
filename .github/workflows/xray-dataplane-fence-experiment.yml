@@ -50,6 +50,9 @@ jobs:
         run: |
           cd .experimental-xray
           go test -race ./app/xmeshdrain
+          # A real audited StatsService may not accept out-of-origin raw
+          # byte increments or overflow, even with another inbound active.
+          go test -race ./app/xmeshdrain -run 'TestRawUserByteAdd|TestTrackedExactAlias|TestRawCounterOverflow' -count=15
           # Stress the revoked-read delivery gate with the race detector.
           go test -race ./app/xmeshdrain -run 'TestMeterRead' -count=15
           # The async timeout-reader probe exercises exact pinned common/buf.
