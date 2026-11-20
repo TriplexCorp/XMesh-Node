@@ -13,6 +13,7 @@ type xmeshCounter struct{ value atomic.Int64 }
 func(c *xmeshCounter) Value() int64 {return c.value.Load()}
 func(c *xmeshCounter) Set(v int64) int64 {return c.value.Swap(v)}
 func(c *xmeshCounter) Add(v int64) int64 {return c.value.Add(v)-v}
+func(c *xmeshCounter) ExperimentalAddMetered(v int64) int64 {return c.Add(v)}
 
 type xmeshBlockingReader struct {
     begun chan struct{}
