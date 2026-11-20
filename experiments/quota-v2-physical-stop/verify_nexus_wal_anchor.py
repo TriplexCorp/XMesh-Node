@@ -15,7 +15,11 @@ all detached Xray writers or complete transmitted byte counts.
 import hashlib
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+
+HERE=Path(__file__).resolve().parent
+sys.path.insert(0,str(HERE.parent/"xray-dataplane-fence"))
 
 import sign_observation as observed
 import witness_inventory as node
