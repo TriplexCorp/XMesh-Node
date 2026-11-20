@@ -82,6 +82,16 @@ def _verify_witness(raw, registry_bytes, node_id, public_key):
     # subset of whichever files happen to still be present after a crash.
     if p["inventorySequence"]!=registry_bytes.count(b"\n"):
         raise ValueError("signed birth count differs from actual old WAL index")
+    # A remote receipt MUST also preserve the exact last gapless
+    # registry hash, not merely quote a signed standalone byte digest.
+    try:
+        last=observed.strict_json(registry_bytes[:-1].split(b"\n")[-1])
+    except (ValueError,UnicodeDecodeError) as exc:
+        raise ValueError("noncanonical remote birth-tail JSON") from exc
+    if last.get("digest")!=p["inventoryTailDigest"] or (
+            last.get("sequence")!=p["inventorySequence"] or
+            type(last.get("sequence")) is not int):
+        raise ValueError("remote Xray witness birth-tail does not match signed prefix")
     with tempfile.TemporaryDirectory(prefix="xmesh-node-birth-verify-") as root:
         message=Path(root)/"message"
         signature=Path(root)/"signature"
