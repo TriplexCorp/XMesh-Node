@@ -34,7 +34,9 @@ func addFixtureBytes(t *testing.T,c stats.Counter,email,direction string,n int64
     t.Helper()
     if err:=BeginMeterWrite(email,direction);err!=nil{t.Fatal(err)}
     defer EndMeterWrite(email,direction)
-    c.Add(n)
+    audited,ok:=c.(interface{ExperimentalAddMetered(int64) int64})
+    if !ok{t.Fatal("fixture counter lacks auditable metered method")}
+    audited.ExperimentalAddMetered(n)
 }
 
 func setupCheckpoint(t *testing.T,email string,initialUp,initialDown int64) (string,func(int64,int64)) {
