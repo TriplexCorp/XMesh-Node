@@ -16,7 +16,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
+
+# The cryptographic signer is injected separately from this stop-chain
+# experiment. Keep direct-script and independently imported audit modes
+# deterministic rather than depending on the test's import order.
+HERE=Path(__file__).resolve().parent
+sys.path.insert(0,str(HERE.parent/"xray-dataplane-fence"))
 
 import journal_integrity as journal
 import meter_inventory_audit as registry
