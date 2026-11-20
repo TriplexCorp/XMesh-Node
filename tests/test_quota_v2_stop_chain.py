@@ -476,7 +476,7 @@ class StopChainTests(unittest.TestCase):
                     elif kind == "duplicate-index":
                         registry.write_bytes(original+original)
                     elif kind == "wrong-first-digest":
-                        first=json.loads(original[:-1].split(b"\\n")[0])
+                        first=json.loads(original[:-1].split(b"\n")[0])
                         first["firstWalDigest"]="a"*64
                         first["digest"]=""
                         first["digest"]=hashlib.sha256(
