@@ -213,6 +213,9 @@ def run(root: Path):
                     link.Reader.(*buf.TimeoutWrapperReader).ExperimentalEnd = func() {
                         xmeshdrain.EndMeterRead(email)
                     }
+                    link.Reader.(*buf.TimeoutWrapperReader).ExperimentalMayDeliver = func() bool {
+                        return xmeshdrain.MayDeliverMeterRead(email)
+                    }
                 }
 ''',
     )
@@ -432,30 +435,50 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
     reader_source = reader_file.read_text(encoding="utf-8")
     reader_source = replace_once(
         reader_source,
+        '\t"os"\n',
+        '\t"os"\n\t"sync"\n',
+    )
+    reader_source = replace_once(
+        reader_source,
         '\tdone chan struct{}\n}',
         '\tdone chan struct{}\n'
+        '\tExperimentalMu sync.Mutex\n'
         '\tExperimentalBegin func() bool\n'
-        '\tExperimentalEnd func()\n}',
+        '\tExperimentalEnd func()\n'
+        '\tExperimentalMayDeliver func() bool\n}',
     )
     reader_source = replace_once(
         reader_source,
         'func (r *TimeoutWrapperReader) ReadMultiBuffer() (MultiBuffer, error) {\n',
         '''func (r *TimeoutWrapperReader) ReadMultiBuffer() (MultiBuffer, error) {
     if r.ExperimentalBegin != nil {
-        // A timed-out goroutine has already accounted the result before
-        // closing done. Never count its bytes again on the next read.
+        // One wrapper may not hand the same completed async buffer to two
+        // competing callers. The read goroutine does NOT acquire this mutex;
+        // it writes the result before closing done (a synchronization point).
+        r.ExperimentalMu.Lock()
+        defer r.ExperimentalMu.Unlock()
         if r.done != nil {
             <-r.done
             r.done = nil
-            return r.mb, r.err
+            mb, err := r.mb, r.err
+            r.mb, r.err = nil, nil
+            if r.ExperimentalMayDeliver == nil || !r.ExperimentalMayDeliver() {
+                ReleaseMulti(mb)
+                return nil, io.EOF
+            }
+            return mb, err
         }
         if !r.ExperimentalBegin() {
             return nil, io.EOF
         }
-        r.mb, r.err = r.Reader.ReadMultiBuffer()
-        if r.Counter != nil { r.Counter.Add(int64(r.mb.Len())) }
+        mb, err := r.Reader.ReadMultiBuffer()
+        if r.Counter != nil { r.Counter.Add(int64(mb.Len())) }
         r.ExperimentalEnd()
-        return r.mb, r.err
+        if r.ExperimentalMayDeliver == nil || !r.ExperimentalMayDeliver() {
+            ReleaseMulti(mb)
+            return nil, io.EOF
+        }
+        return mb, err
     }
 ''',
     )
@@ -464,13 +487,18 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
         'func (r *TimeoutWrapperReader) ReadMultiBufferTimeout(duration time.Duration) (MultiBuffer, error) {\n',
         '''func (r *TimeoutWrapperReader) ReadMultiBufferTimeout(duration time.Duration) (MultiBuffer, error) {
     if r.ExperimentalBegin != nil {
+        // Serialize access to r.done, r.mb and r.err across concurrent
+        // callers; otherwise two timeout waiters can both deliver one
+        // completed buffer (or one waiter can overwrite the done channel).
+        r.ExperimentalMu.Lock()
+        defer r.ExperimentalMu.Unlock()
         if r.done == nil {
             if !r.ExperimentalBegin() {
                 return nil, io.EOF
             }
             r.done = make(chan struct{})
-            // The read may outlive the caller's timeout. Its metering and
-            // completion must NOT outlive the tracked in-flight operation.
+            // An async timeout does not end the metered read. Its completion
+            // is counted before done is closed, even if this call times out.
             go func() {
                 r.mb, r.err = r.Reader.ReadMultiBuffer()
                 if r.Counter != nil { r.Counter.Add(int64(r.mb.Len())) }
@@ -483,7 +511,13 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
         select {
         case <-r.done:
             r.done = nil
-            return r.mb, r.err
+            mb, err := r.mb, r.err
+            r.mb, r.err = nil, nil
+            if r.ExperimentalMayDeliver == nil || !r.ExperimentalMayDeliver() {
+                ReleaseMulti(mb)
+                return nil, io.EOF
+            }
+            return mb, err
         case <-timeout.C:
             return nil, nil
         }

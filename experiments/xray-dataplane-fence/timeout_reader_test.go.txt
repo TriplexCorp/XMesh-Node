@@ -2,6 +2,7 @@ package buf
 
 import (
     "io"
+    "sync"
     "sync/atomic"
     "testing"
     "time"
@@ -44,6 +45,7 @@ func TestExperimentalTimeoutReaderCountsBeforeDrain(t *testing.T) {
             return true
         },
         ExperimentalEnd:func(){finish.Add(1)},
+        ExperimentalMayDeliver:func()bool{return allowed.Load()},
     }
     mb,err:=reader.ReadMultiBufferTimeout(10*time.Millisecond)
     if err!=nil||mb!=nil {t.Fatalf("first timeout: %v %v",mb,err)}
@@ -60,12 +62,13 @@ func TestExperimentalTimeoutReaderCountsBeforeDrain(t *testing.T) {
     allowed.Store(false)
     close(underlying.unblock)
     mb,err=reader.ReadMultiBuffer()
-    if err!=nil||mb.Len()!=9 {t.Fatalf("pending read result: %v %v",mb,err)}
+    if err!=io.EOF||mb!=nil {
+        t.Fatalf("pending read escaped fenced user: %v %v",mb,err)
+    }
     if finish.Load()!=1||counter.Value()!=9 {
         t.Fatalf("read completion before accounting: counter=%d finish=%d",
             counter.Value(),finish.Load())
     }
-    ReleaseMulti(mb)
     mb,err=reader.ReadMultiBuffer()
     if err!=io.EOF||mb!=nil || underlying.calls.Load()!=1 ||
         counter.Value()!=9||begin.Load()!=1{
@@ -87,6 +90,7 @@ func TestExperimentalDirectReadReturnsAfterCounterUpdate(t *testing.T){
         Reader:source,Counter:counter,
         ExperimentalBegin:func()bool{begin.Add(1);return true},
         ExperimentalEnd:func(){finish.Add(1)},
+        ExperimentalMayDeliver:func()bool{return true},
     }
     mb,err:=r.ReadMultiBuffer()
     if err!=nil||mb.Len()!=9{t.Fatalf("direct read failed: %v %v",mb,err)}
@@ -95,4 +99,126 @@ func TestExperimentalDirectReadReturnsAfterCounterUpdate(t *testing.T){
             counter.Value(),begin.Load(),finish.Load())
     }
     ReleaseMulti(mb)
+}
+
+// A single timed-out read must not become N separately returned buffers when
+// multiple route goroutines reach the same TimeoutWrapperReader concurrently.
+type xmeshSingleRead struct {
+    started chan struct{}
+    release chan struct{}
+    calls atomic.Int32
+}
+func(r *xmeshSingleRead) ReadMultiBuffer()(MultiBuffer,error){
+    if r.calls.Add(1)!=1{return nil,io.EOF}
+    close(r.started)
+    <-r.release
+    b:=New()
+    if _,err:=b.Write([]byte("exactly-7"));err!=nil{return nil,err}
+    return MultiBuffer{b},nil
+}
+
+func TestExperimentalConcurrentTimeoutsNeverDuplicateBufferedBytes(t *testing.T){
+    underlying:=&xmeshSingleRead{
+        started:make(chan struct{}),release:make(chan struct{}),
+    }
+    var begin,finish atomic.Int32
+    c:=&xmeshCounter{}
+    r:=&TimeoutWrapperReader{
+        Reader:underlying,Counter:c,
+        ExperimentalBegin:func()bool{begin.Add(1);return true},
+        ExperimentalEnd:func(){finish.Add(1)},
+        ExperimentalMayDeliver:func()bool{return true},
+    }
+    const callers=16
+    var wg sync.WaitGroup
+    failures:=make(chan string,callers)
+    for i:=0;i<callers;i++ {
+        wg.Add(1)
+        go func(){
+            defer wg.Done()
+            mb,err:=r.ReadMultiBufferTimeout(2*time.Millisecond)
+            if mb!=nil || err!=nil {
+                if mb!=nil{ReleaseMulti(mb)}
+                failures<-"timed-out reader returned duplicate data"
+            }
+        }()
+    }
+    select{
+    case <-underlying.started:
+    case <-time.After(3*time.Second):t.Fatal("async read not started")
+    }
+    wg.Wait()
+    if len(failures)!=0 {t.Fatal(<-failures)}
+    if underlying.calls.Load()!=1 || begin.Load()!=1 ||
+        finish.Load()!=0 || c.Value()!=0 {
+        t.Fatalf("parallel timeout started another read: %d %d %d %d",
+            underlying.calls.Load(),begin.Load(),finish.Load(),c.Value())
+    }
+    close(underlying.release)
+    successes:=atomic.Int32{}
+    var resultWG sync.WaitGroup
+    for i:=0;i<callers;i++ {
+        resultWG.Add(1)
+        go func(){
+            defer resultWG.Done()
+            mb,err:=r.ReadMultiBuffer()
+            if mb!=nil {
+                if err!=nil || mb.Len()!=9 {failures<-"invalid shared buffer"}
+                successes.Add(1)
+                ReleaseMulti(mb)
+            }else if err!=io.EOF {
+                failures<-"missing EOF after the only buffered read"
+            }
+        }()
+    }
+    resultWG.Wait()
+    if len(failures)!=0{t.Fatal(<-failures)}
+    if successes.Load()!=1 || c.Value()!=9 {
+        t.Fatalf("same buffered bytes delivered or billed more than once: %d %d",
+            successes.Load(),c.Value())
+    }
+}
+
+// Synchronous reads may return data after a fence raced the actual blocking
+// read; its already-counted bytes must be discarded without delivery.
+func TestExperimentalDirectReadDiscardsDataWhenFencedInFlight(t *testing.T){
+    // Keep an immutable handle to the signal channel. The fixture clears
+    // source.begun after notifying; reading that field concurrently is itself
+    // a data race and would obscure actual TimeoutWrapperReader races.
+    started:=make(chan struct{})
+    source:=&xmeshBlockingReader{
+        begun:started,unblock:make(chan struct{}),
+    }
+    counter:=&xmeshCounter{}
+    var begin,finish atomic.Int32
+    allowed:=atomic.Bool{}
+    allowed.Store(true)
+    reader:=&TimeoutWrapperReader{
+        Reader:source,Counter:counter,
+        ExperimentalBegin:func()bool{
+            if !allowed.Load(){return false}
+            begin.Add(1)
+            return true
+        },
+        ExperimentalEnd:func(){finish.Add(1)},
+        ExperimentalMayDeliver:func()bool{return allowed.Load()},
+    }
+    result:=make(chan error,1)
+    go func(){
+        mb,err:=reader.ReadMultiBuffer()
+        if mb!=nil {ReleaseMulti(mb);result<-io.ErrUnexpectedEOF;return}
+        result<-err
+    }()
+    <-started
+    allowed.Store(false)
+    close(source.unblock)
+    select{
+    case err:=<-result:
+        if err!=io.EOF {t.Fatalf("late direct buffer escaped fence: %v",err)}
+    case <-time.After(2*time.Second):t.Fatal("blocked direct reader did not complete")
+    }
+    if counter.Value()!=9 || begin.Load()!=1 || finish.Load()!=1 {
+        t.Fatalf("direct in-flight read was not accounted before drain: %d %d %d",
+            counter.Value(),begin.Load(),finish.Load())
+    }
 }
