@@ -1,0 +1,155 @@
+package xmeshdrain
+
+import (
+    "bytes"
+    "encoding/json"
+    "errors"
+    "os"
+    "path/filepath"
+    "strings"
+    "testing"
+)
+
+func TestInventoryDeletedOldWALOrMissingIndexDeniesRestart(t *testing.T){
+    for _,kind:=range []string{"deleted-wal","deleted-index","truncated-index","unindexed-extra"} {
+        t.Run(kind,func(t *testing.T){
+            email:="xmesh-u101--vless-main"
+            dir,c:=testMeterCounter(t,email,"uplink")
+            testMeterAdd(t,c,email,"uplink",47)
+            if err:=verifyMeterJournalDirectory(dir);err!=nil{t.Fatal(err)}
+            index,err:=readInventory(dir)
+            if err!=nil || len(index.steps)!=1{t.Fatalf("missing indexed first byte: %v",err)}
+            filename:=meterTestFile(t,dir,email,"uplink")
+            inventory:=filepath.Join(dir,inventoryName)
+            switch kind{
+            case "deleted-wal":
+                if err:=os.Remove(filename);err!=nil{t.Fatal(err)}
+            case "deleted-index":
+                if err:=os.Remove(inventory);err!=nil{t.Fatal(err)}
+            case "truncated-index":
+                b,err:=os.ReadFile(inventory)
+                if err!=nil{t.Fatal(err)}
+                if err=os.WriteFile(inventory,b[:len(b)-1],0600);err!=nil{t.Fatal(err)}
+            case "unindexed-extra":
+                orphan:=filepath.Join(dir,"meter-"+strings.Repeat("b",64)+".jsonl")
+                if err:=os.WriteFile(orphan,[]byte("unregistered\n"),0600);err!=nil{t.Fatal(err)}
+            }
+            if err:=syncFenceDirectory(dir);err!=nil{t.Fatal(err)}
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil{
+                t.Fatalf("%s silently forgot byte-WAL evidence",kind)
+            }
+        })
+    }
+}
+
+func TestInventoryFirstRecordRehashStillCannotRewriteHistory(t *testing.T){
+    email:="xmesh-u101--vless-main"
+    dir,c:=testMeterCounter(t,email,"downlink")
+    testMeterAdd(t,c,email,"downlink",20)
+    file:=meterTestFile(t,dir,email,"downlink")
+    raw,err:=os.ReadFile(file)
+    if err!=nil{t.Fatal(err)}
+    var step durableMeterStep
+    if err=json.Unmarshal(bytes.TrimSpace(raw),&step);err!=nil{t.Fatal(err)}
+    step.NextBytes=24
+    step.Digest,err=meterStepDigest(step)
+    if err!=nil{t.Fatal(err)}
+    data,err:=json.Marshal(step)
+    if err!=nil{t.Fatal(err)}
+    if err=os.WriteFile(file,append(data,'\n'),0600);err!=nil{t.Fatal(err)}
+    if _,err=readMeterTail(file);err!=nil{
+        t.Fatalf("rewritten local WAL should have a valid local hash chain: %v",err)
+    }
+    resetGate()
+    if err=configureObservedCheckpoint(dir);err==nil{
+        t.Fatal("independent birth index ignored rewritten but rehashed WAL")
+    }
+}
+
+func TestInventoryFsyncFaultCannotAdvanceRawCounterOrResurrectAccount(t *testing.T){
+    for _,kind:=range []string{"file","directory"} {
+        t.Run(kind,func(t *testing.T){
+            email:="xmesh-u101--vless-main"
+            dir,c:=testMeterCounter(t,email,"uplink")
+            prevFile:=experimentalInventoryFileSync
+            prevDir:=experimentalInventoryDirectorySync
+            defer func(){
+                experimentalInventoryFileSync=prevFile
+                experimentalInventoryDirectorySync=prevDir
+            }()
+            failure:=errors.New("injected inventory fsync crash")
+            if kind=="file"{
+                experimentalInventoryFileSync=func(*os.File)error{return failure}
+            }else{
+                experimentalInventoryDirectorySync=func(string)error{return failure}
+            }
+            if err:=BeginMeterWrite(email,"uplink");err!=nil{t.Fatal(err)}
+            var fault interface{}
+            func(){
+                defer func(){fault=recover()}()
+                c.(interface{ExperimentalAddMetered(int64)int64}).ExperimentalAddMetered(99)
+            }()
+            EndMeterWrite(email,"uplink")
+            if fault==nil || c.Value()!=0{
+                t.Fatalf("counter mutated before durable birth record: panic=%v bytes=%d",fault,c.Value())
+            }
+            experimentalInventoryFileSync=prevFile
+            experimentalInventoryDirectorySync=prevDir
+            // Go unit test cannot change its own kernel PID. The
+            // production panic terminates Xray; a real next incarnation
+            // has a different runtimeID, so model that explicitly rather
+            // than resetGate() inside the SAME process and claim reboot.
+            if err:=verifyMeterJournalDirectory(dir);err==nil{
+                newRuntime:=strings.Repeat("f",64)
+                gate.Lock()
+                oldRuntime:=gate.runtimeID
+                gate.Unlock()
+                if newRuntime==oldRuntime{newRuntime=strings.Repeat("e",64)}
+                debts,err:=loadUnreconciledHistoricMeterDebts(dir,newRuntime)
+                if err!=nil{t.Fatal(err)}
+                debt:=debts["xmesh-u101"]
+                if debt.bytes<99 || debt.files!=1 {
+                    t.Fatal("new process lost fsynced but uncertain old-Xray byte intent")
+                }
+            }
+        })
+    }
+}
+
+func TestMultipleHistoricWALAndCrossInboundIndexSurvivesRepeatedRestart(t *testing.T) {
+    dir,_:=testMeterCounter(t,"xmesh-u102--vless-main","uplink")
+    run:=strings.Repeat("a",64)
+    testHistoricWAL(t,dir,run,"xmesh-u101--vless-main","uplink",17)
+    testHistoricWAL(t,dir,run,"xmesh-u101--vless-main","downlink",19)
+    testHistoricWAL(t,dir,run,"xmesh-u101--vless-cdn","uplink",23)
+    testHistoricWAL(t,dir,strings.Repeat("b",64),
+        "xmesh-u102--vless-main","downlink",29)
+    inv,err:=readInventory(dir)
+    if err!=nil || len(inv.steps)!=4 || inv.tail.Sequence!=4{
+        t.Fatalf("lost indexed old process WALs: %+v %v",inv,err)
+    }
+    testNewRuntime(t,dir)
+    gate.Lock()
+    a:=gate.users["xmesh-u101"]
+    b:=gate.users["xmesh-u102"]
+    ok:=a!=nil&&a.historicDebtBytes==59 && b!=nil&&b.historicDebtBytes==29
+    gate.Unlock()
+    if !ok{t.Fatal("indexed main/CDN multi-runtime bytes were forgotten")}
+    testNewRuntime(t,dir)
+    if err:=verifyMeterJournalDirectory(dir);err!=nil{t.Fatal(err)}
+}
+
+func TestInventoriedWALDuplicateSequenceAndSymlinkFailClosed(t *testing.T){
+    email:="xmesh-u101--vless-main"
+    dir,c:=testMeterCounter(t,email,"uplink")
+    testMeterAdd(t,c,email,"uplink",4)
+    path:=filepath.Join(dir,inventoryName)
+    raw,err:=os.ReadFile(path)
+    if err!=nil{t.Fatal(err)}
+    if err=os.WriteFile(path,append(raw,raw...),0600);err!=nil{t.Fatal(err)}
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err==nil{
+        t.Fatal("duplicate indexed WAL accepted")
+    }
+}

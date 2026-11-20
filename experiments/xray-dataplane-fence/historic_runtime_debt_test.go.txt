@@ -29,6 +29,7 @@ func testHistoricWAL(t *testing.T,dir,runtimeID,email,direction string,amount ui
     if err=fd.Sync();err!=nil{fd.Close();t.Fatal(err)}
     if err=fd.Close();err!=nil{t.Fatal(err)}
     if err=syncFenceDirectory(dir);err!=nil{t.Fatal(err)}
+    if err:=appendMeterInventory(dir,step);err!=nil{t.Fatal(err)}
     return file
 }
 func testNewRuntime(t *testing.T,dir string) {

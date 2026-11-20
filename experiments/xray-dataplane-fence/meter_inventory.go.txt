@@ -1,0 +1,226 @@
+// CI-ONLY: deletion-evident registry of every first fsynced Xray byte-WAL.
+//
+// A directory scan of existing meter-* files alone misses an old runtime's
+// bytes if a WAL file is accidentally removed between process restarts.
+// Write one hash-chained inventory entry after every NEW WAL has been fsynced,
+// but BEFORE Count.Add / SizeStatWriter delivers a packet. Reject missing
+// inventory entries, missing indexed WALs, foreign files, torn lines, orphaned
+// WALs, symlinks, hardlinks, hash-chain changes and inode replacement.
+//
+// This is NOT an off-host anchor: privileged deletion of both the registry
+// and every WAL is not provable locally. A signed Nexus-side witness must be
+// independently checked before ever allowing an actual quota rollover.
+package xmeshdrain
+
+import (
+    "bytes"
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "os"
+    "path/filepath"
+    "strings"
+    "syscall"
+)
+
+const inventoryName = "xmesh-meter-inventory-v1.jsonl"
+const inventoryMaxEntries = 4096
+const inventoryMaxLine = 1024
+
+var experimentalInventoryFileSync = func(f *os.File) error { return f.Sync() }
+var experimentalInventoryDirectorySync = syncFenceDirectory
+
+type inventoryStep struct {
+    SchemaVersion int `json:"schemaVersion"`
+    Sequence uint64 `json:"sequence"`
+    Filename string `json:"filename"`
+    RuntimeID string `json:"runtimeId"`
+    Email string `json:"email"`
+    Direction string `json:"direction"`
+    FirstWalDigest string `json:"firstWalDigest"`
+    PreviousDigest string `json:"previousDigest"`
+    Digest string `json:"digest"`
+}
+
+type inventorySnapshot struct {
+    steps map[string]inventoryStep
+    tail inventoryStep
+    size int64
+    dev uint64
+    ino uint64
+    exists bool
+}
+
+func inventoryDigest(step inventoryStep) (string,error) {
+    step.Digest=""
+    data,err:=json.Marshal(step)
+    if err!=nil { return "",err }
+    sum:=sha256.Sum256(append(data,'\n'))
+    return hex.EncodeToString(sum[:]),nil
+}
+
+func readInventory(dir string) (inventorySnapshot,error) {
+    snapshot:=inventorySnapshot{steps:map[string]inventoryStep{}}
+    path:=filepath.Join(dir,inventoryName)
+    f,st,err:=openMeterFile(path,syscall.O_RDONLY)
+    if os.IsNotExist(err){return snapshot,nil}
+    if err!=nil{return snapshot,fmt.Errorf("Xray byte inventory is untrusted: %w",err)}
+    defer f.Close()
+    if st.Size==0 || st.Size>meterLedgerMaxBytes {
+        return snapshot,errors.New("missing or too large Xray meter inventory")
+    }
+    raw,err:=io.ReadAll(io.LimitReader(f,meterLedgerMaxBytes+1))
+    if err!=nil{return snapshot,err}
+    if int64(len(raw))!=st.Size || !bytes.HasSuffix(raw,[]byte{'\n'}) {
+        return snapshot,errors.New("torn or replaced Xray meter inventory")
+    }
+    lines:=bytes.Split(raw[:len(raw)-1],[]byte{'\n'})
+    if len(lines)==0 || len(lines)>inventoryMaxEntries {
+        return snapshot,errors.New("unbounded Xray meter inventory")
+    }
+    prev:=strings.Repeat("0",64)
+    for i,line:=range lines {
+        if len(line)==0 || len(line)>inventoryMaxLine {
+            return snapshot,errors.New("oversize or blank byte inventory record")
+        }
+        var step inventoryStep
+        if err:=json.Unmarshal(line,&step);err!=nil{return snapshot,err}
+        canonical,err:=json.Marshal(step)
+        if err!=nil || !bytes.Equal(line,canonical){
+            return snapshot,errors.New("noncanonical or duplicate-key byte inventory")
+        }
+        want,err:=inventoryDigest(step)
+        if err!=nil{return snapshot,err}
+        if step.SchemaVersion!=1 || step.Sequence!=uint64(i+1) ||
+            step.PreviousDigest!=prev || step.Digest!=want ||
+            len(step.RuntimeID)!=64 || len(step.FirstWalDigest)!=64 ||
+            len(step.Digest)!=64 || step.Email=="" ||
+            (step.Direction!="uplink" && step.Direction!="downlink") ||
+            filepath.Base(step.Filename)!=step.Filename ||
+            step.Filename!=filepath.Base(meterLedgerPath(dir,step.RuntimeID,
+                                                        step.Email,step.Direction)) {
+            return snapshot,errors.New("Xray meter inventory chain or identity mismatch")
+        }
+        if _,used:=snapshot.steps[step.Filename];used{
+            return snapshot,errors.New("Xray meter inventory duplicated WAL filename")
+        }
+        // A first-WAL digest must be hex to prevent untrusted JSON strings
+        // from being treated as signed authoritative byte sources.
+        for _,value:=range []string{step.RuntimeID,step.FirstWalDigest,step.Digest}{
+            for _,c:=range value{
+                if !(c>='0'&&c<='9'||c>='a'&&c<='f'){
+                    return snapshot,errors.New("nonhex Xray inventory fingerprint")
+                }
+            }
+        }
+        snapshot.steps[step.Filename]=step
+        snapshot.tail=step
+        prev=step.Digest
+    }
+    after,err:=f.Stat()
+    if err!=nil{return snapshot,err}
+    fst,ok:=after.Sys().(*syscall.Stat_t)
+    if !ok || fst.Dev!=st.Dev || fst.Ino!=st.Ino || fst.Size!=st.Size{
+        return snapshot,errors.New("Xray inventory changed during verification")
+    }
+    snapshot.exists=true
+    snapshot.size=st.Size
+    snapshot.dev=uint64(st.Dev)
+    snapshot.ino=st.Ino
+    return snapshot,nil
+}
+
+// Called while gate.Mutex serializes the trusted first meter write.
+// Each entry is fsynced BEFORE the Xray StatsService user counter increases.
+func appendMeterInventory(dir string,first durableMeterStep) error {
+    inventory,err:=readInventory(dir)
+    if err!=nil{return err}
+    filename:=filepath.Base(meterLedgerPath(dir,first.RuntimeID,
+                                           first.Email,first.Direction))
+    if _,exists:=inventory.steps[filename];exists{
+        return errors.New("Xray meter WAL already registered in inventory")
+    }
+    if len(inventory.steps)>=inventoryMaxEntries {
+        return errors.New("Xray byte WAL inventory exhausted")
+    }
+    sequence:=uint64(1)
+    previous:=strings.Repeat("0",64)
+    if inventory.exists {
+        sequence=inventory.tail.Sequence+1
+        previous=inventory.tail.Digest
+    }
+    entry:=inventoryStep{
+        SchemaVersion:1,Sequence:sequence,Filename:filename,
+        RuntimeID:first.RuntimeID,Email:first.Email,
+        Direction:first.Direction,FirstWalDigest:first.Digest,
+        PreviousDigest:previous,
+    }
+    entry.Digest,err=inventoryDigest(entry)
+    if err!=nil{return err}
+    data,err:=json.Marshal(entry)
+    if err!=nil{return err}
+    data=append(data,'\n')
+    if len(data)>inventoryMaxLine || inventory.size+int64(len(data))>meterLedgerMaxBytes{
+        return errors.New("Xray meter inventory capacity exhausted")
+    }
+    flags:=syscall.O_APPEND|syscall.O_WRONLY
+    if !inventory.exists{flags|=syscall.O_CREAT|syscall.O_EXCL}
+    f,st,err:=openMeterFile(filepath.Join(dir,inventoryName),flags)
+    if err!=nil{return err}
+    if (inventory.exists && (uint64(st.Dev)!=inventory.dev ||
+            st.Ino!=inventory.ino || st.Size!=inventory.size)) ||
+       (!inventory.exists && st.Size!=0){
+        _=f.Close()
+        return errors.New("Xray meter inventory inode or length changed")
+    }
+    n,writeErr:=f.Write(data)
+    if writeErr==nil && n!=len(data){writeErr=io.ErrShortWrite}
+    if writeErr==nil{writeErr=experimentalInventoryFileSync(f)}
+    closeErr:=f.Close()
+    if writeErr!=nil{return fmt.Errorf("cannot fsync byte inventory: %w",writeErr)}
+    if closeErr!=nil{return closeErr}
+    if !inventory.exists{
+        if err=experimentalInventoryDirectorySync(dir);err!=nil{
+            return fmt.Errorf("cannot fsync byte inventory filename: %w",err)
+        }
+    }
+    return nil
+}
+
+// Cross-check the entire old-runtime WAL inventory, even if a file that
+// previously carried user traffic is now missing. This audit MUST run
+// before starting a listener and before any signed observed checkpoint.
+func verifyMeterInventory(dir string) error {
+    inventory,err:=readInventory(dir)
+    if err!=nil{return err}
+    entries,err:=os.ReadDir(dir)
+    if err!=nil{return err}
+    observed:=map[string]struct{}{}
+    for _,entry:=range entries{
+        name:=entry.Name()
+        if !strings.HasPrefix(name,"meter-"){continue}
+        if !strings.HasSuffix(name,".jsonl"){
+            return fmt.Errorf("unrecognized Xray byte WAL %q",name)
+        }
+        registered,ok:=inventory.steps[name]
+        if !ok {
+            return fmt.Errorf("orphaned unindexed Xray meter WAL %q",name)
+        }
+        tail,err:=readMeterTail(filepath.Join(dir,name))
+        if err!=nil{return fmt.Errorf("indexed Xray meter WAL %q corrupt: %w",name,err)}
+        if (tail.last.RuntimeID!=registered.RuntimeID ||
+            tail.last.Email!=registered.Email ||
+            tail.last.Direction!=registered.Direction ||
+            tail.firstDigest!=registered.FirstWalDigest){
+            return fmt.Errorf("indexed Xray meter WAL %q first record replaced",name)
+        }
+        observed[name]=struct{}{}
+    }
+    if len(observed)!=len(inventory.steps){
+        return errors.New("missing previously fsynced Xray meter WAL indexed before traffic")
+    }
+    return nil
+}
