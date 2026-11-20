@@ -108,6 +108,24 @@ def run(root: Path):
             common.Close(outboundLink.Writer)
             common.Interrupt(outboundLink.Reader)
         }
+        // A successfully authenticated VLESS session must not bypass user
+        // metering because the policy disabled stats or registration failed.
+        // Validate BEFORE Register/Dispatch, not only at final observation.
+        if d.policy == nil || d.stats == nil {
+            stopStream()
+            return nil, nil, errors.New("experimental Xray: stats policy or manager unavailable")
+        }
+        level := d.policy.ForLevel(user.Level)
+        if err := xmeshdrain.RequireMeteringCoverage(
+            level.Stats.UserUplink, level.Stats.UserDownlink,
+            func(direction string) bool {
+                counter, err := d.stats.GetOrRegisterCounter(
+                    "user>>>" + user.Email + ">>>traffic>>>" + direction)
+                return err == nil && counter != nil
+            }); err != nil {
+            stopStream()
+            return nil, nil, err
+        }
         if err := xmeshdrain.Register(ctx, sessionInbound.User.Email, stopStream); err != nil {
             stopStream()
             return nil, nil, err
@@ -145,6 +163,23 @@ def run(root: Path):
             if subject.Conn != nil { _ = subject.Conn.Close() }
             common.Close(outbound.Writer)
             common.Interrupt(outbound.Reader)
+        }
+        // DispatchLink is a separate UDP/XUDP/MUX meter path: it must
+        // enforce the same bidirectional statistics policy before WrapLink.
+        if d.policy == nil || d.stats == nil {
+            stopStream()
+            return errors.New("experimental Xray: stats policy or manager unavailable")
+        }
+        level := d.policy.ForLevel(subject.User.Level)
+        if err := xmeshdrain.RequireMeteringCoverage(
+            level.Stats.UserUplink, level.Stats.UserDownlink,
+            func(direction string) bool {
+                counter, err := d.stats.GetOrRegisterCounter(
+                    "user>>>" + subject.User.Email + ">>>traffic>>>" + direction)
+                return err == nil && counter != nil
+            }); err != nil {
+            stopStream()
+            return err
         }
         if err := xmeshdrain.Register(ctx, subject.User.Email, stopStream); err != nil {
             stopStream()
