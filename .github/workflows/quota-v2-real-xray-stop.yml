@@ -14,9 +14,11 @@ on:
       - 'experiments/quota-v2-physical-stop/journal_integrity.py'
       - 'experiments/quota-v2-physical-stop/meter_inventory_audit.py'
       - 'experiments/quota-v2-physical-stop/witness_inventory.py'
+      - 'experiments/quota-v2-physical-stop/verify_nexus_wal_anchor.py'
       - 'tests/quota_v2_meter_wal_fixture.py'
       - 'tests/test_quota_v2_stop_chain.py'
       - 'tests/test_quota_v2_inventory_witness.py'
+      - 'tests/test_quota_v2_verify_nexus_wal_anchor.py'
       - 'tests/test_quota_v2_rollover_prepare.py'
       - 'tests/test_quota_v2_verify_nexus_prepared.py'
       - 'tests/test_quota_v2_revocation_marker.py'
@@ -35,9 +37,11 @@ on:
       - 'experiments/quota-v2-physical-stop/journal_integrity.py'
       - 'experiments/quota-v2-physical-stop/meter_inventory_audit.py'
       - 'experiments/quota-v2-physical-stop/witness_inventory.py'
+      - 'experiments/quota-v2-physical-stop/verify_nexus_wal_anchor.py'
       - 'tests/quota_v2_meter_wal_fixture.py'
       - 'tests/test_quota_v2_stop_chain.py'
       - 'tests/test_quota_v2_inventory_witness.py'
+      - 'tests/test_quota_v2_verify_nexus_wal_anchor.py'
       - 'tests/test_quota_v2_rollover_prepare.py'
       - 'tests/test_quota_v2_verify_nexus_prepared.py'
       - 'tests/test_quota_v2_revocation_marker.py'
@@ -54,10 +58,11 @@ jobs:
           persist-credentials: false
       - name: Verify disposable test and production shell syntax
         run: |
-          python3 -m py_compile tests/test_quota_v2_real_xray_stop.py tests/test_quota_v2_physical_stop_attestor.py tests/test_quota_v2_stop_chain.py experiments/quota-v2-physical-stop/attestor.py experiments/quota-v2-physical-stop/stop_chain.py experiments/quota-v2-physical-stop/rollover_prepare.py experiments/quota-v2-physical-stop/journal_integrity.py experiments/quota-v2-physical-stop/meter_inventory_audit.py experiments/quota-v2-physical-stop/witness_inventory.py tests/quota_v2_meter_wal_fixture.py tests/test_quota_v2_inventory_witness.py tests/test_quota_v2_rollover_prepare.py experiments/quota-v2-physical-stop/verify_nexus_prepared.py tests/test_quota_v2_verify_nexus_prepared.py
+          python3 -m py_compile tests/test_quota_v2_real_xray_stop.py tests/test_quota_v2_physical_stop_attestor.py tests/test_quota_v2_stop_chain.py experiments/quota-v2-physical-stop/attestor.py experiments/quota-v2-physical-stop/stop_chain.py experiments/quota-v2-physical-stop/rollover_prepare.py experiments/quota-v2-physical-stop/journal_integrity.py experiments/quota-v2-physical-stop/meter_inventory_audit.py experiments/quota-v2-physical-stop/witness_inventory.py experiments/quota-v2-physical-stop/verify_nexus_wal_anchor.py tests/quota_v2_meter_wal_fixture.py tests/test_quota_v2_inventory_witness.py tests/test_quota_v2_verify_nexus_wal_anchor.py tests/test_quota_v2_rollover_prepare.py experiments/quota-v2-physical-stop/verify_nexus_prepared.py tests/test_quota_v2_verify_nexus_prepared.py
           python3 -m py_compile deploy/xmesh-quota-revocation-marker.py tests/test_quota_v2_revocation_marker.py
           python3 tests/test_quota_v2_stop_chain.py
           python3 tests/test_quota_v2_inventory_witness.py
+          python3 tests/test_quota_v2_verify_nexus_wal_anchor.py
           python3 tests/test_quota_v2_rollover_prepare.py
           python3 tests/test_quota_v2_verify_nexus_prepared.py
           python3 tests/test_quota_v2_physical_stop_attestor.py
