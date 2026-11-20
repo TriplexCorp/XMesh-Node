@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 import attestor
 import stop_chain
+import journal_integrity
 import sign_observation as observed
 import runtime_identity
 
@@ -32,8 +33,10 @@ class StopChainTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.observed = self.root / "observed"
         self.stopped = self.root / "stopped"
+        self.xray = self.root / "xray-meter-journal"
         self.observed.mkdir(mode=0o700)
         self.stopped.mkdir(mode=0o700)
+        self.xray.mkdir(mode=0o700)
         self.key = self.root / "node.key"
         self.pub = self.root / "node.pub"
         subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519",
@@ -71,6 +74,17 @@ class StopChainTests(unittest.TestCase):
             [sys.executable, str(self.marker_helper), "arm", str(self.root)],
             check=True, capture_output=True)
         self.original = self.publish_synthetic_receipt(self.cp)
+        self.publish_xray_journal()
+
+    def publish_xray_journal(self):
+        self.stem = hashlib.sha256(b"xmesh-u101").hexdigest()
+        fence = {k:self.cp[k] for k in journal_integrity.FIELDS}
+        fence["schemaVersion"] = 1
+        checkpoint = {k:self.cp[k] for k in journal_integrity.CHECKPOINT}
+        for prefix,record in (("fence-",fence),("observed-",checkpoint)):
+            filename = self.xray / (prefix + self.stem + ".json")
+            filename.write_bytes(journal_integrity._canonical_go(record))
+            filename.chmod(0o600)
 
     def docker(self, running):
         return {
@@ -81,6 +95,10 @@ class StopChainTests(unittest.TestCase):
                 "StartedAt": "2026-11-18T14:10:00Z"},
             "HostConfig": {"RestartPolicy": {
                 "Name": "unless-stopped" if running else "no"}},
+            "Mounts": [{
+                "Type": "bind", "Source": str(self.xray),
+                "Destination": journal_integrity.JOURNAL_DEST, "RW": True,
+            }],
         }
 
     def stop_child(self):
@@ -125,7 +143,7 @@ class StopChainTests(unittest.TestCase):
             with patch.object(attestor, "inspect_managed",
                               return_value=self.before):
                 bound = stop_chain.prepare_old_process_stop(
-                    probe, self.cp, self.observed, NODE_ID, self.pub)
+                    probe, self.cp, self.observed, NODE_ID, self.pub, self.xray)
             return probe, bound
         except BaseException:
             probe.close()
@@ -136,7 +154,7 @@ class StopChainTests(unittest.TestCase):
         # identity is deliberately mocked to exercise adversarial races.
         with patch.object(attestor, "inspect_managed",
                           side_effect=overrides.get(
-                              "inspections", [self.after] * 3)):
+                              "inspections", [self.after] * 4)):
             return stop_chain.complete_old_process_stop(
                 bound, self.root, self.marker_helper,
                 self.observed, self.stopped, self.key, self.pub)
@@ -182,7 +200,7 @@ class StopChainTests(unittest.TestCase):
                               return_value=other):
                 with self.assertRaisesRegex(ValueError, "changed"):
                     stop_chain.prepare_old_process_stop(
-                        probe, self.cp, self.observed, NODE_ID, self.pub)
+                        probe, self.cp, self.observed, NODE_ID, self.pub, self.xray)
 
     def test_missing_floor_and_wrong_node_key_refuse_prepare(self):
         probe, bound = self.bound()
@@ -191,7 +209,7 @@ class StopChainTests(unittest.TestCase):
                 with patch.object(attestor, "inspect_managed",
                                   return_value=self.before):
                     stop_chain.prepare_old_process_stop(
-                        probe, self.cp, self.observed, 10, self.pub)
+                        probe, self.cp, self.observed, 10, self.pub, self.xray)
         self.assertEqual(list(self.stopped.iterdir()), [])
 
     def test_direct_pid_fixture_with_no_signed_durable_floor_refused(self):
@@ -211,7 +229,7 @@ class StopChainTests(unittest.TestCase):
                                  return_value=self.before):
             with self.assertRaisesRegex(ValueError, "incomplete signed"):
                 stop_chain.prepare_old_process_stop(
-                    probe, self.cp, self.observed, NODE_ID, self.pub)
+                    probe, self.cp, self.observed, NODE_ID, self.pub, self.xray)
 
     def test_observation_tamper_before_stop_publication_refused(self):
         probe, bound = self.bound()
