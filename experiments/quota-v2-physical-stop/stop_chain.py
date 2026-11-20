@@ -108,10 +108,14 @@ def prepare_old_process_stop(probe, checkpoint, observed_directory,
 def _payload(bound, stop):
     p = {field: bound.checkpoint[field] for field in SCOPE}
     p.update({
-        "schemaVersion": 1, "kind": KIND,
+        "schemaVersion": 2, "kind": KIND,
         "observationSha256": bound.raw_hash,
         "checkpointSha256": hashlib.sha256(
             observed.canonical(bound.checkpoint)).hexdigest(),
+        # A STOP proof must bind the exact pre- and post-PIDfsync journal
+        # bytes, not just the checkpoint ID. A later rollover consumer
+        # independently verifies this digest against real old Xray files.
+        "xrayJournalSha256": bound.xray_journal_digest,
         "oldRuntimeId": bound.checkpoint["runtimeId"],
         "oldContainerId": stop["oldContainerId"],
         "oldStartedAt": stop["oldStartedAt"],
@@ -129,13 +133,13 @@ def _payload(bound, stop):
 def _verify_shape(p, original):
     if not isinstance(p, dict) or set(p) != set(SCOPE) | {
             "schemaVersion", "kind", "observationSha256",
-            "checkpointSha256", "oldRuntimeId", "oldContainerId",
+            "checkpointSha256", "xrayJournalSha256", "oldRuntimeId", "oldContainerId",
             "oldStartedAt", "oldPidfdExited", "managedContainerStopped",
             "restartDisabled", "durableDenyArmed", "finalMeterVerified",
             "settlementEligible", "refundableBytes"}:
         raise ValueError("unknown or missing signed stop-chain fields")
     cp = original["payload"]["checkpoint"]
-    if (type(p["schemaVersion"]) is not int or p["schemaVersion"] != 1 or
+    if (type(p["schemaVersion"]) is not int or p["schemaVersion"] != 2 or
             p["kind"] != KIND or
             p["finalMeterVerified"] is not False or
             p["settlementEligible"] is not False or
@@ -143,6 +147,8 @@ def _verify_shape(p, original):
             any(p[name] is not True for name in FLAGS) or
             any(p[name] != cp[name] or type(p[name]) is not type(cp[name])
                 for name in SCOPE) or
+            not isinstance(p["xrayJournalSha256"],str) or
+            HEX64.fullmatch(p["xrayJournalSha256"]) is None or
             p["oldRuntimeId"] != cp["runtimeId"] or
             not isinstance(p["oldRuntimeId"], str) or
             HEX64.fullmatch(p["oldRuntimeId"]) is None or
@@ -223,6 +229,8 @@ def complete_old_process_stop(bound, state_dir, marker_helper,
         raise ValueError("original signed observation changed during stop")
     observed.verify_envelope(original, bound.node_id, trusted_public_key)
     payload = _payload(bound, stop)
+    if not hmac.compare_digest(payload["xrayJournalSha256"],poststop_digest):
+        raise ValueError("old-Xray signed stop digest differs from old-PID journal")
     _verify_shape(payload, original)
     signature = observed.sign_bytes(
         node_private_key, DOMAIN + observed.canonical(payload))
