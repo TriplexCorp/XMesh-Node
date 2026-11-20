@@ -452,6 +452,54 @@ class StopChainTests(unittest.TestCase):
                         path.write_bytes(original)
                         path.chmod(0o600)
 
+    def test_missing_rehashed_or_uncertain_old_wal_birth_registry_denies_stop(self):
+        # A formerly charged meter may disappear from os.listdir(). Without
+        # the independent old-PID fsynced birth registry, Node could sign
+        # a deceptively valid but incomplete old-Xray stop.
+        registry=self.xray/"xmesh-meter-inventory-v1.jsonl"
+        original=registry.read_bytes()
+        old_wal=self.meter_file()
+        original_wal=old_wal.read_bytes()
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            for kind in ("deleted-index","torn-index","duplicate-index",
+                         "wrong-first-digest","valid-rehashed-wal"):
+                with self.subTest(kind=kind):
+                    if registry.exists():
+                        registry.unlink()
+                    old_wal.write_bytes(original_wal)
+                    if kind == "deleted-index":
+                        pass
+                    elif kind == "torn-index":
+                        registry.write_bytes(original[:-1])
+                    elif kind == "duplicate-index":
+                        registry.write_bytes(original+original)
+                    elif kind == "wrong-first-digest":
+                        first=json.loads(original[:-1].split(b"\\n")[0])
+                        first["firstWalDigest"]="a"*64
+                        first["digest"]=""
+                        first["digest"]=hashlib.sha256(
+                            journal_integrity._canonical_go(first)).hexdigest()
+                        registry.write_bytes(journal_integrity._canonical_go(first))
+                    else:
+                        registry.write_bytes(original)
+                        wal=json.loads(original_wal)
+                        wal["nextBytes"]+=1
+                        wal["digest"]=""
+                        wal["digest"]=hashlib.sha256(
+                            journal_integrity._canonical_go(wal)).hexdigest()
+                        old_wal.write_bytes(journal_integrity._canonical_go(wal))
+                    try:
+                        with self.assertRaisesRegex(
+                                ValueError,"inventory|index|WAL|byte|birth"):
+                            self.complete(bound)
+                        self.assertEqual(list(self.stopped.iterdir()),[])
+                    finally:
+                        old_wal.write_bytes(original_wal)
+                        registry.write_bytes(original)
+                        registry.chmod(0o600)
+
     def test_old_run_and_unobserved_alias_wal_fail_closed(self):
         probe,bound=self.bound()
         with probe:
@@ -467,6 +515,8 @@ class StopChainTests(unittest.TestCase):
                             {"email":"xmesh-u101--unobserved-cdn",
                              "uplinkBytes":3,"downlinkBytes":0}]
                     old=set(self.xray.iterdir())
+                    registry=self.xray/"xmesh-meter-inventory-v1.jsonl"
+                    original_registry=registry.read_bytes()
                     quota_v2_meter_wal_fixture.write_test_meter_intents(
                         extra,self.xray)
                     created=set(self.xray.iterdir())-old
@@ -479,6 +529,7 @@ class StopChainTests(unittest.TestCase):
                     finally:
                         for path in created:
                             path.unlink()
+                        registry.write_bytes(original_registry)
 
     def test_unrelated_user_wal_does_not_block_signed_account_stop(self):
         other=copy.deepcopy(self.cp)
