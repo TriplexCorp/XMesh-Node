@@ -578,6 +578,59 @@ func TestMeterWriteBarrierPreventsLateWrites(t *testing.T) {
     }
 }
 
+// A pending read that began before revocation must still be accounted, but
+// it must NEVER deliver the buffered result to an outbound after revocation.
+func TestMeterReadDeliveryAuthorizationRevokedAcrossInboundAliases(t *testing.T){
+    resetGate()
+    mainEmail:="xmesh-u101--vless-main"
+    cdnEmail:="xmesh-u101--vless-cdn"
+    unrelated:="xmesh-u102--vless-main"
+    a:=ctx(901)
+    b:=ctx(902)
+    stopped:=make(chan struct{})
+    if err:=Register(a,mainEmail,func(){close(stopped)});err!=nil{t.Fatal(err)}
+    if err:=Register(b,unrelated,func(){});err!=nil{t.Fatal(err)}
+    if !BeginMeterRead(cdnEmail) || !MayDeliverMeterRead(mainEmail) ||
+        !MayDeliverMeterRead(cdnEmail) {
+        t.Fatal("healthy signed alias read was unexpectedly denied")
+    }
+    if !MayDeliverMeterRead(unrelated){t.Fatal("independent live user denied")}
+    outcome:=make(chan struct{r result;err error},1)
+    go func(){
+        ctx,cancel:=context.WithTimeout(context.Background(),time.Second)
+        defer cancel()
+        r,err:=fence(ctx,mainEmail)
+        outcome<-struct{r result;err error}{r,err}
+    }()
+    <-stopped
+    Finish(a)
+    RouteFinish(a)
+    if MayDeliverMeterRead(mainEmail)||MayDeliverMeterRead(cdnEmail){
+        t.Fatal("fenced main/CDN account may still deliver a pending buffer")
+    }
+    if !MayDeliverMeterRead(unrelated){t.Fatal("fence denied unrelated user")}
+    if BeginMeterRead(cdnEmail){t.Fatal("revocation admitted a new CDN read")}
+    select{
+    case got:=<-outcome:
+        t.Fatalf("pending read falsely acknowledged drained: %+v",got)
+    case <-time.After(25*time.Millisecond):
+    }
+    EndMeterRead(cdnEmail)
+    select{
+    case got:=<-outcome:
+        if got.err!=nil||!got.r.Drained||got.r.FinalMeterVerified||got.r.Refundable{
+            t.Fatalf("read completion incorrectly created terminal claim: %+v",got)
+        }
+    case <-time.After(time.Second):
+        t.Fatal("drain not completed after last read")
+    }
+    Finish(b)
+    RouteFinish(b)
+    if MayDeliverMeterRead(mainEmail)||MayDeliverMeterRead(cdnEmail){
+        t.Fatal("drained signed user reopened buffered delivery")
+    }
+}
+
 func TestMeterReadBarrierIncludesTimedOutAsyncReader(t *testing.T){
     resetGate()
     stream:=ctx(302)
