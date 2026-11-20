@@ -177,6 +177,10 @@ class StopChainTests(unittest.TestCase):
             receipt, self.original, NODE_ID, self.pub)
         self.assertEqual(accepted["oldContainerId"], "a" * 64)
         self.assertEqual(accepted["oldRuntimeId"], self.cp["runtimeId"])
+        self.assertEqual(accepted["schemaVersion"],2)
+        independently_checked=journal_integrity.verify_poststop_journal(
+            self.cp,self.xray,self.after)
+        self.assertEqual(accepted["xrayJournalSha256"],independently_checked)
         self.assertEqual(accepted["observationSha256"],
                          hashlib.sha256(self.original).hexdigest())
         self.assertTrue(accepted["oldPidfdExited"])
@@ -278,6 +282,8 @@ class StopChainTests(unittest.TestCase):
             lambda e: e["payload"].update(finalMeterVerified=True),
             lambda e: e["payload"].update(settlementEligible=True),
             lambda e: e["payload"].update(oldContainerId="b"*64),
+            lambda e: e["payload"].update(xrayJournalSha256="f"*64),
+            lambda e: e["payload"].update(schemaVersion=1),
             lambda e: e["payload"].update(observationSha256="f"*64),
             lambda e: e.update(signature="0"*128),
         ):
