@@ -86,6 +86,7 @@ class StopChainTests(unittest.TestCase):
             filename = self.xray / (prefix + self.stem + ".json")
             filename.write_bytes(journal_integrity._canonical_go(record))
             filename.chmod(0o600)
+        quota_v2_meter_wal_fixture.write_test_meter_intents(self.cp,self.xray)
 
     def docker(self, running):
         return {
