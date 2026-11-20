@@ -220,6 +220,10 @@ def run(xray, transport, *, denied_direction=None):
                     "-days","1","-keyout",str(key),"-out",str(cert),
                     "-subj","/CN=localhost","-addext","subjectAltName=DNS:localhost")
             key.chmod(0o600)
+            # Xray 26.10.31 removed allowInsecure. Pin the exact
+            # disposable certificate DER instead of bypassing TLS trust.
+            cert_sha256 = hashlib.sha256(
+                ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
             server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_tls.minimum_version = ssl.TLSVersion.TLSv1_3
             server_tls.load_cert_chain(str(cert),str(key))
@@ -329,7 +333,8 @@ def run(xray, transport, *, denied_direction=None):
             if vision and not (cdn or unsafe):
                 config["streamSettings"] = {
                     "network":"tcp","security":"tls",
-                    "tlsSettings":{"serverName":"localhost","allowInsecure":True,
+                    "tlsSettings":{"serverName":"localhost",
+                                   "pinnedPeerCertSha256":cert_sha256,
                                    "minVersion":"1.3"},
                 }
                 if tag in ("user-a","user-b"):
