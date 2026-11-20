@@ -178,6 +178,42 @@ func TestMultiInboundCoverageIsStrictAndIncludesBlankUserEmails(t *testing.T) {
     }
 }
 
+// A counted user may not be admitted when either stats direction was
+// disabled by Xray policy, or when StatsService cannot create a counter.
+// Unit fixtures exercise the strict gate; pinned-real-Xray CI additionally
+// checks the dispatcher patch on actual authenticated VLESS streams.
+func TestRequireMeteringCoverageBeforeAdmission(t *testing.T) {
+    tested := []string{}
+    present := func(direction string) bool {
+        tested=append(tested,direction)
+        return direction=="uplink" || direction=="downlink"
+    }
+    if err:=RequireMeteringCoverage(true,true,present);err!=nil{
+        t.Fatalf("valid bidirectional stats denied: %v",err)
+    }
+    if len(tested)!=2 || tested[0]!="uplink" || tested[1]!="downlink" {
+        t.Fatalf("must require BOTH directions: %v",tested)
+    }
+    for _,tc:=range []struct{
+        name string
+        up,down bool
+        ready func(string) bool
+    }{
+        {"no-uplink",false,true,present},
+        {"no-downlink",true,false,present},
+        {"neither",false,false,present},
+        {"nil-counter-lookup",true,true,nil},
+        {"failed-uplink-counter",true,true,func(s string) bool {return s!="uplink"}},
+        {"failed-downlink-counter",true,true,func(s string) bool {return s!="downlink"}},
+    } {
+        t.Run(tc.name,func(t *testing.T){
+            if err:=RequireMeteringCoverage(tc.up,tc.down,tc.ready);err==nil {
+                t.Fatal("authenticated user with missing byte counter was admitted")
+            }
+        })
+    }
+}
+
 func resetGate() {
     gate.Lock()
     defer gate.Unlock()
