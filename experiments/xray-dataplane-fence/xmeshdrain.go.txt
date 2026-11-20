@@ -124,6 +124,10 @@ type userState struct {
     // Per exact inbound email + direction; unrelated active traffic cannot
     // authorize a direct StatsService mutation or wrong-direction write.
     meterOps map[string]int
+    // Diagnostic only: authenticated TCP Vision sessions for which the
+    // upstream raw-splice routine was reached while splice-preparable.
+    // This is neither byte evidence nor terminal accounting.
+    bufferedSpliceCandidates int
     // Track asynchronous TimeoutWrapperReader operations through their
     // counter increment, including callbacks resumed AFTER a timeout.
     reads int
@@ -335,6 +339,19 @@ func EndMeterRead(email string) {
     completeUserIfIdleLocked(u)
 }
 
+// NoteBufferedSpliceCandidate is CI-only evidence that a real user-bearing
+// TCP flow reached the raw-splice candidate path before the fence. A
+// candidate is NOT proof that the kernel actually spliced any bytes.
+func NoteBufferedSpliceCandidate(email string) {
+    if !enabled || email=="" {return}
+    gate.Lock()
+    defer gate.Unlock()
+    u:=ensureUser(canonicalMeterUser(email))
+    if !u.fenced {
+        u.bufferedSpliceCandidates++
+    }
+}
+
 // MayDeliverMeterRead is checked AFTER a timed-out asynchronous read has
 // completed and its raw bytes were accounted. A transport can be fenced while
 // the read is blocked; returning its old buffer after the fence would make it
@@ -411,6 +428,8 @@ type result struct {
     Drained bool `json:"drained"`
     FinalMeterVerified bool `json:"finalMeterVerified"`
     Refundable bool `json:"refundable"`
+    // CI diagnostic, never a cryptographic or financial proof.
+    BufferedSpliceCandidates int `json:"bufferedSpliceCandidates"`
     // This record is fsynced but explicitly NOT authoritative final traffic.
     ObservedCheckpoint *observedCheckpoint `json:"observedCheckpoint,omitempty"`
 }
@@ -420,6 +439,7 @@ func state(email string, u *userState) result {
         Email: email, Fenced: u.fenced, Active: len(u.active),
         Drained: u.closed && len(u.active) == 0 && u.writes == 0 && u.reads == 0 && u.stopping == 0,
         FinalMeterVerified: false, Refundable: false,
+        BufferedSpliceCandidates:u.bufferedSpliceCandidates,
     }
 }
 
