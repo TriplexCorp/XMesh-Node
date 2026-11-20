@@ -300,5 +300,91 @@ class StopChainTests(unittest.TestCase):
         self.assertNotEqual(slot.read_bytes(), original)
 
 
+    def test_pre_stop_missing_xray_fence_or_observation_fails_closed(self):
+        for name in ("fence-", "observed-"):
+            with self.subTest(name=name):
+                target = self.xray / (name + self.stem + ".json")
+                original = target.read_bytes()
+                target.unlink()
+                try:
+                    with self.assertRaises((ValueError, FileNotFoundError)):
+                        self.bound()
+                    self.assertEqual(list(self.stopped.iterdir()), [])
+                finally:
+                    target.write_bytes(original)
+                    target.chmod(0o600)
+
+    def test_pre_stop_unbound_docker_mount_cannot_claim_meter(self):
+        with patch.object(attestor, "inspect_managed",
+                          side_effect=[self.before,self.before]):
+            probe=attestor.begin_old_xray_probe()
+        with probe:
+            wrong=copy.deepcopy(self.before)
+            wrong["Mounts"][0]["Source"]=str(self.stopped)
+            with patch.object(attestor,"inspect_managed",return_value=wrong):
+                with self.assertRaisesRegex(ValueError,"bind actual managed Xray journal"):
+                    stop_chain.prepare_old_process_stop(
+                        probe,self.cp,self.observed,NODE_ID,self.pub,self.xray)
+        self.assertEqual(list(self.stopped.iterdir()),[])
+
+    def test_late_raw_counter_taint_after_snapshot_blocks_signed_stop(self):
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            # The raw StatsService Add/Set audit writes this name before
+            # changing any byte. A genuine old-PID exit does not erase it.
+            marker=self.xray/("taint-"+self.stem+".json")
+            marker.write_bytes(b'{"schemaVersion":1}\n')
+            marker.chmod(0o600)
+            with self.assertRaisesRegex(ValueError,"post-stop taint"):
+                self.complete(bound)
+        self.assertEqual(list(self.stopped.iterdir()),[])
+
+    def test_old_xray_observed_bytes_change_after_prepare_refused(self):
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            path=self.xray/("observed-"+self.stem+".json")
+            obj=json.loads(path.read_bytes())
+            obj["uplinkBytes"]+=1
+            path.write_bytes(journal_integrity._canonical_go(obj))
+            with self.assertRaises(ValueError):
+                self.complete(bound)
+        self.assertEqual(list(self.stopped.iterdir()),[])
+
+    def test_crash_interrupted_pending_taint_blocks_signed_stop(self):
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            path=self.xray/".taint-pending-deadbeef"
+            path.write_bytes(b"possibly fsynced but unpublished")
+            with self.assertRaisesRegex(ValueError,"uncertain or uncommitted"):
+                self.complete(bound)
+        self.assertEqual(list(self.stopped.iterdir()),[])
+
+    def test_wrong_journal_mount_after_pid_exit_is_rejected(self):
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            substituted=copy.deepcopy(self.after)
+            substituted["Mounts"][0]["Source"]=str(self.stopped)
+            with self.assertRaisesRegex(ValueError,"bind actual managed Xray journal"):
+                self.complete(bound,inspections=[
+                    self.after,self.after,substituted,self.after])
+        self.assertEqual(list(self.stopped.iterdir()),[])
+
+    def test_poststop_journal_permissions_and_symlinks_are_rejected(self):
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            original=self.xray.stat().st_mode & 0o777
+            self.xray.chmod(0o755)
+            try:
+                with self.assertRaisesRegex(ValueError,"not private"):
+                    self.complete(bound)
+            finally:
+                self.xray.chmod(original)
+        self.assertEqual(list(self.stopped.iterdir()),[])
+
 if __name__ == "__main__":
     unittest.main()
