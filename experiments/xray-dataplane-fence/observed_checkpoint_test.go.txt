@@ -12,6 +12,7 @@ import (
     "testing"
 
     xstats "github.com/xtls/xray-core/app/stats"
+    "github.com/xtls/xray-core/features/stats"
 )
 
 const testRevocation = "c5208c19-29bf-41b7-b90d-919574e01242"
@@ -24,6 +25,18 @@ func testScope(email,revocation string) checkpointScope {
         ReservationID:"33333333-3333-4333-8333-333333333333",
         RevocationID:revocation,
     }
+}
+
+// A baseline byte increment in the fixture must model a real metered
+// inbound WriteMultiBuffer operation. Direct raw Adds are now correctly
+// treated as untracked mutations in the hardened Xray StatsService.
+func addFixtureBytes(t *testing.T,c stats.Counter,email,direction string,n int64) {
+    t.Helper()
+    if err:=BeginMeterWrite(email,direction);err!=nil{t.Fatal(err)}
+    defer EndMeterWrite(email,direction)
+    audited,ok:=c.(interface{ExperimentalAddMetered(int64) int64})
+    if !ok{t.Fatal("fixture counter lacks auditable metered method")}
+    audited.ExperimentalAddMetered(n)
 }
 
 func setupCheckpoint(t *testing.T,email string,initialUp,initialDown int64) (string,func(int64,int64)) {
@@ -47,8 +60,8 @@ func setupCheckpoint(t *testing.T,email string,initialUp,initialDown int64) (str
     if err!=nil{t.Fatal(err)}
     // Genuine initial usage precedes revocation; a post-fence increment is
     // now a violation, including if a later Set restores the same total.
-    up.Add(initialUp)
-    down.Add(initialDown)
+    addFixtureBytes(t,up,email,"uplink",initialUp)
+    addFixtureBytes(t,down,email,"downlink",initialDown)
     s:=ctx(666)
     if err:=Register(s,email,func(){});err!=nil{t.Fatal(err)}
     Finish(s)
@@ -148,7 +161,7 @@ func TestObservedSignedMainAndCDNAliasesMustAggregateAllSeenTraffic(t *testing.T
             addCounter:=func(email,direction string,n int64) {
                 c,err:=manager.RegisterCounter("user>>>"+email+">>>traffic>>>"+direction)
                 if err!=nil{t.Fatal(err)}
-                c.Add(n)
+                addFixtureBytes(t,c,email,direction,n)
             }
             addCounter(mainEmail,"uplink",100)
             addCounter(mainEmail,"downlink",60)
@@ -467,8 +480,8 @@ func TestPreFenceStatsServiceResetAndNegativeAddFailClosed(t *testing.T) {
                 if err!=nil{t.Fatal(err)}
                 down,err:=manager.RegisterCounter("user>>>"+email+">>>traffic>>>downlink")
                 if err!=nil{t.Fatal(err)}
-                up.Add(100)
-                down.Add(50)
+                addFixtureBytes(t,up,email,"uplink",100)
+                addFixtureBytes(t,down,email,"downlink",50)
                 sessionCtx:=ctx(2201)
                 if err:=Register(sessionCtx,email,func(){
                     Finish(sessionCtx)

@@ -6,6 +6,7 @@ import (
     "os"
     "path/filepath"
     "strings"
+    "sync"
     "testing"
     xstats "github.com/xtls/xray-core/app/stats"
 )
@@ -256,5 +257,153 @@ func TestRawCounterTaintLinkFailurePanicsBeforeByteMutation(t *testing.T) {
     resetGate()
     if err:=configureObservedCheckpoint(dir);err==nil{
         t.Fatal("failed raw counter taint was forgotten on Xray restart")
+    }
+}
+
+
+func setupUnfencedMeter(t *testing.T) (string,*xstats.Manager) {
+    t.Helper()
+    resetGate()
+    observed.Lock()
+    observed.manager=nil
+    observed.directory=""
+    observed.runtimeID=""
+    observed.Unlock()
+    dir:=t.TempDir()
+    if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+    if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+    manager,err:=xstats.NewManager(context.Background(),&xstats.Config{})
+    if err!=nil{t.Fatal(err)}
+    BindStatsManager(manager)
+    return dir,manager
+}
+
+func TestRawUserByteAddBeforeFenceRequiresExactMeterOrigin(t *testing.T) {
+    // Even with another valid in-flight writer/reader belonging to the
+    // same billing user, a wrong alias or direction is not evidence that
+    // the raw StatsService mutation was performed by that tracked writer.
+    for _,tc:=range []struct{
+        name string
+        liveAlias,liveDirection,rawAlias,rawDirection string
+    }{
+        {"orphan-no-active-wrapper","","","xmesh-u101--vless-main","uplink"},
+        {"same-alias-concurrent-raw-add","xmesh-u101--vless-main","uplink","xmesh-u101--vless-main","uplink"},
+        {"wrong-direction","xmesh-u101--vless-main","downlink","xmesh-u101--vless-main","uplink"},
+        {"wrong-inbound","xmesh-u101--vless-main","uplink","xmesh-u101--vless-cdn","uplink"},
+    }{
+        t.Run(tc.name,func(t *testing.T){
+            dir,manager:=setupUnfencedMeter(t)
+            rawName:=rawMeterName(tc.rawAlias,tc.rawDirection)
+            counter,err:=manager.RegisterCounter(rawName)
+            if err!=nil{t.Fatal(err)}
+            if tc.liveAlias!="" {
+                if err:=BeginMeterWrite(tc.liveAlias,tc.liveDirection);err!=nil{t.Fatal(err)}
+            }
+            if got:=counter.Add(11);got!=11{t.Fatalf("unexpected raw delta: %d",got)}
+            if tc.liveAlias!="" {EndMeterWrite(tc.liveAlias,tc.liveDirection)}
+            marker:=durableCounterTaintPath(dir,canonicalMeterUser(tc.rawAlias))
+            if _,err:=readDurableCounterTaint(marker);err!=nil{
+                t.Fatalf("untracked positive raw Add was not fsynced: %v",err)
+            }
+            gate.Lock()
+            u:=gate.users[canonicalMeterUser(tc.rawAlias)]
+            tainted:=u!=nil && u.lateCounterMutation
+            gate.Unlock()
+            if !tainted{t.Fatal("untracked bytes were not disqualified")}
+            // Volatile memory loss must not erase a durable unresolved counter
+            // origin: no standalone restart is safe until operator recovery.
+            resetGate()
+            if err:=configureObservedCheckpoint(dir);err==nil {
+                t.Fatal("raw out-of-band counter advance reopened after crash")
+            }
+        })
+    }
+}
+
+func TestTrackedExactAliasDirectionCountsWithoutTaint(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    main:="xmesh-u101--vless-main"
+    cdn:="xmesh-u101--vless-cdn"
+    specs:=[]struct{email,direction string; amount int64}{
+        {main,"uplink",27},{main,"downlink",13},
+        {cdn,"uplink",9},{cdn,"downlink",21},
+    }
+    for _,tc:=range specs {
+        c,err:=manager.RegisterCounter(rawMeterName(tc.email,tc.direction))
+        if err!=nil{t.Fatal(err)}
+        addFixtureBytes(t,c,tc.email,tc.direction,tc.amount)
+        if got:=c.Value();got!=tc.amount{t.Fatalf("meter not advanced: %d",got)}
+    }
+    marker:=durableCounterTaintPath(dir,canonicalMeterUser(main))
+    if _,err:=os.Stat(marker);!errors.Is(err,os.ErrNotExist){
+        t.Fatalf("legal metered main+CDN writes were poisoned: %v",err)
+    }
+    // Stress exact alias/direction references under Go's -race runner;
+    // independent concurrent wrappers must not leave negative origin counts.
+    c:=manager.GetCounter(rawMeterName(main,"downlink"))
+    audited,ok:=c.(interface{ExperimentalAddMetered(int64) int64})
+    if !ok{t.Fatal("trusted test counter method missing")}
+    const workers=12
+    const repetitions=160
+    var wg sync.WaitGroup
+    for n:=0;n<workers;n++ {
+        wg.Add(1)
+        go func(){
+            defer wg.Done()
+            for j:=0;j<repetitions;j++ {
+                if err:=BeginMeterWrite(main,"downlink");err!=nil{panic(err)}
+                audited.ExperimentalAddMetered(1)
+                EndMeterWrite(main,"downlink")
+            }
+        }()
+    }
+    wg.Wait()
+    if got:=c.Value();got!=13+workers*repetitions {
+        t.Fatalf("parallel exact-origin writes lost bytes: %d",got)
+    }
+    if _,err:=os.Stat(marker);!errors.Is(err,os.ErrNotExist){
+        t.Fatalf("concurrent valid writes were falsely poisoned: %v",err)
+    }
+    gate.Lock()
+    u:=gate.users[canonicalMeterUser(main)]
+    stillActive:=u.writes!=0 || u.reads!=0 ||
+        u.meterOps[rawMeterName(main,"uplink")]!=0 ||
+        u.meterOps[rawMeterName(main,"downlink")]!=0 ||
+        u.meterOps[rawMeterName(cdn,"uplink")]!=0 ||
+        u.meterOps[rawMeterName(cdn,"downlink")]!=0
+    gate.Unlock()
+    if stillActive{t.Fatal("meter origin references leaked")}
+}
+
+func TestRawCounterOverflowPanicsBeforeMutationAndSurvivesCrash(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    email:="xmesh-u101--vless-main"
+    c,err:=manager.RegisterCounter(rawMeterName(email,"uplink"))
+    if err!=nil{t.Fatal(err)}
+    const max=int64(1<<63-1)
+    addFixtureBytes(t,c,email,"uplink",max-5)
+    before:=c.Value()
+    if before!=max-5{t.Fatalf("incorrect initial raw value: %d",before)}
+    if err:=BeginMeterWrite(email,"uplink");err!=nil{t.Fatal(err)}
+    audited,ok:=c.(interface{ExperimentalAddMetered(int64) int64})
+    if !ok{t.Fatal("no trusted test counter method")}
+    func(){
+        defer func(){
+            if recover()==nil{t.Error("int64 counter overflow was accepted")}
+        }()
+        audited.ExperimentalAddMetered(8)
+    }()
+    EndMeterWrite(email,"uplink")
+    if c.Value()!=before{
+        t.Fatalf("signed counter wrapped before fail-closed: %d -> %d",
+            before,c.Value())
+    }
+    marker:=durableCounterTaintPath(dir,canonicalMeterUser(email))
+    if _,err:=readDurableCounterTaint(marker);err!=nil{
+        t.Fatalf("overflow evidence was not durably recorded: %v",err)
+    }
+    resetGate()
+    if err:=configureObservedCheckpoint(dir);err==nil{
+        t.Fatal("overflow evidence disappeared across Xray restart")
     }
 }

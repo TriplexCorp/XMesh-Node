@@ -221,12 +221,16 @@ def run(root: Path):
     )
     # Install the counted-write gate on all three user statistics writer paths
     # (getLink uplink/downlink and DispatchLink downlink).
-    for writer_path in ("inboundLink.Writer", "outboundLink.Writer", "link.Writer"):
+    for writer_path, direction in (
+            ("inboundLink.Writer", "uplink"),
+            ("outboundLink.Writer", "downlink"),
+            ("link.Writer", "downlink")):
         source = replace_once(
             source,
             "\t\t\t\t\tWriter:  " + writer_path + ",\n",
             "\t\t\t\t\tWriter:  " + writer_path + ",\n"
-            "\t\t\t\t\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\n",
+            "\t\t\t\t\tExperimentalEmail: xmeshdrain.ScopedEmail(ctx),\n"
+            "\t\t\t\t\tExperimentalDirection: " + '"' + direction + '"' + ",\n",
         )
     dispatcher_file.write_text(source, encoding="utf-8")
 
@@ -323,19 +327,29 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     meter_source = replace_once(
         meter_source,
         '\tWriter  buf.Writer\n',
-        '\tWriter  buf.Writer\n\tExperimentalEmail string\n',
+        '\tWriter  buf.Writer\n\tExperimentalEmail string\n'
+        '\tExperimentalDirection string\n',
     )
     meter_source = replace_once(
         meter_source,
         '\tw.Counter.Add(int64(mb.Len()))\n\treturn w.Writer.WriteMultiBuffer(mb)',
         '''    if w.ExperimentalEmail != "" {
-        if err := xmeshdrain.BeginMeterWrite(w.ExperimentalEmail); err != nil {
+        if err := xmeshdrain.BeginMeterWrite(w.ExperimentalEmail,w.ExperimentalDirection); err != nil {
             buf.ReleaseMulti(mb)
             return err
         }
-        defer xmeshdrain.EndMeterWrite(w.ExperimentalEmail)
+        defer xmeshdrain.EndMeterWrite(w.ExperimentalEmail,w.ExperimentalDirection)
     }
-    w.Counter.Add(int64(mb.Len()))
+    if w.ExperimentalEmail != "" {
+        audited, ok := w.Counter.(interface{ ExperimentalAddMetered(int64) int64 })
+        if !ok {
+            buf.ReleaseMulti(mb)
+            panic("experimental Xray stats writer lacks trusted counter method")
+        }
+        audited.ExperimentalAddMetered(int64(mb.Len()))
+    } else {
+        w.Counter.Add(int64(mb.Len()))
+    }
     return w.Writer.WriteMultiBuffer(mb)''',
     )
     meter_writer_file.write_text(meter_source, encoding="utf-8")
@@ -353,6 +367,7 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     value int64
     experimentalName string
     experimentalAudit func(string, bool, func() int64) int64
+    experimentalAddAudit func(string, int64, bool, func() int64, func() int64) int64
 }""",
     )
     counter = replace_once(
@@ -368,12 +383,31 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     counter = replace_once(
         counter,
         "return atomic.AddInt64(&c.value, delta)",
-        """if c.experimentalAudit != nil && delta != 0 {
-        return c.experimentalAudit(c.experimentalName, delta < 0, func() int64 {
-            return atomic.AddInt64(&c.value, delta)
-        })
+        """if c.experimentalAddAudit != nil && delta != 0 {
+        return c.experimentalAddAudit(c.experimentalName, delta, false,
+            func() int64 { return atomic.LoadInt64(&c.value) },
+            func() int64 { return atomic.AddInt64(&c.value, delta) })
     }
     return atomic.AddInt64(&c.value, delta)""",
+    )
+    counter = replace_once(
+        counter,
+        "// Add implements stats.Counter.",
+        """// ExperimentalAddMetered is the ONLY positive raw-byte update
+// authorized by the pinned disposable instrumented Xray wrapper. Ordinary
+// Counter.Add always carries trustedOrigin=false, even when another goroutine
+// is writing this SAME user, alias and direction concurrently.
+func (c *Counter) ExperimentalAddMetered(delta int64) int64 {
+    if c.experimentalAddAudit == nil || delta < 0 {
+        panic("experimental Xray trusted byte meter missing or invalid delta")
+    }
+    if delta == 0 {return c.Value()}
+    return c.experimentalAddAudit(c.experimentalName, delta, true,
+        func() int64 {return atomic.LoadInt64(&c.value)},
+        func() int64 {return atomic.AddInt64(&c.value,delta)})
+}
+
+// Add implements stats.Counter.""",
     )
     counter_file.write_text(counter, encoding="utf-8")
 
@@ -382,7 +416,8 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     manager = replace_once(
         manager,
         "\tcounters   map[string]*Counter\n",
-        "\tcounters   map[string]*Counter\n\tcounterAudit func(string, bool, func() int64) int64\n",
+        "\tcounters   map[string]*Counter\n\tcounterAudit func(string, bool, func() int64) int64\n"
+        "\tcounterAddAudit func(string, int64, bool, func() int64, func() int64) int64\n",
     )
     manager = replace_once(
         manager,
@@ -390,13 +425,15 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
         """// Refuse binding after user counters have begun accumulating bytes.
 func (m *Manager) SetExperimentalCounterMutationAudit(
     audit func(string, bool, func() int64) int64,
+    addAudit func(string, int64, bool, func() int64, func() int64) int64,
 ) error {
     m.access.Lock()
     defer m.access.Unlock()
-    if audit == nil || m.counterAudit != nil || len(m.counters) != 0 {
+    if audit == nil || addAudit == nil || m.counterAudit != nil || len(m.counters) != 0 {
         return errors.New("Xray StatsService audit installed too late or twice")
     }
     m.counterAudit = audit
+    m.counterAddAudit = addAudit
     return nil
 }
 
@@ -427,7 +464,7 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
         raise ValueError("Pinned StatsService changed counter registration paths")
     manager = manager.replace(
         "\tc := new(Counter)\n",
-        "\tc := &Counter{experimentalName: name, experimentalAudit: m.counterAudit}\n",
+        "\tc := &Counter{experimentalName: name, experimentalAudit: m.counterAudit, experimentalAddAudit: m.counterAddAudit}\n",
     )
     manager_file.write_text(manager, encoding="utf-8")
 
@@ -472,7 +509,7 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
             return nil, io.EOF
         }
         mb, err := r.Reader.ReadMultiBuffer()
-        if r.Counter != nil { r.Counter.Add(int64(mb.Len())) }
+        r.experimentalMeterAdd(mb)
         r.ExperimentalEnd()
         if r.ExperimentalMayDeliver == nil || !r.ExperimentalMayDeliver() {
             ReleaseMulti(mb)
@@ -501,7 +538,7 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
             // is counted before done is closed, even if this call times out.
             go func() {
                 r.mb, r.err = r.Reader.ReadMultiBuffer()
-                if r.Counter != nil { r.Counter.Add(int64(r.mb.Len())) }
+                r.experimentalMeterAdd(r.mb)
                 r.ExperimentalEnd()
                 close(r.done)
             }()
@@ -523,6 +560,22 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
         }
     }
 ''',
+    )
+    reader_source = replace_once(
+        reader_source,
+        "type Writer interface {",
+        """// Every experimental timed/direct user-buffer read needs the trusted
+// StatsService counter method, not an ordinary Counter.Add shared with
+// untracked background callers. ExperimentalBegin/End bound the operation.
+func (r *TimeoutWrapperReader) experimentalMeterAdd(mb MultiBuffer) {
+    audited, ok := r.Counter.(interface { ExperimentalAddMetered(int64) int64 })
+    if !ok || audited == nil {
+        panic("experimental Xray timed meter lacks trusted counter method")
+    }
+    audited.ExperimentalAddMetered(int64(mb.Len()))
+}
+
+type Writer interface {""",
     )
     reader_file.write_text(reader_source, encoding="utf-8")
     shutil.copyfile(
