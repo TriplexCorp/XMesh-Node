@@ -22,6 +22,7 @@ sys.path.insert(0, str(HERE.parent / "xray-dataplane-fence"))
 import sign_observation as observed
 import runtime_identity
 import attestor
+import journal_integrity
 
 DOMAIN = b"XMESH_QUOTA_V2_NONFINAL_STOP_CHAIN_V1\x00"
 KIND = "xmesh.quota-v2.nonfinal-stop-chain"
@@ -50,16 +51,20 @@ def _read_original(directory, checkpoint):
 
 
 class BoundOldProcess:
-    def __init__(self, probe, checkpoint, raw_hash, original_name, node_id):
+    def __init__(self, probe, checkpoint, raw_hash, original_name, node_id,
+                 trusted_xray_journal, xray_journal_digest):
         self.probe = probe
         self.checkpoint = checkpoint
         self.raw_hash = raw_hash
         self.original_name = original_name
         self.node_id = node_id
+        self.trusted_xray_journal = trusted_xray_journal
+        self.xray_journal_digest = xray_journal_digest
 
 
 def prepare_old_process_stop(probe, checkpoint, observed_directory,
-                             trusted_node_id, trusted_public_key):
+                             trusted_node_id, trusted_public_key,
+                             trusted_xray_journal):
     """Bind the recorded pre-stop bytes to the exact still-running pidfd.
 
     Requires a Node-signed, independently committed-policy-checked observation
@@ -89,9 +94,15 @@ def prepare_old_process_stop(probe, checkpoint, observed_directory,
             docker["State"].get("Running") is not True or
             docker["State"].get("Pid") != probe.old_pid):
         raise ValueError("Xray changed between signed observation and old PID probe")
+    # Bind the real old Docker process to its own auditable journal, not
+    # a user-provided empty directory. The journal must already have the
+    # EXACT fsynced deny + checkpoint before stopping the process.
+    journal_digest = journal_integrity.verify_poststop_journal(
+        checkpoint, trusted_xray_journal, docker)
     return BoundOldProcess(
         probe, checkpoint.copy(), hashlib.sha256(raw).hexdigest(),
-        observed.receipt_name(checkpoint), trusted_node_id)
+        observed.receipt_name(checkpoint), trusted_node_id,
+        trusted_xray_journal, journal_digest)
 
 
 def _payload(bound, stop):
@@ -200,6 +211,14 @@ def complete_old_process_stop(bound, state_dir, marker_helper,
             bound.probe.docker_identity):
         raise ValueError("physical stop was not verified for original Xray")
     raw, original = _read_original(observed_directory, bound.checkpoint)
+    # The PID exit alone is insufficient: counters might have advanced after
+    # the pre-stop observation and fsynced a poison marker. The old process
+    # must have the identical durable Xray journal it exposed BEFORE stop.
+    stopped_docker = attestor.inspect_managed()
+    poststop_digest = journal_integrity.verify_poststop_journal(
+        bound.checkpoint, bound.trusted_xray_journal, stopped_docker)
+    if not hmac.compare_digest(poststop_digest,bound.xray_journal_digest):
+        raise ValueError("old-Xray journal changed between observation and physical stop")
     if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), bound.raw_hash):
         raise ValueError("original signed observation changed during stop")
     observed.verify_envelope(original, bound.node_id, trusted_public_key)
@@ -221,6 +240,12 @@ def complete_old_process_stop(bound, state_dir, marker_helper,
             current["HostConfig"]["RestartPolicy"].get("Name") != "no"):
         raise ValueError("Xray restarted while signing the stop chain")
     attestor.marker_armed(state_dir, marker_helper)
+    # Check once more after signing; a symlink/mount swap or late taint
+    # must fail before making the stop-chain file immutable.
+    final_digest=journal_integrity.verify_poststop_journal(
+        bound.checkpoint, bound.trusted_xray_journal, current)
+    if not hmac.compare_digest(final_digest,bound.xray_journal_digest):
+        raise ValueError("old-Xray journal changed during stop-chain publication")
     evidence = observed.canonical(envelope) + b"\n"
     if len(evidence) > observed.MAX_RECORD:
         raise ValueError("stop-chain evidence too large")
