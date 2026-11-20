@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 import attestor
 import stop_chain
 import journal_integrity
+import quota_v2_meter_wal_fixture
 import sign_observation as observed
 import runtime_identity
 
