@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 import attestor
 import stop_chain
 import journal_integrity
+import quota_v2_meter_wal_fixture
 import sign_observation as observed
 import runtime_identity
 
@@ -85,6 +86,7 @@ class StopChainTests(unittest.TestCase):
             filename = self.xray / (prefix + self.stem + ".json")
             filename.write_bytes(journal_integrity._canonical_go(record))
             filename.chmod(0o600)
+        quota_v2_meter_wal_fixture.write_test_meter_intents(self.cp,self.xray)
 
     def docker(self, running):
         return {
@@ -372,6 +374,119 @@ class StopChainTests(unittest.TestCase):
                 self.complete(bound,inspections=[
                     self.after,self.after,substituted,self.after])
         self.assertEqual(list(self.stopped.iterdir()),[])
+
+    def meter_file(self, direction="uplink"):
+        name = "meter-" + hashlib.sha256((
+            self.cp["runtimeId"] + "\x00" + self.cp["email"] + "\x00" +
+            direction).encode()).hexdigest() + ".jsonl"
+        return self.xray / name
+
+    def test_poststop_unsigned_or_tampered_pretransmit_wal_denied(self):
+        """Physical old-PID exit cannot bless a forged but signed checkpoint."""
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            path=self.meter_file()
+            original=path.read_bytes()
+            self.assertIn(b'"nextBytes":7',original)
+            first=json.loads(original)
+            for kind in ("removed","truncated","duplicate-field","hash-mismatch",
+                         "late-valid-bytes","sequence-gap","symlink"):
+                with self.subTest(case=kind):
+                    if path.exists() or path.is_symlink():
+                        path.unlink()
+                    if kind == "removed":
+                        pass
+                    elif kind == "symlink":
+                        path.symlink_to("/dev/null")
+                    else:
+                        if kind == "truncated":
+                            content=original[:-1]
+                        elif kind == "duplicate-field":
+                            content=original.replace(
+                                b'"sequence":1',
+                                b'"sequence":2,"sequence":1',1)
+                        elif kind == "hash-mismatch":
+                            content=original.replace(
+                                b'"nextBytes":7',b'"nextBytes":9',1)
+                        elif kind == "late-valid-bytes":
+                            # New, CORRECTLY hash-chained post-capture bytes.
+                            # Authentic WAL still invalidates stale signed
+                            # nonterminal observation before publication.
+                            following=dict(first)
+                            following["sequence"]=2
+                            following["previousBytes"]=7
+                            following["nextBytes"]=8
+                            following["previousDigest"]=first["digest"]
+                            following["digest"]=""
+                            following["digest"]=hashlib.sha256(
+                                journal_integrity._canonical_go(following)).hexdigest()
+                            content=original+journal_integrity._canonical_go(following)
+                        else:
+                            following=dict(first)
+                            following["sequence"]=5
+                            following["previousBytes"]=7
+                            following["nextBytes"]=8
+                            following["previousDigest"]=first["digest"]
+                            following["digest"]=""
+                            following["digest"]=hashlib.sha256(
+                                journal_integrity._canonical_go(following)).hexdigest()
+                            content=original+journal_integrity._canonical_go(following)
+                        path.write_bytes(content)
+                        path.chmod(0o600)
+                    try:
+                        with self.assertRaisesRegex(
+                                (ValueError,FileNotFoundError),
+                                "WAL|meter|byte|No such file"):
+                            self.complete(bound)
+                        self.assertEqual(list(self.stopped.iterdir()),[])
+                    finally:
+                        if path.exists() or path.is_symlink():
+                            path.unlink()
+                        path.write_bytes(original)
+                        path.chmod(0o600)
+
+    def test_old_run_and_unobserved_alias_wal_fail_closed(self):
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            for variant in ("old-runtime","unobserved-cdn"):
+                with self.subTest(variant=variant):
+                    extra=copy.deepcopy(self.cp)
+                    if variant == "old-runtime":
+                        extra["runtimeId"]="b"*64
+                        extra["inboundMeters"]=[dict(self.cp["inboundMeters"][0])]
+                    else:
+                        extra["inboundMeters"]=[
+                            {"email":"xmesh-u101--unobserved-cdn",
+                             "uplinkBytes":3,"downlinkBytes":0}]
+                    old=set(self.xray.iterdir())
+                    quota_v2_meter_wal_fixture.write_test_meter_intents(
+                        extra,self.xray)
+                    created=set(self.xray.iterdir())-old
+                    self.assertTrue(created)
+                    try:
+                        with self.assertRaisesRegex(ValueError,
+                                                    "historic same-account|unseen signed"):
+                            self.complete(bound)
+                        self.assertEqual(list(self.stopped.iterdir()),[])
+                    finally:
+                        for path in created:
+                            path.unlink()
+
+    def test_unrelated_user_wal_does_not_block_signed_account_stop(self):
+        other=copy.deepcopy(self.cp)
+        other["userId"]=102
+        other["email"]="xmesh-u102--vless-cdn"
+        other["inboundMeters"]=[
+            {"email":other["email"],"uplinkBytes":2,"downlinkBytes":5}]
+        quota_v2_meter_wal_fixture.write_test_meter_intents(other,self.xray)
+        probe,bound=self.bound()
+        with probe:
+            self.stop_child()
+            receipt=self.complete(bound)
+        self.assertFalse(receipt["payload"]["finalMeterVerified"])
+        self.assertEqual(receipt["payload"]["refundableBytes"],0)
 
     def test_poststop_journal_permissions_and_symlinks_are_rejected(self):
         probe,bound=self.bound()
