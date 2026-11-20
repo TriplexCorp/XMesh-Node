@@ -241,6 +241,20 @@ def run(xray, transport, *, denied_direction=None):
             except BaseException:
                 connected.close()
                 raise
+
+        def assert_rejected(port, reason):
+            # A revoked real Vision route can fail during the INNER TLS
+            # handshake instead of delivering a SOCKS-accepted plaintext
+            # socket. Either is denial; a successful echo is not.
+            try:
+                denied=connect_socks(port,echo.server_address[1],"127.0.0.1")
+            except OSError:
+                return
+            try:
+                assert not probe_echo(denied),reason
+            finally:
+                denied.close()
+
         api_port, vless_port, cdn_port, unsafe_port, socks_a, socks_cdn, socks_unsafe, socks_b, socks_blank = (
             reserve_port(),reserve_port(),reserve_port(),reserve_port(),
             reserve_port(),reserve_port(),reserve_port(),reserve_port(),reserve_port()
@@ -524,24 +538,12 @@ def run(xray, transport, *, denied_direction=None):
             assert not probe_echo(cdn),"Old CDN inbound stream survived user fence"
             if a2 is not None:
                 assert not probe_echo(a2),"Second MUX child survived user fence"
-            denied=connect_socks(socks_a,echo.server_address[1],"127.0.0.1")
-            try:
-                assert not probe_echo(denied),"Fenced user opened new authenticated stream"
-            finally:
-                denied.close()
-            denied_cdn=connect_socks(socks_cdn,echo.server_address[1],"127.0.0.1")
-            try:
-                assert not probe_echo(denied_cdn), "Revoked user reopened secondary CDN inbound"
-            finally:
-                denied_cdn.close()
+            assert_rejected(socks_a,"Fenced user opened new authenticated stream")
+            assert_rejected(socks_cdn,"Revoked user reopened secondary CDN inbound")
             # The disposable billable VLESS inbound must reject an
             # authenticated user lacking a stable accounting identity.
             # The independent management API inbound must remain usable.
-            unnamed=connect_socks(socks_blank,echo.server_address[1],"127.0.0.1")
-            try:
-                assert not probe_echo(unnamed),"Blank VLESS email bypassed per-user gate"
-            finally:
-                unnamed.close()
+            assert_rejected(socks_blank,"Blank VLESS email bypassed per-user gate")
             assert probe_echo(b),"Fence for user A killed user B on shared inbound"
             fresh_b=connect_socks(socks_b,echo.server_address[1],"127.0.0.1")
             try:
