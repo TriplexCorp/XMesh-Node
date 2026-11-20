@@ -66,6 +66,14 @@ def run(root: Path):
         NODE_ROOT / "experiments/xray-dataplane-fence/durable_counter_taint_test.go.txt",
         shared / "durable_counter_taint_test.go",
     )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/durable_meter_intent.go.txt",
+        shared / "durable_meter_intent.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/durable_meter_intent_test.go.txt",
+        shared / "durable_meter_intent_test.go",
+    )
 
     dispatcher_file = root / "app/dispatcher/default.go"
     source = dispatcher_file.read_text(encoding="utf-8")
