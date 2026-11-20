@@ -182,8 +182,12 @@ func TestExperimentalConcurrentTimeoutsNeverDuplicateBufferedBytes(t *testing.T)
 // Synchronous reads may return data after a fence raced the actual blocking
 // read; its already-counted bytes must be discarded without delivery.
 func TestExperimentalDirectReadDiscardsDataWhenFencedInFlight(t *testing.T){
+    // Keep an immutable handle to the signal channel. The fixture clears
+    // source.begun after notifying; reading that field concurrently is itself
+    // a data race and would obscure actual TimeoutWrapperReader races.
+    started:=make(chan struct{})
     source:=&xmeshBlockingReader{
-        begun:make(chan struct{}),unblock:make(chan struct{}),
+        begun:started,unblock:make(chan struct{}),
     }
     counter:=&xmeshCounter{}
     var begin,finish atomic.Int32
@@ -205,7 +209,7 @@ func TestExperimentalDirectReadDiscardsDataWhenFencedInFlight(t *testing.T){
         if mb!=nil {ReleaseMulti(mb);result<-io.ErrUnexpectedEOF;return}
         result<-err
     }()
-    <-source.begun
+    <-started
     allowed.Store(false)
     close(source.unblock)
     select{
