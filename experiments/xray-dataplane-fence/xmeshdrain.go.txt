@@ -124,6 +124,10 @@ type userState struct {
     // Track asynchronous TimeoutWrapperReader operations through their
     // counter increment, including callbacks resumed AFTER a timeout.
     reads int
+    // Transport cancellation runs in its own goroutine. A completed inbound
+    // worker/route is NOT enough to claim drained if its close callback has
+    // not yet returned (for example, a blocked network/socket Close).
+    stopping int
     // Any direct user-byte Counter.Add/Set after fencing poisons the meter.
     lateCounterMutation bool
     done chan struct{}
@@ -278,10 +282,10 @@ func EndMeterRead(email string) {
     completeUserIfIdleLocked(u)
 }
 
-// Caller must hold gate.Mutex; neither active logical sessions nor
-// in-flight counted writes may remain before a fence is marked drained.
+// Caller must hold gate.Mutex. Do not report a drained user while any
+// logical session, metered operation, or transport cancellation is unfinished.
 func completeUserIfIdleLocked(u *userState) {
-    if u.fenced && len(u.active) == 0 && u.writes == 0 && u.reads == 0 && !u.closed {
+    if u.fenced && len(u.active) == 0 && u.writes == 0 && u.reads == 0 && u.stopping == 0 && !u.closed {
         close(u.done)
         u.closed = true
     }
@@ -344,7 +348,7 @@ type result struct {
 func state(email string, u *userState) result {
     return result{
         Email: email, Fenced: u.fenced, Active: len(u.active),
-        Drained: u.closed && len(u.active) == 0 && u.writes == 0 && u.reads == 0,
+        Drained: u.closed && len(u.active) == 0 && u.writes == 0 && u.reads == 0 && u.stopping == 0,
         FinalMeterVerified: false, Refundable: false,
     }
 }
@@ -358,12 +362,28 @@ func fence(ctx context.Context, email string) (result, error) {
         for _, closeConn := range u.active {
             cancels = append(cancels, closeConn)
         }
+        // Register all cancellation tasks BEFORE checking completion or
+        // releasing the gate. Otherwise the last Finish/RouteFinish can close
+        // done while a transport close is still outstanding.
+        u.stopping += len(cancels)
         completeUserIfIdleLocked(u)
     }
     done := u.done
     gate.Unlock()
     for _, closeConn := range cancels {
-        go closeConn()
+        go func(stop func()) {
+            defer func() {
+                gate.Lock()
+                u.stopping--
+                if u.stopping < 0 {
+                    gate.Unlock()
+                    panic("experimental xmesh drain: unbalanced transport cancellation")
+                }
+                completeUserIfIdleLocked(u)
+                gate.Unlock()
+            }()
+            stop()
+        }(closeConn)
     }
     select {
     case <-ctx.Done():
