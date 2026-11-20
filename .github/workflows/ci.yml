@@ -26,7 +26,7 @@ jobs:
           go-version-file: go.mod
       - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
       - run: test "$(cat VERSION)" = "6.0.0"
-      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.24"
+      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.25"
       - run: python3 -m py_compile deploy/xmesh-quota-revocation-marker.py deploy/xmesh-xray-update.py deploy/xmesh-policy-guard.py deploy/xmesh-policy-guard-base.py deploy/xmesh-profile-attest.py deploy/xmesh-hot-user-reconcile.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
@@ -35,6 +35,7 @@ jobs:
       - run: python3 tests/test_user_meter.py
       - run: python3 tests/test_quota_v2_revocation_marker.py
       - run: python3 tests/test_quota_v2_reservation.py
+      - run: python3 tests/test_quota_v2_verify_nexus_wal_anchor.py
       - run: python3 tests/test_quota_v2_meter_continuity.py
       - run: python3 -m py_compile scripts/quota-v2-local-audit.py
       - run: python3 tests/test_quota_v2_local_audit.py

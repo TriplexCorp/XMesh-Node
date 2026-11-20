@@ -46,6 +46,18 @@ for helper in xmesh-policy-guard.py xmesh-policy-guard-base.py xmesh-quota-revoc
   install -o root -g root -m 0700 "$ROOT/deploy/$helper" "/usr/local/libexec/$helper"
 done
 install -o root -g root -m 0700 "$ROOT/deploy/xmesh-xray-sync.sh" /usr/local/sbin/xmesh-xray-sync
+# Install the nonauthorizing WAL operator command beside its reviewed modules.
+# The normal reconciler does not enable experimental Xray WAL recovery.
+WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
+for family in quota-v2-physical-stop xray-dataplane-fence; do
+  install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
+done
+for helper in quota-v2-physical-stop/{wal_transport,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
+  python3 -m py_compile "$ROOT/experiments/$helper.py"
+  install -o root -g root -m 0700 "$ROOT/experiments/$helper.py" "$WAL_ROOT/$helper.py"
+done
+ln -sfn "$WAL_ROOT/quota-v2-physical-stop/wal_transport.py" /usr/local/sbin/xmesh-quota-wal
+
 if [[ -f "$ROOT/deploy/xmesh-tls-renew-hook.sh" ]]; then
   install -o root -g root -m 0700 "$ROOT/deploy/xmesh-tls-renew-hook.sh" /usr/local/libexec/xmesh-tls-renew-hook
 fi

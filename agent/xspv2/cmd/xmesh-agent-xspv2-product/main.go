@@ -1014,6 +1014,7 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 		"/api/v1/node/restart/ack":      true,
 		"/api/v1/node/restart/progress": true,
 		"/api/v1/node/desired-config":   true,
+		"/api/v1/node/quota-v2/wal":     true,
 	}
 	if !allowed[path] {
 		return errors.New("operation is not registered for strict-PQ tunnel")
@@ -1087,7 +1088,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1112,6 +1113,20 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(`{"strictPQEnabled":true,"automaticClassicalFallback":false}`)
+	case "wal-evidence":
+		flags := flag.NewFlagSet("wal-evidence", flag.ExitOnError)
+		panel := flags.String("panel", "", "HTTPS panel origin")
+		nodeID := flags.Int64("node-id", 0, "node ID")
+		payload := flags.String("payload-file", "", "optional root-owned canonical WAL witness payload")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := walEvidence(strings.TrimRight(*panel, "/"), *nodeID, *payload); err != nil {
+			fmt.Fprintln(os.Stderr, "strict-PQ WAL evidence failed:", err)
+			os.Exit(1)
+		}
 	case "request":
 		flags := flag.NewFlagSet("request", flag.ExitOnError)
 		path := flags.String("path", "", "registered panel path")

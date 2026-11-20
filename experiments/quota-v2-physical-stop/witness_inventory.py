@@ -117,7 +117,8 @@ def _verify_witness(raw, registry_bytes, node_id, public_key):
 
 
 def produce_witness(node_id, trusted_docker, root_private_wal_directory,
-                    trusted_node_signing_key, independently_enrolled_node_pubkey):
+                    trusted_node_signing_key, independently_enrolled_node_pubkey,
+                    *, sign=observed.sign_bytes):
     """Return (canonical_signed_witness, independently audited exact index).
 
     Caller must obtain the Docker inspect source outside untrusted JSON,
@@ -161,7 +162,7 @@ def produce_witness(node_id, trusted_docker, root_private_wal_directory,
         _check(p)
         envelope={
             "algorithm":"Ed25519","payload":p,
-            "signature":observed.sign_bytes(
+            "signature":sign(
                 trusted_node_signing_key,DOMAIN+observed.canonical(p))}
         signed=observed.canonical(envelope)+b"\n"
         _verify_witness(signed,raw,node_id,independently_enrolled_node_pubkey)
