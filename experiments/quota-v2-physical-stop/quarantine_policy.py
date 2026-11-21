@@ -28,6 +28,9 @@ PATH = "/api/v1/node/desired-config"
 PIN_PATH = "/api/v1/node/quota-v2/policy-pin"
 LEASE_PATH = "/api/v1/node/quota-v2/genesis-reservation"
 MAX_REPLY = 262144
+PREVIEW_FILE = "genesis-config-preview.json"
+INTENT_FILE = "genesis-prepare-intent.json"
+PREVIEW_DOMAIN = b"XMESH_XRAY_QUARANTINE_CONFIG_V1\x00"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 GUARD_CANDIDATES = (
@@ -150,7 +153,7 @@ def _locked_private_state(directory):
 
 
 def _durable_store(state_fd, data, target="genesis-quarantine-envelope.json"):
-    if target != "genesis-quarantine-envelope.json" and not re.fullmatch(
+    if target not in ("genesis-quarantine-envelope.json", PREVIEW_FILE, INTENT_FILE) and not re.fullmatch(
             r"genesis-reservation-(prepared|confirmed)-u[1-9][0-9]{0,18}\.json", target):
         raise ValueError("unregistered immutable Genesis evidence name")
     raw=json.dumps(data,sort_keys=True,separators=(",",":"),
@@ -158,13 +161,13 @@ def _durable_store(state_fd, data, target="genesis-quarantine-envelope.json"):
     if not 0 < len(raw) <= MAX_REPLY + 4096:
         raise ValueError("oversized staging evidence")
     try:
-        old=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=state_fd)
+        old=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=state_fd)
     except FileNotFoundError:
         old=None
     if old is not None:
         try:
             st=os.fstat(old)
-            if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or st.st_mode&0o077:
+            if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or st.st_nlink!=1 or st.st_mode&0o077:
                 raise ValueError("unsafe existing quarantine evidence")
             existing=os.read(old,MAX_REPLY+4097)
             if existing!=raw:
@@ -181,7 +184,8 @@ def _durable_store(state_fd, data, target="genesis-quarantine-envelope.json"):
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        os.rename(tmp,target,src_dir_fd=state_fd,dst_dir_fd=state_fd)
+        os.link(tmp,target,src_dir_fd=state_fd,dst_dir_fd=state_fd,follow_symlinks=False)
+        os.unlink(tmp,dir_fd=state_fd)
         os.fsync(state_fd)
     finally:
         try:os.unlink(tmp,dir_fd=state_fd)
@@ -281,18 +285,134 @@ def _pinned_policy_before_genesis(panel,node,state,state_fd):
     return key
 
 
-def request_quarantine(panel,node_id,state):
+def _read_private(state_fd, target, maximum=MAX_REPLY+4096):
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW |
+                 os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=state_fd)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or info.st_nlink != 1 or info.st_mode & 0o077
+                or not 0 < info.st_size <= maximum):
+            raise ValueError("untrusted private Genesis evidence")
+        data = os.read(fd, maximum+1)
+        if len(data) != info.st_size:
+            raise ValueError("Genesis evidence changed while being read")
+        return wal_transport.observed.strict_json(data)
+    finally:
+        os.close(fd)
+
+
+def validate_preview(raw, node, activation, pinned, now_ms=None):
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_REPLY:
+        raise ValueError("invalid signed preview size")
+    envelope = wal_transport.observed.strict_json(raw)
+    if (not isinstance(envelope, dict)
+            or set(envelope) != {"algorithm","payload","signature"}
+            or envelope["algorithm"] != "Ed25519"
+            or not isinstance(envelope["signature"],str)
+            or re.fullmatch("[0-9a-f]{128}",envelope["signature"]) is None):
+        raise ValueError("invalid signed Xray preview envelope")
+    payload = envelope["payload"]
+    expected = {
+        "schemaVersion":1,"kind":"xmesh.quota-v2.quarantined-config-preview",
+        "nodeId":node,"activationReceiptSha256":activation,
+        "authorizedBytes":0,"publicIngressAllowed":False,
+        "canStart":False,"canResume":False,"refundableBytes":0,
+    }
+    if (not isinstance(payload,dict)
+            or set(payload) != set(expected) | {
+                "profileId","port","config","configSha256","issuedAtMs","validUntilMs"}
+            or any(type(payload[k]) is not type(v) or payload[k] != v
+                   for k,v in expected.items())):
+        raise ValueError("Xray preview is not a bound zero-authority document")
+    now = time.time_ns()//1_000_000 if now_ms is None else now_ms
+    if (type(payload["issuedAtMs"]) is not int
+            or type(payload["validUntilMs"]) is not int
+            or not 0 < payload["issuedAtMs"] <= now < payload["validUntilMs"]
+            or payload["validUntilMs"]-payload["issuedAtMs"] != 120_000
+            or type(payload["profileId"]) is not int or payload["profileId"] <= 0
+            or type(payload["port"]) is not int or not 1 <= payload["port"] <= 65535
+            or not isinstance(payload["config"],dict)
+            or not _hex(payload["configSha256"])
+            or hashlib.sha256(_guard().canonical(payload["config"])).hexdigest()
+                != payload["configSha256"]):
+        raise ValueError("signed preview is expired or configuration hash mismatched")
+    with tempfile.TemporaryDirectory(prefix="xmesh-preview-") as root:
+        public = Path(root)/"nexus.pem"
+        wal_transport._write_public(pinned,public)
+        wal_transport.verifier.verify_nexus_signature(
+            PREVIEW_DOMAIN,payload,envelope["signature"],public)
+    return envelope
+
+
+def preview_config(panel,node,state):
+    """Get the real compiled config without using ordinary desired-config."""
+    if not isinstance(panel,str) or not panel.startswith("https://") or node <= 0:
+        raise ValueError("invalid enrolled Node origin")
+    state_fd,lock = _locked_private_state(state)
+    try:
+        pinned = _pinned_policy_before_genesis(panel,node,state,state_fd)
+        identity = _enrolled_activation(panel,node)
+        activation = identity["activationReceiptSha256"]
+        try:
+            saved = _read_private(state_fd,PREVIEW_FILE)
+            raw = wal_transport.observed.canonical(saved)
+        except FileNotFoundError:
+            raw = _post_quarantined_desired(
+                {"node_id":node,"operation":"preview_quarantined_config"},
+                state,PIN_PATH)
+        preview = validate_preview(raw,node,activation,pinned)
+        if _enrolled_activation(panel,node) != identity:
+            raise ValueError("enrolled activation changed during preview")
+        _durable_store(state_fd,preview,PREVIEW_FILE)
+        return {"status":"previewed","nodeId":node,
+                "configSha256":preview["payload"]["configSha256"],
+                "authorizedBytes":0,"canStart":False}
+    finally:
+        os.close(lock)
+        os.close(state_fd)
+
+
+def request_quarantine(panel,node_id,state,executable_pin=None):
     """Separate opt-in root-Agent operation. Never launches or activates Xray."""
     if not isinstance(panel,str) or not panel.startswith("https://") or node_id<=0:
         raise ValueError("invalid strict product Node origin")
     state_fd,lock=_locked_private_state(state)
     try:
         pinned=_pinned_policy_before_genesis(panel,node_id,state,state_fd)
-        challenge=secrets.token_hex(32)
-        # The EXACT Linux PID/Docker isolation is measured both before and
-        # after the real XSP/2 Genesis preparation.
-        before=wal_transport._measure_quarantined_runtime()
-        prepared=wal_transport.prepare_measured_genesis(panel,node_id,challenge)
+        # The new installed path pins the actual executable and the
+        # signed preview config BEFORE the initial one-shot Genesis call.
+        # Persist its challenge before sending: a lost response must never
+        # strand an already prepared Node with a different fresh challenge.
+        pins = None
+        if executable_pin is not None:
+            if not _hex(executable_pin):
+                raise ValueError("independent Xray executable pin required")
+            identity = _enrolled_activation(panel,node_id)
+            preview = validate_preview(
+                wal_transport.observed.canonical(_read_private(state_fd,PREVIEW_FILE)),
+                node_id,identity["activationReceiptSha256"],pinned)
+            pins = (executable_pin,preview["payload"]["configSha256"])
+        before = (wal_transport._measure_quarantined_runtime() if pins is None
+                  else wal_transport._measure_quarantined_runtime(pins))
+        if pins is None:
+            challenge = secrets.token_hex(32)
+            prepared = wal_transport.prepare_measured_genesis(panel,node_id,challenge)
+        else:
+            binding = {"nodeId":node_id,"runtimeId":before[3],
+                       "activationReceiptSha256":identity["activationReceiptSha256"],
+                       "executableSha256":pins[0],"configSha256":pins[1]}
+            try:
+                intent = _read_private(state_fd,INTENT_FILE,4096)
+            except FileNotFoundError:
+                intent = dict(binding,challenge=secrets.token_hex(32))
+                _durable_store(state_fd,intent,INTENT_FILE)
+            if (not isinstance(intent,dict) or set(intent)!=set(binding)|{"challenge"}
+                    or any(intent[k]!=v for k,v in binding.items())
+                    or not _hex(intent["challenge"])):
+                raise ValueError("original first-Genesis intent changed")
+            challenge = intent["challenge"]
+            prepared = wal_transport.prepare_measured_genesis(panel,node_id,challenge,pins)
         if not isinstance(prepared,dict) or not isinstance(prepared.get("payload"),dict):
             raise ValueError("untrusted preparatory Genesis receipt")
         payload=prepared["payload"]
@@ -308,7 +428,11 @@ def request_quarantine(panel,node_id,state):
         }
         raw=_post_quarantined_desired(request,state)
         doc=validate_response(raw,node_id,prepared,pinned)
-        after=wal_transport._measure_quarantined_runtime()
+        after=(wal_transport._measure_quarantined_runtime() if pins is None
+               else wal_transport._measure_quarantined_runtime(pins))
+        if pins is not None and (doc["revision"] != pins[1]
+                                 or _enrolled_activation(panel,node_id) != identity):
+            raise ValueError("signed preview or enrolled identity changed before staging")
         if before!=after:
             raise ValueError("kernel Xray PID, configuration or isolation changed")
         # This is evidence only: no Docker command, no activation, no cap install.
@@ -326,10 +450,14 @@ if __name__=="__main__":
     parser.add_argument("--panel",required=True)
     parser.add_argument("--node-id",type=int,required=True)
     parser.add_argument("--state",required=True)
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument("--preview-only",action="store_true")
+    mode.add_argument("--executable-sha256")
     args=parser.parse_args()
     try:
         # NEVER output config, secrets, signed envelope or activation token.
-        print(json.dumps(request_quarantine(args.panel,args.node_id,args.state),
-                         sort_keys=True,separators=(",",":")))
+        result=(preview_config(args.panel,args.node_id,args.state) if args.preview_only
+                else request_quarantine(args.panel,args.node_id,args.state,args.executable_sha256))
+        print(json.dumps(result,sort_keys=True,separators=(",",":")))
     except (OSError,ValueError,TypeError,KeyError,subprocess.SubprocessError) as error:
         parser.exit(1,"Quota-V2 Genesis quarantine denied: "+str(error)+"\n")
