@@ -129,6 +129,10 @@ printf 'local-only; network authorization is strict XSP/2 PQ product transport\n
 chmod 0600 /etc/xmesh-node-metrics/compatibility-key-purpose
 
 STRICT_PATH=/usr/local/libexec/xmesh-strict-pq-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+WAL_SERVICE_ENV=EnvironmentFile=-/etc/xmesh-quota-wal.env
+if [[ "$WAL_STAGE_AGENT" == 1 ]];then
+  WAL_SERVICE_ENV=Environment=XMESH_QUOTA_V2_WAL_RECONCILE=1
+fi
 cat > /etc/systemd/system/xmesh-xray-sync.service <<EOF
 [Unit]
 Description=XMesh v6 strict-PQ managed Xray reconciliation
@@ -138,7 +142,7 @@ ConditionPathExists=/var/lib/xmesh-agent/product/active.json
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/xmesh-node-metrics.env
-EnvironmentFile=-/etc/xmesh-quota-wal.env
+$WAL_SERVICE_ENV
 Environment="PATH=$STRICT_PATH"
 ExecStart=/usr/local/sbin/xmesh-xray-sync
 User=root
@@ -320,6 +324,15 @@ systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null
 systemctl start xmesh-node-metrics.service || true
 if [[ "$WAL_STAGE_AGENT" == 0 ]];then
   systemctl start xmesh-node-control.service || true
+fi
+
+if [[ "$WAL_STAGE_AGENT" == 1 ]];then
+  # A fresh staging Node has no qualified Xray yet. Arm the reconciler in
+  # quarantine without treating the expected cold-start denial as an install
+  # failure or using the ordinary bootstrap path to start unmetered traffic.
+  systemctl start "${OPERATIONAL_TIMERS[@]}"
+  echo "WAL staging timers active. Xray is quarantined until runtime qualification."
+  exit 0
 fi
 
 # First reconciliation is synchronous. If there is no profile yet it exits
