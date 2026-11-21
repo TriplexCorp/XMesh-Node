@@ -193,6 +193,24 @@ class ReservationGuardTests(unittest.TestCase):
                               "xray-a", offline, 2000)
         self.assertEqual(record["quotaReservation"]["ceilingBytes"], 50)
 
+    def test_corrupted_retained_reservation_cannot_be_dropped_by_unlimited(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds": [{"tag": "MAIN", "protocol": "vless",
+                   "settings": {"clients": [{"id": uid}]}}]}
+        policy = {"version": 2, "nodeId": 1, "issuedAtMs": 2000,
+                  "validUntilMs": 100000, "users": [{
+                      "userId": 1, "xrayId": uid, "expireAtMs": 90000,
+                      "panelUsedBytes": 0, "limitBytes": 0,
+                      "offlineBudgetBytes": None}]}
+        for malformed in (None, "garbage", [], True):
+            ledger = {"users": {"1": {"total": 20, "last": 20,
+                                       "quotaReservation": malformed}},
+                      "runtimeId": "xray-a", "maxSeenMs": 1000}
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(
+                    ValueError, "verified explicit close"):
+                guard.enforce(policy, copy.deepcopy(config), ledger,
+                              {"1": 20}, "xray-a", False, 2000)
+
     def test_legacy_downgrade_with_existing_v2_reservation_is_also_denied(self):
         uid = "550e8400-e29b-41d4-a716-446655440001"
         config = {"inbounds": [{"tag": "MAIN", "protocol": "vless",
