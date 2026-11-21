@@ -32,7 +32,7 @@ jobs:
       XMESH_EXPERIMENTAL_DRAIN: '0'
       GOTOOLCHAIN: go1.27.4
       QUOTA_TEST_DSN: postgresql://quota_test:quota_test_disposable@127.0.0.1:5432/quota_test
-      XMESH_PINNED_NEXUS_SHA: 235b42b55f6fff2e6f5137d3fdbb0acea46c6ad6
+      XMESH_PINNED_NEXUS_SHA: 7e352d51966e1eafdb0db251483ccfe099ad81c3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: TriplexCorp/XMesh-Nexus
-          ref: 235b42b55f6fff2e6f5137d3fdbb0acea46c6ad6
+          ref: 7e352d51966e1eafdb0db251483ccfe099ad81c3
           path: nexus
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
