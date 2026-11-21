@@ -163,6 +163,70 @@ class ReservationGuardTests(unittest.TestCase):
             guard.enforce(policy, copy.deepcopy(config), ledger,
                           {"1":2}, "xray-a", False, 3000)
 
+    def test_signed_v2_unlimited_downgrade_cannot_discard_held_reservation(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds": [{"tag": "MAIN", "protocol": "vless",
+                   "settings": {"clients": [{"id": uid}]}}]}
+        user = {"userId": 1, "xrayId": uid, "expireAtMs": 90000,
+                "panelUsedBytes": 0, "limitBytes": 1000,
+                "offlineBudgetBytes": 50, "quotaReservation": lease(ceiling=50)}
+        policy = {"version": 2, "nodeId": 1, "issuedAtMs": 1000,
+                  "validUntilMs": 100000, "users": [user]}
+        _, ledger, denied = guard.enforce(
+            policy, copy.deepcopy(config), {}, {"1": 35},
+            "xray-a", False, 1000)
+        self.assertNotIn(uid, denied)
+        record = ledger["users"]["1"]
+        self.assertEqual(record["quotaReservation"]["ceilingBytes"], 50)
+        # A newer, validly signed desired policy may propose "unlimited",
+        # but its missing lease is NOT evidence that the old bytes were
+        # finalized or the old quota reservation released.
+        user["limitBytes"] = 0
+        user.pop("quotaReservation")
+        user["offlineBudgetBytes"] = None
+        policy["issuedAtMs"] = 2000
+        for offline in (False, True):
+            with self.subTest(offline=offline), self.assertRaisesRegex(
+                    ValueError, "verified explicit close"):
+                guard.enforce(policy, copy.deepcopy(config),
+                              copy.deepcopy(ledger), {"1": 35},
+                              "xray-a", offline, 2000)
+        self.assertEqual(record["quotaReservation"]["ceilingBytes"], 50)
+
+    def test_legacy_downgrade_with_existing_v2_reservation_is_also_denied(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds": [{"tag": "MAIN", "protocol": "vless",
+                   "settings": {"clients": [{"id": uid}]}}]}
+        user = {"userId": 1, "xrayId": uid, "expireAtMs": 90000,
+                "panelUsedBytes": 0, "limitBytes": 1000,
+                "offlineBudgetBytes": 50, "quotaReservation": lease()}
+        p = {"version": 2, "nodeId": 1, "issuedAtMs": 1000,
+             "validUntilMs": 100000, "users": [user]}
+        _, ledger, _ = guard.enforce(p, copy.deepcopy(config),
+                                      {}, {"1": 10}, "xray-a", False, 1000)
+        p["version"] = 1
+        p["issuedAtMs"] = 2000
+        user.pop("quotaReservation")
+        with self.assertRaisesRegex(ValueError, "verified explicit close"):
+            guard.enforce(p, copy.deepcopy(config), ledger,
+                          {"1": 10}, "xray-a", False, 2000)
+
+    def test_fresh_v2_unlimited_user_without_old_lease_remains_supported(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds": [{"tag": "MAIN", "protocol": "vless",
+                   "settings": {"clients": [{"id": uid}]}}]}
+        p = {"version": 2, "nodeId": 1, "issuedAtMs": 1000,
+             "validUntilMs": 100000, "users": [{
+                 "userId": 1, "xrayId": uid, "expireAtMs": 90000,
+                 "panelUsedBytes": 0, "limitBytes": 0,
+                 "offlineBudgetBytes": None}]}
+        _, ledger, denied = guard.enforce(p, copy.deepcopy(config),
+                                           {}, {"1": 10}, "xray-a", False, 1000)
+        self.assertNotIn(uid, denied)
+        _, _, denied = guard.enforce(p, copy.deepcopy(config),
+                                     ledger, {"1": 20}, "xray-a", True, 2000)
+        self.assertNotIn(uid, denied)
+
     def test_identity_revision_ack_and_lifetime_validation(self):
         for field,value in [("meterEpoch","bad"),("revision",True),
                             ("acknowledgedBytes",100),("ceilingBytes",-1)]:
