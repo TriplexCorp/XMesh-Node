@@ -51,7 +51,7 @@ def configs(root, destination, user):
     client_id = str(uuid.uuid4())
     server = {
         "log": {"loglevel": "warning"},
-        "api": {"tag": "xmesh_stats_api", "services": ["StatsService"]},
+        "api": {"listen": f"127.0.0.1:{api_port}", "services": ["StatsService"]},
         "stats": {},
         "policy": {"levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}}},
         "inbounds": [
@@ -59,13 +59,10 @@ def configs(root, destination, user):
              "protocol": "vless", "settings": {"decryption": "none",
                  "clients": [{"id": client_id, "email": alias[name], "level": 0}]}}
             for name in names
-        ] + [{"tag": "xmesh_stats_in", "listen": "127.0.0.1", "port": api_port,
-              "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1", "port": api_port, "network": "tcp"}}],
+        ],
         "outbounds": [{"tag": "direct", "protocol": "freedom", "settings": {"finalRules": [
             {"action": "allow", "network": "tcp", "ip": ["127.0.0.1/32"], "port": str(destination)},
         ]}}],
-        "routing": {"rules": [{"type": "field", "inboundTag": ["xmesh_stats_in"],
-                              "outboundTag": "xmesh_stats_api"}]},
     }
     client = {
         "log": {"loglevel": "warning"},
