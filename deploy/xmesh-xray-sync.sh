@@ -311,6 +311,30 @@ reason=next((safe for prefix,safe in mapping if isinstance(message,str) and mess
 print(f"XMesh desired-config HTTP {sys.argv[2]}: {reason}",file=sys.stderr)
 PY
 fi
+# A signed QUARANTINED first-Genesis response is deliberately not an
+# ordinary desired-config authorization. Old agents MUST NOT apply its
+# config, regenerate managed Xray or interpret the HTTP 200 as admission.
+# A separate verified Agent->Xray cap installer is required first.
+if [[ "$HTTP_STATUS" == 200 ]] && python3 - "$RESP_FILE" <<'PYQUARANTINE'
+import json,sys
+try:
+ with open(sys.argv[1],encoding="utf-8") as fh: data=json.load(fh)
+ if not isinstance(data,dict): raise ValueError("invalid desired-config body")
+ policy=data.get("policy")
+ quarantined=(
+  data.get("status")=="quarantined" or
+  data.get("publicIngressAllowed") is False or
+  (isinstance(policy,dict) and isinstance(policy.get("quotaV2Genesis"),dict))
+ )
+except (OSError,TypeError,ValueError):
+ quarantined=False  # the ordinary validation must fail closed on bad JSON
+sys.exit(0 if quarantined else 1)
+PYQUARANTINE
+then
+ echo "Quota-v2 Genesis quarantined: only a measured, signed cap installer may activate Xray." >&2
+ stop_managed_xray_for_invalid_offline_policy || exit 1
+ exit 1
+fi
 if [[ "$HTTP_STATUS" != 200 && "$POLICY_ENABLED" == true ]];then
  if [[ ! -s "$STATE/policy-envelope.json" ]];then
   echo "No previously issued signed offline policy; denying unmanaged traffic." >&2
