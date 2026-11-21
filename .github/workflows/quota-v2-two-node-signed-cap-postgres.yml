@@ -82,17 +82,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" \
-            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant        run: |
-          set -Eeuo pipefail
-          python3 tests/quota_v2_two_node_pg_signer.py assert \
-            --reports "$XMESH_CI_QUOTA_RESULTS"
- -test.timeout 2m
+            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant$' -test.timeout 2m
           XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" \
-            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant        run: |
-          set -Eeuo pipefail
-          python3 tests/quota_v2_two_node_pg_signer.py assert \
-            --reports "$XMESH_CI_QUOTA_RESULTS"
- -test.timeout 2m
+            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant$' -test.timeout 2m
       - name: Assert shared database reservation = both distinct Xray WAL byte totals
         run: |
           set -Eeuo pipefail
