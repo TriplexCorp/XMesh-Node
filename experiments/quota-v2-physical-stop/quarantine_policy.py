@@ -26,6 +26,7 @@ import wal_transport
 PRODUCT = "/usr/local/bin/xmesh-agent-xspv2-product"
 PATH = "/api/v1/node/desired-config"
 PIN_PATH = "/api/v1/node/quota-v2/policy-pin"
+LEASE_PATH = "/api/v1/node/quota-v2/genesis-reservation"
 MAX_REPLY = 262144
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -148,8 +149,10 @@ def _locked_private_state(directory):
         raise
 
 
-def _durable_store(state_fd, data):
-    target="genesis-quarantine-envelope.json"
+def _durable_store(state_fd, data, target="genesis-quarantine-envelope.json"):
+    if target != "genesis-quarantine-envelope.json" and not re.fullmatch(
+            r"genesis-reservation-(prepared|confirmed)-u[1-9][0-9]{0,18}\.json", target):
+        raise ValueError("unregistered immutable Genesis evidence name")
     raw=json.dumps(data,sort_keys=True,separators=(",",":"),
                    ensure_ascii=False,allow_nan=False).encode("utf-8")
     if not 0 < len(raw) <= MAX_REPLY + 4096:
@@ -191,7 +194,7 @@ def _post_quarantined_desired(request, state, path=PATH):
     No curl, raw HTTP, Ed25519 legacy fallback, insecure TLS or alternate host
     is reachable from this operation.
     """
-    if path not in (PATH,PIN_PATH):
+    if path not in (PATH,PIN_PATH,LEASE_PATH):
         raise ValueError("unregistered XSP/2 product operation")
     with tempfile.TemporaryDirectory(prefix="xmesh-quarantine-",dir=state) as root:
         root=Path(root)
