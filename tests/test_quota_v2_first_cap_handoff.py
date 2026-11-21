@@ -270,6 +270,34 @@ class FirstCapHandoffTests(unittest.TestCase):
         self.assertEqual(sent[5]["aliases"], self.aliases)
         self.assertEqual(sent[5]["reservationId"], self.claims["reservationId"])
 
+    def test_signed_cap_cannot_skip_the_original_prepared_echo(self):
+        if __import__("os").geteuid() != 0:
+            self.skipTest("root-private signed prepare evidence requires root")
+        state = self.fixture.root / "state"
+        state.mkdir(mode=0o700)
+        original = state / "genesis-quarantine-envelope.json"
+        original.write_bytes(self.guard.canonical(self.evidence()))
+        original.chmod(0o600)
+        confirmed = state / "genesis-reservation-confirmed-u100.json"
+        confirmed.write_bytes(self.guard.canonical(self.confirmed_lease()))
+        confirmed.chmod(0o600)
+        before = ("f"*64, "2026-11-21T00:00:00Z", 4321, self.runtime)
+        activation = {"nodeId":self.node,
+                      "activationReceiptSha256":self.fixture.activation}
+        with (
+            mock.patch.object(cap.wal_transport,"_panel_pin",return_value=self.pub),
+            mock.patch.object(cap.wal_transport,"_measure_quarantined_runtime",
+                              return_value=before),
+            mock.patch.object(quarantine,"_enrolled_activation",
+                              return_value=activation),
+            mock.patch.object(cap.cap_install,"install_in_xray") as installed,
+        ):
+            with self.assertRaises((OSError,ValueError)):
+                cap.install_staged_cap(
+                    "https://isolated-ci.example",self.node,str(state),
+                    "/private/measured-xray.sock",self.signed_grant(),"e"*64)
+        installed.assert_not_called()
+
     def test_local_install_rejects_changed_activation_before_socket(self):
         if __import__("os").geteuid() != 0:
             self.skipTest("private installed Agent evidence requires root")
