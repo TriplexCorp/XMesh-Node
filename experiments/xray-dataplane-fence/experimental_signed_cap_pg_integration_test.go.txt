@@ -1,10 +1,11 @@
 // Cross-repository disposable integration. Real PostgreSQL quota allocator,
 // real Ed25519 signature and real Xray StatsService/WAL in a live Go process.
-// The standalone Python CI signer SIMULATES (does not provide) the independent
-// strict-XSP/2 policy+process attestation and Nexus policy signing key.
+// The CI fixtures SIMULATE independent strict-XSP/2 process/policy attestation;
+// signature generation uses the genuine Nexus Rust PolicySigner with a CI key.
 package xmeshdrain
 
 import (
+    "bytes"
     "encoding/hex"
     "encoding/json"
     "fmt"
@@ -48,8 +49,17 @@ func TestV2SignedRealPostgreSQLTwoNodeProcess(t *testing.T) {
         issued.Ceiling>1000 {
         t.Fatal("SQL signer reported invalid grant")
     }
-    pub,err:=hex.DecodeString(issued.PublicKeyHex)
-    if err!=nil || len(pub)!=32{t.Fatal("invalid independent Nexus-style test key")}
+    // Never accept the verifying key as authoritative simply because it
+    // accompanies an otherwise self-consistent signed grant. The test Node
+    // independently pinned it before requesting ANY budget from Nexus.
+    original,err:=os.ReadFile(os.Getenv("XMESH_CI_NEXUS_PINNED_PUBLIC"))
+    if err!=nil{t.Fatal("missing bootstrap-pinned Nexus policy public key")}
+    pub,err:=hex.DecodeString(strings.TrimSpace(string(original)))
+    if err!=nil || len(pub)!=32{t.Fatal("invalid independently pinned signer")}
+    supplied,err:=hex.DecodeString(issued.PublicKeyHex)
+    if err!=nil || !bytes.Equal(pub,supplied){
+        t.Fatal("grant attempted to swap previously pinned Nexus signer")
+    }
     activation:="c"
     meter:="22222222-2222-4222-8222-222222222247"
     reservation:="33333333-3333-4333-8333-333333333347"
@@ -157,12 +167,10 @@ func TestV2SignedOldXrayRuntimeCannotReuseOldGrant(t *testing.T) {
     if err!=nil{t.Fatal(err)}
     var previous struct{RuntimeID string `json:"runtimeId"`}
     if err:=json.Unmarshal(originalReport,&previous);err!=nil{t.Fatal(err)}
-    publicRaw,err:=os.ReadFile(filepath.Join(
-        os.Getenv("XMESH_CI_QUOTA_RESULTS"),
-        fmt.Sprintf("node-%d-public-key.txt",node)))
-    if err!=nil{t.Fatal(err)}
-    pub,err:=hex.DecodeString(string(publicRaw))
-    if err!=nil||len(pub)!=32{t.Fatal("untrusted previous signer key")}
+    publicRaw,err:=os.ReadFile(os.Getenv("XMESH_CI_NEXUS_PINNED_PUBLIC"))
+    if err!=nil{t.Fatal("missing independently pinned signer during restart")}
+    pub,err:=hex.DecodeString(strings.TrimSpace(string(publicRaw)))
+    if err!=nil||len(pub)!=32{t.Fatal("untrusted pinned signer key")}
     resetGate()
     observed.Lock()
     observed.manager=nil
