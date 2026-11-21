@@ -131,6 +131,96 @@ func TestV2SignedRealPostgreSQLTwoNodeProcess(t *testing.T) {
     dest:=filepath.Join(os.Getenv("XMESH_CI_QUOTA_RESULTS"),
         fmt.Sprintf("node-%d.json",node))
     if err:=os.WriteFile(dest,encoded,0600);err!=nil{t.Fatal(err)}
+    keyPath:=filepath.Join(os.Getenv("XMESH_CI_QUOTA_RESULTS"),
+        fmt.Sprintf("node-%d-public-key.txt",node))
+    if err:=os.WriteFile(keyPath,[]byte(issued.PublicKeyHex),0600);err!=nil{t.Fatal(err)}
     t.Logf("PASS: measured Node %d spent exactly %d PostgreSQL reserved bytes; "+
         "no refunds or terminal metering claimed",node,issued.Ceiling)
+}
+
+func TestV2SignedOldXrayRuntimeCannotReuseOldGrant(t *testing.T) {
+    signer:=os.Getenv("XMESH_CI_QUOTA_SQL_SIGNER")
+    if signer=="" {t.Skip("only disposable cross-process restart check")}
+    if os.Getenv("GITHUB_ACTIONS")!="true" ||
+        os.Getenv("RUNNER_ENVIRONMENT")!="github-hosted" ||
+        os.Getenv("XMESH_AUDIT_DISPOSABLE")!="1" {
+        t.Fatal("restart check requires disposable hosted CI")
+    }
+    node,err:=strconv.ParseInt(os.Getenv("XMESH_CI_QUOTA_NODE"),10,64)
+    if err!=nil||(node!=47&&node!=48){t.Fatal("invalid Node")}
+    dir:=filepath.Join(os.Getenv("XMESH_CI_QUOTA_PERSIST_DIR"),
+        fmt.Sprintf("node-%d",node))
+    signedRaw,err:=os.ReadFile(filepath.Join(dir,"positive-cap-u101.json"))
+    if err!=nil{t.Fatalf("first process did not fsync a signed grant: %v",err)}
+    originalReport,err:=os.ReadFile(filepath.Join(
+        os.Getenv("XMESH_CI_QUOTA_RESULTS"),fmt.Sprintf("node-%d.json",node)))
+    if err!=nil{t.Fatal(err)}
+    var previous struct{RuntimeID string `json:"runtimeId"`}
+    if err:=json.Unmarshal(originalReport,&previous);err!=nil{t.Fatal(err)}
+    publicRaw,err:=os.ReadFile(filepath.Join(
+        os.Getenv("XMESH_CI_QUOTA_RESULTS"),
+        fmt.Sprintf("node-%d-public-key.txt",node)))
+    if err!=nil{t.Fatal(err)}
+    pub,err:=hex.DecodeString(string(publicRaw))
+    if err!=nil||len(pub)!=32{t.Fatal("untrusted previous signer key")}
+    resetGate()
+    observed.Lock()
+    observed.manager=nil
+    observed.directory=""
+    observed.runtimeID=""
+    observed.Unlock()
+    // New process reads the *real first process's fsynced WAL and receipt*,
+    // not a synthetic copy. If Linux refuses startup entirely, this is
+    // safely fail closed and no old grant may be reissued.
+    if err:=configureObservedCheckpoint(dir);err!=nil{
+        t.Logf("PASS: restarted Xray refused old WAL before serving: %v",err)
+        return
+    }
+    gate.Lock()
+    newRuntime:=gate.runtimeID
+    experimentalByteCaps.strict=true
+    experimentalByteCaps.users=nil
+    oldDebt:=gate.users["xmesh-u101"]
+    gate.Unlock()
+    if previous.RuntimeID==newRuntime||newRuntime=="" {
+        t.Fatal("fresh Xray process inherited old kernel runtime identity")
+    }
+    if oldDebt==nil||!oldDebt.historicDebtUnresolved {
+        t.Fatal("new Xray lost old in-flight WAL byte debt")
+    }
+    envelope,_,err:=decodeCanonicalSignedCap(signedRaw)
+    if err!=nil{t.Fatalf("old signed envelope corrupted: %v",err)}
+    scopes:=[]signedCapAlias{
+        {Email:capCDN,Class:"cdn"},{Email:capMain,Class:"main"},
+    }
+    p:=envelope.Payload
+    ctx:=signedCapContext{
+        NodeID:p.NodeID,UserID:p.UserID,
+        ActivationReceiptSHA256:p.ActivationReceiptSHA256,
+        RuntimeID:p.RuntimeID,PolicySHA256:p.PolicySHA256,
+        AccountEpoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,
+        ReservationRevision:p.ReservationRevision,
+        InventoryTailDigest:p.InventoryTailDigest,
+        Aliases:scopes,FirstGenesisIndependentlyProved:true,
+        Current:func(string,string)(uint64,error){return 0,nil},
+    }
+    if err:=installSignedFirstGenesisCap(signedRaw,pub,ctx);err==nil{
+        t.Fatal("expired process-bounded grant reused after Xray restarted")
+    }
+    gate.Lock()
+    open:=checkSignedCapBeforeRegisterLocked(capMain)
+    gate.Unlock()
+    if open==nil{t.Fatal("new Xray admitted old account without new lease")}
+    // A forged second first-genesis attempt against the same real Nexus
+    // PostgreSQL account must fail due to immutable Node creation evidence.
+    cmd:=exec.Command("python3",signer,"issue","--node",
+        strconv.FormatInt(node,10),"--runtime",newRuntime,
+        "--policy-sha",strings.Repeat("b",64),
+        "--xray-pid",strconv.Itoa(os.Getpid()))
+    if output,err:=cmd.CombinedOutput();err==nil{
+        t.Fatalf("SQL allowed a second first genesis: %s",output)
+    }
+    t.Logf("PASS: Xray Node %d runtime changed; old WAL remains charged, "+
+        "old signed cap denied, new SQL first genesis refused",node)
 }
