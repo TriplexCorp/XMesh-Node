@@ -1,0 +1,27 @@
+name: Quota V2 signed scoped reservation candidate (no authority)
+on:
+  pull_request:
+    paths:
+      - 'experiments/quota-v2-physical-stop/signed_reservation_candidate.py'
+      - 'tests/test_quota_v2_signed_reservation_candidate.py'
+      - 'docs/security-audit/V2_SIGNED_RESERVATION_CANDIDATE.md'
+      - '.github/workflows/quota-v2-signed-reservation-candidate.yml'
+permissions:
+  contents: read
+jobs:
+  signed-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate isolated verifier and test syntax
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/signed_reservation_candidate.py tests/test_quota_v2_signed_reservation_candidate.py
+      - name: Verify zero-authority signed Nexus-style candidate
+        run: python3 tests/test_quota_v2_signed_reservation_candidate.py
+      - name: Confirm existing signed WAL and measured genesis regressions
+        run: |
+          python3 tests/test_quota_v2_measured_genesis.py
+          python3 tests/test_quota_v2_wal_transport.py
