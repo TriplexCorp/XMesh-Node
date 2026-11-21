@@ -150,17 +150,22 @@ def verify_candidate(raw_envelope: bytes, pinned_nexus_key: Path,
     # a new revision may only advance the confirmed local byte floor.
     if prior is not None:
         if not isinstance(prior, dict) or set(prior) != {
-                "bindings", "reservationRevision", "observedWalBytes",
-                "observedCdnWalBytes", "receiptDigest"}:
+                "bindings", "reservationRevision", "acknowledgedBytes",
+                "observedWalBytes", "observedCdnWalBytes", "issuedAtMs",
+                "receiptDigest"}:
             raise ValueError("candidate: malformed monotonic durable prior")
         if prior["bindings"] != independent_context or not exact_counter(
                 prior["reservationRevision"], nonzero=True) or not exact_counter(
                 prior["observedWalBytes"]) or not exact_counter(
-                prior["observedCdnWalBytes"]):
+                prior["observedCdnWalBytes"]) or not exact_counter(
+                prior["acknowledgedBytes"]) or not exact_counter(
+                prior["issuedAtMs"], nonzero=True):
             raise ValueError("candidate: prior reservation changed without proven close")
         if (p["reservationRevision"] < prior["reservationRevision"] or
+                p["acknowledgedBytes"] < prior["acknowledgedBytes"] or
                 p["observedWalBytes"] < prior["observedWalBytes"] or
-                p["observedCdnWalBytes"] < prior["observedCdnWalBytes"]):
+                p["observedCdnWalBytes"] < prior["observedCdnWalBytes"] or
+                p["issuedAtMs"] < prior["issuedAtMs"]):
             raise ValueError("candidate: old reservation or durable byte floor replay")
         if (p["reservationRevision"] == prior["reservationRevision"] and
                 contract_digest(doc) != prior["receiptDigest"]):
@@ -173,6 +178,8 @@ def verify_candidate(raw_envelope: bytes, pinned_nexus_key: Path,
         "userId": p["userId"],
         "reservationId": p["reservationId"],
         "reservationRevision": p["reservationRevision"],
+        "acknowledgedBytes": p["acknowledgedBytes"],
+        "issuedAtMs": p["issuedAtMs"],
         "observedWalBytes": p["observedWalBytes"],
         "observedCdnWalBytes": p["observedCdnWalBytes"],
         "receiptDigest": contract_digest(doc),
