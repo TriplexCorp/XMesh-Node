@@ -82,6 +82,9 @@ ln -sfn "$WAL_ROOT/quota-v2-physical-stop/quarantine_policy.py" /usr/local/sbin/
 # First-Genesis SQL lease helper is zero-authority and intentionally opt-in.
 # The positive signed-cap verifier is installed as a library, not a daemon.
 ln -sfn "$WAL_ROOT/quota-v2-physical-stop/genesis_reservation.py" /usr/local/sbin/xmesh-quota-genesis-reservation
+if [[ "$WAL_STAGE_AGENT" == 1 && "$AGENT_VERSION" == control-v6.0.27 ]]; then
+  ln -sfn "$WAL_ROOT/quota-v2-physical-stop/first_cap_handoff.py" /usr/local/sbin/xmesh-quota-genesis-cap-rehearsal
+fi
 
 if [[ -f "$ROOT/deploy/xmesh-tls-renew-hook.sh" ]]; then
   install -o root -g root -m 0700 "$ROOT/deploy/xmesh-tls-renew-hook.sh" /usr/local/libexec/xmesh-tls-renew-hook
