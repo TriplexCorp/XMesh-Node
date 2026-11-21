@@ -11,6 +11,7 @@ func TestOnlyExactRegisteredProductOperationPaths(t *testing.T) {
 		"/api/v1/node/desired-config",
 		"/api/v1/node/quota-v2/wal",
 		"/api/v1/node/quota-v2/policy-pin",
+		"/api/v1/node/quota-v2/genesis-reservation",
 	}
 	for _, path := range allowed {
 		if !allowedProductTunnelPath(path) {
@@ -22,6 +23,9 @@ func TestOnlyExactRegisteredProductOperationPaths(t *testing.T) {
 		"/api/v1/node/quota-v2/policy-pin/",
 		"/api/v1/node/quota-v2/policy-pin?nodeId=47",
 		"/api/v1/node/quota-v2/policy-pin/../wal",
+		"/api/v1/node/quota-v2/genesis-reservation/",
+		"/api/v1/node/quota-v2/genesis-reservation?userId=1",
+		"/api/v1/node/quota-v2/genesis-reservation/../grant",
 		"http://evil.invalid/api/v1/node/quota-v2/policy-pin",
 		"/api/v1/node/desired-config/unsafe",
 	} {
