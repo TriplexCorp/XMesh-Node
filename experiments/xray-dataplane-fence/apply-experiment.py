@@ -87,6 +87,10 @@ def run(root: Path):
         shared / "experimental_signed_cap_admission.go",
     )
     shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_cap_socket.go.txt",
+        shared / "experimental_cap_socket.go",
+    )
+    shutil.copyfile(
         NODE_ROOT / "experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt",
         shared / "experimental_signed_cap_admission_test.go",
     )
@@ -734,6 +738,7 @@ type Writer interface {""",
 
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
+         str(shared / "experimental_cap_socket.go"),
          str(shared / "observed_checkpoint.go"),
          str(shared / "runtime_identity.go"),
          str(shared / "observed_checkpoint_test.go"),

@@ -1,0 +1,272 @@
+// Included only in the disposable, source-pinned Xray patch.
+package xmeshdrain
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"syscall"
+)
+
+const localCapPath = "/v1/quota-cap"
+const localCapRequestLimit = 18 * 1024
+const genesisDomain = "XMESH_XRAY_GENESIS_PREPARED_V1\x00"
+
+type localCapBinding struct {
+	NodeID                  int64  `json:"nodeId"`
+	ActivationReceiptSHA256 string `json:"activationReceiptSha256"`
+	PolicyPublicKey         string `json:"policyPublicKey"`
+}
+
+type localCapControl struct {
+	binding localCapBinding
+	signer  ed25519.PublicKey
+}
+
+var capControl *localCapControl
+
+type capPeerKey struct{}
+
+func controlPeer(ctx context.Context, conn net.Conn) context.Context {
+	unix, ok := conn.(*net.UnixConn)
+	if !ok {
+		return ctx
+	}
+	raw, err := unix.SyscallConn()
+	if err != nil {
+		return ctx
+	}
+	var peer *syscall.Ucred
+	var lookupErr error
+	err = raw.Control(func(fd uintptr) {
+		peer, lookupErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	})
+	if err != nil || lookupErr != nil || peer == nil || peer.Uid != uint32(os.Geteuid()) {
+		return ctx
+	}
+	return context.WithValue(ctx, capPeerKey{}, true)
+}
+
+// Opening with O_NOFOLLOW and validating the already opened descriptor also
+// protects startup from substitution between a pathname check and open.
+func loadLocalCapControl(path string) (*localCapControl, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("absolute signed-cap binding path required")
+	}
+	fd, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer fd.Close()
+	var info syscall.Stat_t
+	if err := syscall.Fstat(int(fd.Fd()), &info); err != nil {
+		return nil, err
+	}
+	if info.Mode&syscall.S_IFMT != syscall.S_IFREG || info.Mode&0077 != 0 ||
+		info.Nlink != 1 || info.Uid != uint32(os.Geteuid()) || info.Size <= 0 || info.Size > 1024 {
+		return nil, errors.New("signed-cap binding must be a bounded, private file owned by Xray UID")
+	}
+	raw, err := io.ReadAll(io.LimitReader(fd, 1025))
+	if err != nil || int64(len(raw)) != info.Size {
+		return nil, errors.New("invalid signed-cap binding size")
+	}
+	var binding localCapBinding
+	if err := localCapJSON(raw, &binding); err != nil {
+		return nil, err
+	}
+	if binding.NodeID <= 0 || !signedCapHex64.MatchString(binding.ActivationReceiptSHA256) ||
+		!signedCapHex64.MatchString(binding.PolicyPublicKey) {
+		return nil, errors.New("invalid signed-cap startup binding")
+	}
+	key, err := hex.DecodeString(binding.PolicyPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	return &localCapControl{binding: binding, signer: ed25519.PublicKey(key)}, nil
+}
+
+// Require canonical JSON so neither duplicate keys nor trailing fields can
+// change the meaning across Agent and Xray. Only integer numbers are used by
+// the typed schemas. The cap's own canonical bytes are carried verbatim.
+func localCapJSON(raw []byte, dst any) error {
+	generic := json.NewDecoder(bytes.NewReader(raw))
+	generic.UseNumber()
+	var value map[string]any
+	if err := generic.Decode(&value); err != nil {
+		return err
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil || !bytes.Equal(raw, canonical) {
+		return errors.New("expected one canonical signed-cap object")
+	}
+	strict := json.NewDecoder(bytes.NewReader(raw))
+	strict.DisallowUnknownFields()
+	return strict.Decode(dst)
+}
+
+type localCapScope struct {
+	UserID        int64            `json:"userId"`
+	PolicySHA256  string           `json:"policySha256"`
+	AccountEpoch  string           `json:"accountEpoch"`
+	MeterEpoch    string           `json:"meterEpoch"`
+	ReservationID string           `json:"reservationId"`
+	Revision      int64            `json:"revision"`
+	Nonce         string           `json:"nonce"`
+	Aliases       []signedCapAlias `json:"aliases"`
+}
+
+type localCapRequest struct {
+	Genesis []byte        `json:"genesis"`
+	Grant   []byte        `json:"grant"`
+	Scope   localCapScope `json:"scope"`
+}
+
+type signedGenesis struct {
+	Algorithm string          `json:"algorithm"`
+	Signature string          `json:"signature"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type genesisClaims struct {
+	SchemaVersion           int    `json:"schemaVersion"`
+	Kind                    string `json:"kind"`
+	NodeID                  int64  `json:"nodeId"`
+	ActivationReceiptSHA256 string `json:"activationReceiptSha256"`
+	RuntimeID               string `json:"candidateRuntimeId"`
+	Challenge               string `json:"challenge"`
+	PreparedAtMs            int64  `json:"preparedAtMs"`
+	ValidUntilMs            int64  `json:"validUntilMs"`
+	// Pointers make absence distinguishable from the required zero values.
+	AuthorizedBytes *int64 `json:"authorizedBytes"`
+	CanStart        *bool  `json:"canStart"`
+	CanResume       *bool  `json:"canResume"`
+}
+
+func (c *localCapControl) verifyGenesis(raw []byte, runtime string, now int64) bool {
+	if len(raw) == 0 || len(raw) > 4096 {
+		return false
+	}
+	var envelope signedGenesis
+	var claim genesisClaims
+	if localCapJSON(raw, &envelope) != nil || envelope.Algorithm != "Ed25519" ||
+		localCapJSON(envelope.Payload, &claim) != nil {
+		return false
+	}
+	sig, err := hex.DecodeString(envelope.Signature)
+	return err == nil && len(sig) == ed25519.SignatureSize &&
+		ed25519.Verify(c.signer, append([]byte(genesisDomain), envelope.Payload...), sig) &&
+		claim.SchemaVersion == 1 && claim.Kind == "xmesh.xray.genesis-prepared" &&
+		claim.NodeID == c.binding.NodeID &&
+		claim.ActivationReceiptSHA256 == c.binding.ActivationReceiptSHA256 &&
+		claim.RuntimeID == runtime && signedCapHex64.MatchString(claim.Challenge) &&
+		claim.Challenge != claim.RuntimeID &&
+		claim.PreparedAtMs > 0 && claim.PreparedAtMs <= now && now < claim.ValidUntilMs &&
+		claim.ValidUntilMs-claim.PreparedAtMs == 120000 &&
+		claim.AuthorizedBytes != nil && *claim.AuthorizedBytes == 0 &&
+		claim.CanStart != nil && !*claim.CanStart && claim.CanResume != nil && !*claim.CanResume
+}
+
+func (c *localCapControl) admit(req localCapRequest) (string, error) {
+	runtime, err := currentRuntimeIdentity()
+	if err != nil {
+		return "", err
+	}
+	genesisVerifiedAt := experimentalCapClockMs()
+	if !c.verifyGenesis(req.Genesis, runtime, genesisVerifiedAt) {
+		return "", errors.New("invalid Nexus first-genesis proof")
+	}
+	scope := req.Scope
+	if !signedCapHex64.MatchString(scope.Nonce) {
+		return "", errors.New("invalid independent request nonce")
+	}
+	envelope, _, err := decodeCanonicalSignedCap(req.Grant)
+	if err != nil || envelope.Payload.Nonce != scope.Nonce {
+		return "", errors.New("signed cap request nonce mismatch")
+	}
+	observed.Lock()
+	manager := observed.manager
+	observed.Unlock()
+	if manager == nil {
+		return "", errors.New("audited StatsService not configured")
+	}
+	aliases := make([]string, 0, len(scope.Aliases))
+	for _, alias := range scope.Aliases {
+		match := signedUserEmail.FindStringSubmatch(alias.Email)
+		if match == nil {
+			return "", errors.New("invalid scoped inbound identity")
+		}
+		if _, tracked := trackedInboundTags[match[2]]; !tracked {
+			return "", errors.New("assigned inbound is not metered by this Xray")
+		}
+		aliases = append(aliases, alias.Email)
+	}
+	current := func(alias, direction string) (uint64, error) {
+		meter := manager.GetCounter(rawMeterName(alias, direction))
+		if meter == nil {
+			return 0, nil
+		}
+		value := meter.Value()
+		if value < 0 {
+			return 0, errors.New("negative live counter")
+		}
+		return uint64(value), nil
+	}
+	expected := signedCapContext{
+		NodeID: c.binding.NodeID, UserID: scope.UserID,
+		ActivationReceiptSHA256: c.binding.ActivationReceiptSHA256,
+		RuntimeID:               runtime, PolicySHA256: scope.PolicySHA256, AccountEpoch: scope.AccountEpoch,
+		MeterEpoch: scope.MeterEpoch, ReservationID: scope.ReservationID,
+		ReservationRevision: scope.Revision, InventoryTailDigest: zeroCapInventory,
+		Aliases: scope.Aliases, FirstGenesisIndependentlyProved: true, Current: current,
+		BeforeInstall: func() error {
+			now := experimentalCapClockMs()
+			if now < genesisVerifiedAt || !c.verifyGenesis(req.Genesis, runtime, now) {
+				return errors.New("first-genesis proof expired during signed-cap installation")
+			}
+			return verifyObservedCounterRegistry(manager, "xmesh-u"+strconv.FormatInt(scope.UserID, 10), aliases)
+		},
+	}
+	if err := installSignedFirstGenesisCap(req.Grant, c.signer, expected); err != nil {
+		return "", err
+	}
+	return runtime, nil
+}
+
+const zeroCapInventory = "0000000000000000000000000000000000000000000000000000000000000000"
+
+func (c *localCapControl) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if r.Context().Value(capPeerKey{}) != true {
+		http.Error(w, "unauthorized signed-cap peer", http.StatusForbidden)
+		return
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, localCapRequestLimit))
+	var req localCapRequest
+	if err != nil || localCapJSON(raw, &req) != nil {
+		http.Error(w, "invalid signed-cap request", http.StatusBadRequest)
+		return
+	}
+	runtime, err := c.admit(req)
+	if err != nil {
+		http.Error(w, "signed cap not installed", http.StatusConflict)
+		return
+	}
+	digest := sha256.Sum256(req.Grant)
+	_ = json.NewEncoder(w).Encode(struct {
+		Runtime     string `json:"runtimeId"`
+		GrantSHA256 string `json:"grantSha256"`
+	}{Runtime: runtime, GrantSHA256: hex.EncodeToString(digest[:])})
+}

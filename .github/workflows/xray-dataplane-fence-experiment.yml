@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'experiments/xray-dataplane-fence/**'
+      - 'experiments/quota-v2-physical-stop/cap_install.py'
       - '.github/workflows/xray-dataplane-fence-experiment.yml'
   push:
     # Test sensitive Xray changes on every pushed branch, even when a PR
@@ -11,6 +12,7 @@ on:
     branches: ['**']
     paths:
       - 'experiments/xray-dataplane-fence/**'
+      - 'experiments/quota-v2-physical-stop/cap_install.py'
       - '.github/workflows/xray-dataplane-fence-experiment.yml'
 permissions:
   contents: read
@@ -76,6 +78,10 @@ jobs:
           go test -race ./proxy -run TestExperimentalNonScopedTCP -count=20
           go build -o /tmp/xmesh-xray-fence-experiment ./main
           /tmp/xmesh-xray-fence-experiment version
+      - name: Install a signed 8 MiB cap in real Xray and enforce it over VLESS
+        env:
+          XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: "1"
+        run: python3 experiments/xray-dataplane-fence/test_xray_live_signed_cap.py /tmp/xmesh-xray-fence-experiment
       - name: Verify selective active VLESS stream termination while other users continue
         env:
           XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: "1"

@@ -85,6 +85,7 @@ type signedCapContext struct {
     Aliases []signedCapAlias
     FirstGenesisIndependentlyProved bool
     Current func(string,string)(uint64,error)
+    BeforeInstall func() error
 }
 
 // Reject duplicate keys at any JSON nesting depth, unknown fields,
@@ -224,7 +225,8 @@ func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
     return payload,nil
 }
 
-// This function is reachable exclusively via disposable Xray unit tests.
+// This function is part of the disposable Xray patch. The local endpoint
+// supplies the separately verified Genesis and privileged Agent scope.
 // It refuses to install from a mere caller-provided signed JSON unless a
 // separately obtained context independently pins the first-genesis Node,
 // process, policy, signed lease, and all user inbound aliases.
@@ -246,6 +248,9 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
         return errors.New("signed Xray cap: no pristine measured runtime or strict gate")
     }
     identity:="xmesh-u"+strconv.FormatInt(payload.UserID,10)
+    if expected.BeforeInstall!=nil {
+        if err:=expected.BeforeInstall();err!=nil{return err}
+    }
     if experimentalByteCaps.users!=nil &&
         experimentalByteCaps.users[identity]!=nil {
         return errors.New("signed Xray cap: an installed reservation cannot be reissued")
@@ -303,6 +308,9 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
         // Keep the durable attempt. A later retry must not reopen the grant
         // after this process failed to prove timely installation.
         return errors.New("signed Xray cap: installation deadline or clock changed before publication")
+    }
+    if expected.BeforeInstall!=nil {
+        if err:=expected.BeforeInstall();err!=nil{return err}
     }
     if experimentalByteCaps.users==nil {
         experimentalByteCaps.users=map[string]*experimentalByteCap{}

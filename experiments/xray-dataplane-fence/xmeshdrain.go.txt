@@ -94,7 +94,12 @@ func RequireInboundCoverage(ctx context.Context) error {
     subject := session.InboundFromContext(ctx)
     if subject == nil { return nil }
     // A private StatsService call does not need user authentication.
-    if subject.Tag == "xmesh_stats_in" { return nil }
+    if subject.Tag == "xmesh_stats_in" {
+        if capControl != nil && subject.User != nil {
+            return errors.New("signed Xray cap: authenticated user on reserved StatsService inbound")
+        }
+        return nil
+    }
     // Never let a tagged dataplane route proceed without user attribution,
     // even if upstream Xray omitted the authenticated User context. Checking
     // only for User != nil permits silent unmetered traffic on that route.
@@ -180,6 +185,13 @@ func Register(ctx context.Context, email string, stop func()) error {
     // silently bypass tracking: a later drain would otherwise be incomplete.
     if email == "" {
         return errNoUserID
+    }
+    if capControl != nil {
+        inbound := session.InboundFromContext(ctx)
+        match := signedUserEmail.FindStringSubmatch(email)
+        if inbound == nil || match == nil || match[2] != inbound.Tag {
+            return errors.New("signed Xray cap: authenticated alias does not match its inbound")
+        }
     }
     id := uint64(c.IDFromContext(ctx))
     if id == 0 {
@@ -590,6 +602,10 @@ func decodeScopedFenceRequest(body io.Reader) (checkpointScope,error) {
 
 func serveHTTP(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
+    if capControl != nil && r.URL.Path == localCapPath {
+        capControl.serve(w,r)
+        return
+    }
     if r.Method != http.MethodPost || r.URL.Path != "/v1/fence" {
         http.Error(w, "not found", http.StatusNotFound)
         return
@@ -630,6 +646,10 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func init() {
+    capBinding:=os.Getenv("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING")
+    if !enabled && capBinding!="" {
+        panic("signed-cap binding requires the disposable Xray gate")
+    }
     if !enabled {
         return
     }
@@ -644,12 +664,20 @@ func init() {
     if err := configureObservedCheckpoint(dir); err != nil {
         panic(err)
     }
+    if capBinding!="" {
+        capControl,err=loadLocalCapControl(capBinding)
+        if err!=nil {panic(err)}
+        // Startup is closed to every user before the control socket or
+        // any VLESS listener can be opened.
+        experimentalByteCaps.strict=true
+    }
     socket := os.Getenv("XMESH_EXPERIMENTAL_DRAIN_SOCKET")
     if socket == "" {
         panic("experimental xmesh drain socket required")
     }
-    parent, err := os.Stat(filepath.Dir(socket))
-    if err != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 {
+    parent, err := os.Lstat(filepath.Dir(socket))
+    if err != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 ||
+        (capControl!=nil && parent.Sys().(*syscall.Stat_t).Uid!=uint32(os.Geteuid())) {
         panic("experimental xmesh drain parent must exist with private permissions")
     }
     if err:=recoverStaleUnixSocket(socket);err!=nil{panic(err)}
@@ -663,6 +691,7 @@ func init() {
     }
     go func() {
         _ = (&http.Server{Handler: http.HandlerFunc(serveHTTP),
-            ReadHeaderTimeout: 2*time.Second}).Serve(listener)
+            ConnContext: controlPeer, ReadHeaderTimeout: 2*time.Second,
+            ReadTimeout: 8*time.Second, WriteTimeout: 12*time.Second}).Serve(listener)
     }()
 }
