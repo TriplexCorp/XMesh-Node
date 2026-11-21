@@ -168,7 +168,7 @@ def _original_measurement_pins(state_fd, original, node, activation):
     return (intent["executableSha256"],intent["configSha256"])
 
 
-def run(panel, node, user, state, operation, *, require_pins=True):
+def run(panel, node, user, state, operation):
     if (os.geteuid() != 0 or not isinstance(panel, str)
             or not panel.startswith("https://") or node <= 0 or user <= 0
             or operation not in ("prepare", "confirm")):
@@ -180,7 +180,7 @@ def run(panel, node, user, state, operation, *, require_pins=True):
         activation = identity["activationReceiptSha256"]
         original = _staged_original(state_fd, node, user, pinned, activation)
         genesis = original["prepared"]["payload"]
-        pins = _original_measurement_pins(state_fd, original, node, activation) if require_pins else None
+        pins = _original_measurement_pins(state_fd, original, node, activation)
         before = wal_transport._measure_quarantined_runtime(pins)
         if before[3] != genesis["candidateRuntimeId"]:
             raise ValueError("measured Xray replaced since original signed Genesis")
