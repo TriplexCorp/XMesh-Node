@@ -211,7 +211,11 @@ def replay_after_database_restart(dsn,persist_root):
         nonce,pid,policy=row
         command=[binary,str(node),nonce,str(pid),policy]
         result=subprocess.run(command,capture_output=True,text=True,
-                              check=True,timeout=15)
+                              check=False,timeout=15)
+        if result.returncode!=0:
+            raise AssertionError("native Nexus signed outbox replay refused "
+                                 "after PostgreSQL restart: "+
+                                 result.stderr[-2500:]+result.stdout[-500:])
         resumed=json.loads(result.stdout)
         prior=(persist_root/f"node-{node}"/"positive-cap-u101.json").read_bytes()
         if (resumed.get("signedEnvelope","").encode()!=original[0]
