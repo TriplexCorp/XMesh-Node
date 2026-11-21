@@ -282,6 +282,64 @@ class QuarantinePolicyTests(unittest.TestCase):
         self.assertEqual(sent["quotaGenesisQuarantine"],True)
         self.assertTrue((self.root/"genesis-quarantine-envelope.json").is_file())
 
+    def preview_document(self):
+        payload = {
+            "schemaVersion":1,"kind":"xmesh.quota-v2.quarantined-config-preview",
+            "nodeId":self.node,"activationReceiptSha256":self.activation,
+            "profileId":self.doc["profileId"],"port":self.doc["port"],
+            "config":self.doc["config"],"configSha256":self.doc["revision"],
+            "issuedAtMs":self.now,"validUntilMs":self.now+120000,
+            "authorizedBytes":0,"publicIngressAllowed":False,
+            "canStart":False,"canResume":False,"refundableBytes":0,
+        }
+        msg=self.root/"preview.msg"
+        sig=self.root/"preview.sig"
+        msg.write_bytes(qp.PREVIEW_DOMAIN+self.guard.canonical(payload))
+        subprocess.run(["openssl","pkeyutl","-sign","-inkey",str(self.private),
+                        "-rawin","-in",str(msg),"-out",str(sig)],check=True)
+        return {"algorithm":"Ed25519","payload":payload,"signature":sig.read_bytes().hex()}
+
+    def test_real_signed_config_preview_denies_modified_config_and_foreign_owner(self):
+        doc=self.preview_document()
+        raw=self.guard.canonical(doc)
+        self.assertEqual(qp.validate_preview(raw,self.node,self.activation,self.pub,self.now),doc)
+        for node,activation,key in ((self.node+1,self.activation,self.pub),
+                (self.node,"d"*64,self.pub),(self.node,self.activation,"d"*64)):
+            with self.assertRaises(ValueError):
+                qp.validate_preview(raw,node,activation,key,self.now)
+        doc["payload"]["config"]["inbounds"][0]["port"]=9999
+        with self.assertRaises(ValueError):
+            qp.validate_preview(self.guard.canonical(doc),self.node,self.activation,self.pub,self.now)
+        with self.assertRaises(ValueError):
+            qp.validate_preview(raw,self.node,self.activation,self.pub,self.now+120000)
+
+    def test_pinned_genesis_retries_the_original_fsynced_challenge(self):
+        before=("f"*64,"2026-11-21T00:00:00Z",987,self.runtime)
+        preview=self.preview_document()
+        (self.root/qp.PREVIEW_FILE).write_bytes(self.guard.canonical(preview))
+        (self.root/qp.PREVIEW_FILE).chmod(0o600)
+        identity={"nodeId":self.node,"activationReceiptSha256":self.activation}
+        def state_handles(_):
+            return os.open(self.root,os.O_RDONLY|os.O_DIRECTORY),os.open(os.devnull,os.O_RDONLY)
+        with (
+            mock.patch.object(qp,"_locked_private_state",side_effect=state_handles),
+            mock.patch.object(qp,"_pinned_policy_before_genesis",return_value=self.pub),
+            mock.patch.object(qp,"_enrolled_activation",return_value=identity),
+            mock.patch.object(qp.wal_transport,"_measure_quarantined_runtime",return_value=before),
+            mock.patch.object(qp.wal_transport,"prepare_measured_genesis",
+                side_effect=[TimeoutError("lost response"),self.prepared]) as prepared,
+            mock.patch.object(qp,"_post_quarantined_desired",return_value=self.encoded()),
+            mock.patch.object(qp.secrets,"token_hex",return_value=self.challenge),
+        ):
+            with self.assertRaises(TimeoutError):
+                qp.request_quarantine("https://panel.example",self.node,str(self.root),"e"*64)
+            intent=(self.root/qp.INTENT_FILE).read_bytes()
+            result=qp.request_quarantine("https://panel.example",self.node,str(self.root),"e"*64)
+            self.assertEqual(result["authorizedBytes"],0)
+            self.assertEqual((self.root/qp.INTENT_FILE).read_bytes(),intent)
+        self.assertEqual(prepared.call_count,2)
+        self.assertEqual(prepared.call_args_list[0],prepared.call_args_list[1])
+
     def test_runtime_replaced_after_strict_tunnel_keeps_disk_clean(self):
         initial=("f"*64,"start",987,self.runtime)
         replaced=("a"*64,"start",988,self.runtime)
