@@ -1,0 +1,103 @@
+// CI-ONLY byte-ceiling proof for the exact-pinned instrumented Xray.
+// A cap configured by unit tests is NOT a signed Nexus admission and cannot
+// open any quarantined listener. The real product must require an independently
+// verified reservation/epoch and process-bound startup gate before enabling it.
+package xmeshdrain
+
+import (
+    "errors"
+    "fmt"
+    "math"
+)
+
+// Every field and counter is protected by gate.Mutex. Shared user counters
+// cover both directions and *all* inbound aliases; CDN aliases additionally
+// consume the CDN bucket. No counter can refill a budget by switching tags.
+type experimentalByteCap struct {
+    runtimeID string
+    grantCeiling uint64
+    nodeCeiling uint64
+    cdnCeiling uint64
+    chargedAll uint64
+    chargedCDN uint64
+    aliases map[string]bool // exact alias -> CDN marker
+}
+
+// Byte-cap activation is deliberately absent from the shipping protocol;
+// only the isolated Go tests set it. Without that verified admission, no
+// production Xray may infer permission to serve traffic from this map.
+var experimentalByteCaps = struct {
+    strict bool
+    users map[string]*experimentalByteCap
+}{}
+
+// Caller must hold gate.Mutex; exact same lock serializes WAL precharge,
+// stats counter mutation, runtime fencing and all alias/direction writes.
+func checkExperimentalByteCapLocked(email string, delta int64) error {
+    if !experimentalByteCaps.strict {
+        return nil
+    }
+    if delta <= 0 || gate.runtimeID == "" {
+        return errors.New("experimental quota: invalid runtime or charge")
+    }
+    identity := canonicalMeterUser(email)
+    cap := experimentalByteCaps.users[identity]
+    if cap == nil {
+        return errors.New("experimental quota: user has no installed local grant")
+    }
+    cdn, allowedAlias := cap.aliases[email]
+    if !allowedAlias || cap.runtimeID != gate.runtimeID {
+        return errors.New("experimental quota: unassigned alias or changed Xray process")
+    }
+    amount := uint64(delta)
+    if amount > math.MaxInt64 || cap.chargedAll > math.MaxInt64 ||
+        cap.grantCeiling > math.MaxInt64 || cap.nodeCeiling > math.MaxInt64 ||
+        cap.cdnCeiling > math.MaxInt64 {
+        return errors.New("experimental quota: invalid signed-byte range")
+    }
+    // Subtraction form prevents uint64 overflow and refuses exact-ceiling
+    // overspend before WAL append and before network delivery.
+    if cap.chargedAll > cap.grantCeiling ||
+        amount > cap.grantCeiling-cap.chargedAll ||
+        cap.chargedAll > cap.nodeCeiling ||
+        amount > cap.nodeCeiling-cap.chargedAll {
+        return errors.New("experimental quota: shared or Node ceiling exhausted")
+    }
+    if cdn && (cap.chargedCDN > cap.cdnCeiling ||
+        amount > cap.cdnCeiling-cap.chargedCDN) {
+        return errors.New("experimental quota: CDN ceiling exhausted")
+    }
+    if cap.chargedAll > math.MaxInt64-amount ||
+        (cdn && cap.chargedCDN > math.MaxInt64-amount) {
+        return errors.New("experimental quota: cumulative byte overflow")
+    }
+    return nil
+}
+
+// Called only AFTER the exact per-alias WAL intent and first-birth inventory
+// have fsynced successfully, but BEFORE the raw StatsService mutation and
+// network delivery. A crash between precharge and delivery may conservatively
+// charge bytes that were never delivered; never return these as unused bytes.
+func commitExperimentalByteCapLocked(email string, delta int64) {
+    if !experimentalByteCaps.strict { return }
+    cap := experimentalByteCaps.users[canonicalMeterUser(email)]
+    if cap == nil || delta <= 0 || cap.runtimeID != gate.runtimeID {
+        panic("experimental quota: cap disappeared after durable byte intent")
+    }
+    cdn, exists := cap.aliases[email]
+    if !exists {
+        panic("experimental quota: alias changed after durable byte intent")
+    }
+    cap.chargedAll += uint64(delta)
+    if cdn { cap.chargedCDN += uint64(delta) }
+}
+
+// Forensic-only helper: never export these counters as terminal metering or
+// use their difference from the reservation for a refund.
+func diagnosticByteCapLocked(email string) (uint64,uint64,error) {
+    cap := experimentalByteCaps.users[canonicalMeterUser(email)]
+    if !experimentalByteCaps.strict || cap == nil {
+        return 0,0,fmt.Errorf("experimental quota: no scoped cap")
+    }
+    return cap.chargedAll,cap.chargedCDN,nil
+}
