@@ -35,11 +35,13 @@ jobs:
       - run: python3 tests/test_user_meter.py
       - run: python3 tests/test_quota_v2_revocation_marker.py
       - run: python3 tests/test_quota_v2_quarantine_response.py
-      - run: python3 -m py_compile experiments/quota-v2-physical-stop/quarantine_policy.py experiments/quota-v2-physical-stop/first_cap_handoff.py experiments/quota-v2-physical-stop/cap_install.py tests/test_quota_v2_quarantine_handoff.py tests/test_quota_v2_first_cap_handoff.py
+      - run: python3 -m py_compile experiments/quota-v2-physical-stop/quarantine_policy.py experiments/quota-v2-physical-stop/first_cap_handoff.py experiments/quota-v2-physical-stop/genesis_reservation.py experiments/quota-v2-physical-stop/cap_install.py tests/test_quota_v2_quarantine_handoff.py tests/test_quota_v2_first_cap_handoff.py tests/test_quota_v2_genesis_reservation.py
       - name: Real Ed25519 and measured two-phase strict-XSP2 quarantine handoff
         run: sudo python3 tests/test_quota_v2_quarantine_handoff.py -v
       - name: Real Ed25519 and signed staged-policy-to-Xray cap ownership negatives
         run: sudo python3 tests/test_quota_v2_first_cap_handoff.py -v
+      - name: Strict-PQ zero-spend Genesis lease prepare/echo Ed25519 and root-state tests
+        run: sudo python3 tests/test_quota_v2_genesis_reservation.py -v
       - run: python3 tests/test_quota_v2_reservation.py
       - run: python3 tests/test_quota_v2_verify_nexus_wal_anchor.py
       - run: python3 tests/test_quota_v2_measured_genesis.py
