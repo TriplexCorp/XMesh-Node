@@ -1025,7 +1025,7 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 	if err := verifyActive(cfg.PanelURL, cfg.NodeID); err != nil {
 		return err
 	}
-	
+
 	if !allowedProductTunnelPath(path) {
 		return errors.New("operation is not registered for strict-PQ tunnel")
 	}
