@@ -25,6 +25,7 @@ import wal_transport
 
 PRODUCT = "/usr/local/bin/xmesh-agent-xspv2-product"
 PATH = "/api/v1/node/desired-config"
+PIN_PATH = "/api/v1/node/quota-v2/policy-pin"
 MAX_REPLY = 262144
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -177,17 +178,19 @@ def _durable_store(state_fd, data):
         except FileNotFoundError:pass
 
 
-def _post_quarantined_desired(request, state):
+def _post_quarantined_desired(request, state, path=PATH):
     """The installed product client owns strict-PQ transport and enrollment.
 
     No curl, raw HTTP, Ed25519 legacy fallback, insecure TLS or alternate host
     is reachable from this operation.
     """
+    if path not in (PATH,PIN_PATH):
+        raise ValueError("unregistered XSP/2 product operation")
     with tempfile.TemporaryDirectory(prefix="xmesh-quarantine-",dir=state) as root:
         root=Path(root)
         body,reply,status=(root/n for n in ("request.json","response.json","status.txt"))
         body.write_bytes(wal_transport.observed.canonical(request))
-        subprocess.run([PRODUCT,"request","--path",PATH,
+        subprocess.run([PRODUCT,"request","--path",path,
             "--body-file",str(body),"--output-file",str(reply),
             "--status-file",str(status)],timeout=30,check=True)
         if status.read_text(encoding="ascii").strip()!="200":
@@ -196,13 +199,85 @@ def _post_quarantined_desired(request, state):
             return stream.read(MAX_REPLY+1)
 
 
+def _enrolled_activation(panel,node):
+    # This installed product client checks strict TLS, original signed
+    # enrollment, pin/key epoch and exact Node ID; no raw network fetch.
+    raw=subprocess.check_output([
+        PRODUCT,"wal-evidence","--panel",panel,"--node-id",str(node),
+    ],timeout=20)
+    if len(raw)>4096:
+        raise ValueError("oversized strict product activation evidence")
+    identity=wal_transport.observed.strict_json(raw)
+    if (not isinstance(identity,dict)
+        or type(identity.get("nodeId")) is not int or identity["nodeId"]!=node
+        or not _hex(identity.get("activationReceiptSha256"))):
+        raise ValueError("no independently authenticated strict product activation")
+    return identity
+
+
+def _pinned_policy_before_genesis(panel,node,state,state_fd):
+    """Bootstrap the policy signer BEFORE ordinary desired-config can run.
+
+    The bootstrap is trusted ONLY because the root-installed owner-enrolled
+    product verifies the hybrid TLS/XSP2 response. Never TOFU via plain
+    HTTPS, an unauthenticated JSON header, a fresh policyPublicKey in a
+    normal desired-config reply, or a caller-supplied key.
+    """
+    pin=Path(wal_transport.POLICY_KEY)
+    if not pin.is_absolute() or pin.parent.resolve()!=Path(state).resolve():
+        raise ValueError("policy signing key must be bound to the existing root-only state")
+    try:
+        return wal_transport._panel_pin()
+    except FileNotFoundError:
+        pass
+    original=_enrolled_activation(panel,node)
+    raw=_post_quarantined_desired({
+        "node_id":node,"operation":"discover_policy_signer",
+    },state,PIN_PATH)
+    if not isinstance(raw,bytes) or not 0<len(raw)<=4096:
+        raise ValueError("oversized strict-PQ policy signer identity")
+    result=wal_transport.observed.strict_json(raw)
+    if (not isinstance(result,dict)
+        or set(result)!={"status","nodeId","activationReceiptSha256",
+                          "policyPublicKey","authorizedBytes","canStart",
+                          "canResume","refundableBytes"}
+        or result["status"]!="quarantine_pin_only"
+        or type(result["nodeId"]) is not int or result["nodeId"]!=node
+        or result["activationReceiptSha256"]!=original["activationReceiptSha256"]
+        or not _hex(result["policyPublicKey"])
+        or type(result["authorizedBytes"]) is not int or result["authorizedBytes"]!=0
+        or result["canStart"] is not False or result["canResume"] is not False
+        or type(result["refundableBytes"]) is not int or result["refundableBytes"]!=0):
+        raise ValueError("Nexus key discovery is not an authenticated zero-authority reply")
+    if _enrolled_activation(panel,node)!=original:
+        raise ValueError("enrolled product identity changed during signer bootstrap")
+    key=result["policyPublicKey"]
+    # Only create the ABSENT original pin, never rewrite one. If another
+    # root process already pinned it concurrently, it must be identical.
+    try:
+        fd=os.open(pin.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|
+            os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=state_fd)
+    except FileExistsError:
+        if wal_transport._panel_pin()!=key:
+            raise ValueError("conflicting original Nexus signing identity")
+        return key
+    with os.fdopen(fd,"wb") as stream:
+        stream.write((key+"\\n").encode("ascii"))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.fsync(state_fd)
+    if wal_transport._panel_pin()!=key:
+        raise ValueError("durable Nexus signing key pin verification failed")
+    return key
+
+
 def request_quarantine(panel,node_id,state):
     """Separate opt-in root-Agent operation. Never launches or activates Xray."""
     if not isinstance(panel,str) or not panel.startswith("https://") or node_id<=0:
         raise ValueError("invalid strict product Node origin")
     state_fd,lock=_locked_private_state(state)
     try:
-        pinned=wal_transport._panel_pin()  # owner-only, no TOFU fallback
+        pinned=_pinned_policy_before_genesis(panel,node_id,state,state_fd)
         challenge=secrets.token_hex(32)
         # The EXACT Linux PID/Docker isolation is measured both before and
         # after the real XSP/2 Genesis preparation.
