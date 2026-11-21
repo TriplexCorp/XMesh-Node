@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "xray-dataplane-fen
 
 import journal_integrity as journal
 import meter_inventory_audit as registry
+import runtime_identity
 import sign_observation as observed
 import verify_nexus_wal_anchor as verifier
 import witness_inventory as producer
@@ -179,6 +180,101 @@ def prepare_genesis(panel, node_id, candidate, challenge):
         return envelope
 
 
+def _measure_quarantined_runtime():
+    """Measure an actual kernel PID in an isolated Docker candidate; NO authority.
+
+    A caller-provided candidate digest is never proof of an Xray process.
+    This observation is only for zero-authority preparation. It does not
+    prove final WAL bytes or grant a lease.
+    """
+    inspect, _ = _bound_journal()
+    host = inspect.get("HostConfig")
+    state = inspect.get("State")
+    network = inspect.get("NetworkSettings")
+    if (inspect.get("Name") != "/xmesh-managed-xray" or
+            not isinstance(host, dict) or not isinstance(state, dict) or
+            not isinstance(network, dict) or state.get("Running") is not True or
+            host.get("NetworkMode") != "none" or
+            not isinstance(host.get("RestartPolicy"), dict) or
+            host["RestartPolicy"].get("Name") != "no" or
+            host.get("PortBindings") not in (None, {}) or
+            not isinstance(network.get("Networks"), dict) or
+            set(network["Networks"]) - {"none"} or
+            not isinstance(network.get("Ports"), dict) or
+            any(v is not None for v in network["Ports"].values())):
+        raise ValueError("measured Xray genesis requires a network-isolated nonrestarting candidate")
+    mounts = inspect.get("Mounts")
+    # Xray's upstream image declares two ANONYMOUS Docker volumes. Accept
+    # only those exact destinations as local-driver generated volumes, never
+    # a bind mount or an arbitrary named host path (e.g. Docker socket).
+    mounts_by_dest = {
+        m.get("Destination"): m for m in mounts
+    } if isinstance(mounts, list) and all(isinstance(m, dict) for m in mounts) else {}
+    required_mounts = {journal.JOURNAL_DEST, "/etc/xray/config.json"}
+    image_volumes = {"/usr/local/etc/xray", "/var/log/xray"}
+    mounts_safe = (
+        isinstance(mounts, list) and 2 <= len(mounts) <= 4 and
+        len(mounts_by_dest) == len(mounts) and
+        required_mounts <= mounts_by_dest.keys() and
+        set(mounts_by_dest) <= required_mounts | image_volumes and
+        all(mounts_by_dest[dest].get("Type") == "bind"
+            for dest in required_mounts) and
+        all(mounts_by_dest[dest].get("Type") == "volume" and
+            mounts_by_dest[dest].get("Driver") == "local" and
+            _hex(mounts_by_dest[dest].get("Name"), 64)
+            for dest in mounts_by_dest.keys() & image_volumes)
+    )
+    privileged = host.get("Privileged")
+    cap_add = host.get("CapAdd")
+    cap_drop = host.get("CapDrop")
+    pid_mode = host.get("PidMode")
+    ipc_mode = host.get("IpcMode")
+    devices = host.get("Devices")
+    security = host.get("SecurityOpt")
+    if (privileged is not False or
+            cap_add not in (None, []) or
+            not isinstance(cap_drop, list) or
+            "ALL" not in cap_drop or
+            pid_mode not in ("", "private") or
+            ipc_mode not in ("", "private") or
+            devices not in (None, []) or
+            host.get("ReadonlyRootfs") is not True or
+            not isinstance(security, list) or
+            not any(option in ("no-new-privileges", "no-new-privileges:true")
+                    for option in security if isinstance(option, str)) or
+            not mounts_safe):
+        # A privileged Docker container, host PID/IPC namespace, added Linux
+        # capabilities or Docker socket mount could escape "network none".
+        raise ValueError("measured Xray genesis requires a hardened isolated container")
+    pid = state.get("Pid")
+    started = state.get("StartedAt")
+    cid = inspect.get("Id")
+    if (type(pid) is not int or pid <= 0 or
+            not _hex(cid, 64) or
+            not isinstance(started, str) or "T" not in started or
+            runtime_identity.inspect_managed_xray() != (cid, started, pid)):
+        raise ValueError("managed genesis process identity is not independently confirmed")
+    return (cid, started, pid, runtime_identity.trusted_runtime_identity(pid))
+
+
+def prepare_measured_genesis(panel, node_id, challenge):
+    """Bind a zero-authority Nexus receipt to an independently measured PID.
+
+    Never connect the container network or admit user traffic here.
+    A future positive admission requires separate reservation-bound evidence.
+    """
+    if os.geteuid() != 0 or type(node_id) is not int or node_id <= 0:
+        raise ValueError("measured Xray genesis requires the installed root agent")
+    if not _hex(challenge, 64):
+        raise ValueError("measured Xray genesis requires a fresh 256-bit challenge")
+    before = _measure_quarantined_runtime()
+    receipt = prepare_genesis(panel, node_id, before[3], challenge)
+    after = _measure_quarantined_runtime()
+    if after != before:
+        raise ValueError("Xray runtime or isolated Docker network changed during genesis")
+    return receipt
+
+
 def run(action, panel, node_id):
     if os.geteuid() != 0:
         raise ValueError("WAL evidence requires the installed root-owned agent")
@@ -251,7 +347,7 @@ def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("head", "store", "sync", "prepare-genesis"))
+    parser.add_argument("operation", choices=("head", "store", "sync", "prepare-genesis", "prepare-measured-genesis"))
     parser.add_argument("--panel", required=True)
     parser.add_argument("--node-id", required=True, type=int)
     parser.add_argument("--candidate-runtime")
@@ -260,6 +356,10 @@ if __name__ == "__main__":
     try:
         if args.operation == "prepare-genesis":
             result = prepare_genesis(args.panel, args.node_id, args.candidate_runtime, args.challenge)
+        elif args.operation == "prepare-measured-genesis":
+            if args.candidate_runtime is not None:
+                parser.error("measured genesis derives the candidate from the kernel, not the caller")
+            result = prepare_measured_genesis(args.panel, args.node_id, args.challenge)
         else:
             if args.candidate_runtime is not None or args.challenge is not None:
                 parser.error("candidate runtime and challenge are only used for genesis preparation")
