@@ -180,7 +180,7 @@ def prepare_genesis(panel, node_id, candidate, challenge):
         return envelope
 
 
-def _measure_quarantined_runtime():
+def _measure_quarantined_runtime(pins=None):
     """Measure an actual kernel PID in an isolated Docker candidate; NO authority.
 
     A caller-provided candidate digest is never proof of an Xray process.
@@ -254,10 +254,18 @@ def _measure_quarantined_runtime():
             not isinstance(started, str) or "T" not in started or
             runtime_identity.inspect_managed_xray() != (cid, started, pid)):
         raise ValueError("managed genesis process identity is not independently confirmed")
-    return (cid, started, pid, runtime_identity.trusted_runtime_identity(pid))
+    identity = runtime_identity.trusted_runtime_identity(pid)
+    if pins is not None:
+        if mounts_by_dest["/etc/xray/config.json"].get("RW") is not False:
+            raise ValueError("pinned Xray configuration requires a read-only bind")
+        runtime_identity.verify_quarantined_files(pid, *pins)
+        if (runtime_identity.trusted_runtime_identity(pid) != identity or
+                runtime_identity.inspect_managed_xray() != (cid, started, pid)):
+            raise ValueError("managed Xray changed during executable or configuration verification")
+    return (cid, started, pid, identity)
 
 
-def prepare_measured_genesis(panel, node_id, challenge):
+def prepare_measured_genesis(panel, node_id, challenge, pins=None):
     """Bind a zero-authority Nexus receipt to an independently measured PID.
 
     Never connect the container network or admit user traffic here.
@@ -267,9 +275,12 @@ def prepare_measured_genesis(panel, node_id, challenge):
         raise ValueError("measured Xray genesis requires the installed root agent")
     if not _hex(challenge, 64):
         raise ValueError("measured Xray genesis requires a fresh 256-bit challenge")
-    before = _measure_quarantined_runtime()
+    if pins is not None and not all(_hex(value, 64) for value in pins):
+        raise ValueError("independent executable and configuration SHA-256 pins are both required")
+    measure = _measure_quarantined_runtime
+    before = measure() if pins is None else measure(pins)
     receipt = prepare_genesis(panel, node_id, before[3], challenge)
-    after = _measure_quarantined_runtime()
+    after = measure() if pins is None else measure(pins)
     if after != before:
         raise ValueError("Xray runtime or isolated Docker network changed during genesis")
     return receipt
@@ -352,14 +363,20 @@ if __name__ == "__main__":
     parser.add_argument("--node-id", required=True, type=int)
     parser.add_argument("--candidate-runtime")
     parser.add_argument("--challenge")
+    parser.add_argument("--executable-sha256")
+    parser.add_argument("--config-sha256")
     args = parser.parse_args()
     try:
+        pins = (args.executable_sha256, args.config_sha256)
+        if any(value is not None for value in pins) and args.operation != "prepare-measured-genesis":
+            parser.error("runtime pins require measured genesis")
         if args.operation == "prepare-genesis":
             result = prepare_genesis(args.panel, args.node_id, args.candidate_runtime, args.challenge)
         elif args.operation == "prepare-measured-genesis":
             if args.candidate_runtime is not None:
                 parser.error("measured genesis derives the candidate from the kernel, not the caller")
-            result = prepare_measured_genesis(args.panel, args.node_id, args.challenge)
+            result = prepare_measured_genesis(args.panel, args.node_id, args.challenge,
+                                              pins if any(value is not None for value in pins) else None)
         else:
             if args.candidate_runtime is not None or args.challenge is not None:
                 parser.error("candidate runtime and challenge are only used for genesis preparation")
