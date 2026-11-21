@@ -41,6 +41,7 @@ def init_db(dsn,nexus):
         "0128_quota_v2_conservative_burn.sql",
         "0137_quota_v2_xray_genesis.sql",
         "0138_quota_v2_runtime_preflight_ledger.sql",
+        "0139_quota_v2_signed_first_cap_outbox.sql",
     ]
     with psycopg.connect(dsn) as conn:
         # Only prerequisites, not a stubbed quota allocator. All actual
@@ -120,6 +121,25 @@ def issue(dsn,node,runtime,policy_sha,xray_pid):
             not isinstance(signed.get("signedEnvelope"),str) or
             not signed["signedEnvelope"].endswith("\n")):
         raise ValueError("real Nexus Rust policy signer returned invalid scope")
+    with psycopg.connect(dsn) as conn:
+        row=conn.execute(
+            "SELECT signed_envelope,signer_public_key,grant_bytes,"
+            "can_start,can_resume,refundable_bytes "
+            "FROM quota_v2_signed_first_cap_outbox "
+            "WHERE node_id=%s AND request_challenge=%s",
+            (node,nonce)).fetchone()
+        if (row is None or row[0]!=signed["signedEnvelope"].encode("utf-8")
+                or row[1]!=signed["publicKeyHex"] or row[2]!=ceiling
+                or row[3:]!=(False,False,0)):
+            raise AssertionError("first positive grant is not durably and "
+                                 "exactly recorded in PostgreSQL")
+    again=subprocess.run(
+        [binary,str(node),nonce,str(xray_pid),policy_sha],
+        capture_output=True,text=True,check=True,timeout=15)
+    retried=json.loads(again.stdout)
+    if retried!=signed:
+        raise AssertionError("lost-response retry changed Ed25519 grant bytes "
+                             "or silently renewed the same reserved capacity")
     print(json.dumps(signed,separators=(",",":")),flush=True)
 
 def assert_complete(dsn,root):
@@ -141,6 +161,10 @@ def assert_complete(dsn,root):
             "SELECT settled_bytes,observed_floor_bytes,limit_bytes "
             "FROM quota_v2_accounts WHERE user_id=%s AND epoch=%s",
             (USER,EPOCH)).fetchone()
+        outbox=conn.execute(
+            "SELECT node_id,grant_bytes,can_start,can_resume,refundable_bytes "
+            "FROM quota_v2_signed_first_cap_outbox "
+            "WHERE user_id=%s ORDER BY node_id",(USER,)).fetchall()
     if len(rows)!=2 or [row[0] for row in rows]!=[47,48]:
         raise AssertionError("lost a Node's independent reservation")
     if sum(row[1] for row in rows)!=1000 or any(row[2] for row in rows):
@@ -151,6 +175,9 @@ def assert_complete(dsn,root):
         raise AssertionError("snapshot incorrectly became traffic authority")
     if account!=(0,0,1000):
         raise AssertionError("in-memory Xray spend was mistaken for server settlement")
+    if len(outbox)!=2 or [x[0:2] for x in outbox]!=[(47,700),(48,300)] or any(
+            x[2:]!=(False,False,0) for x in outbox):
+        raise AssertionError("Nexus signed outbox reissued, refunded or started Xray")
     for report,row in zip(reports,rows):
         if (report.get("nodeId"),report.get("grantBytes"),report.get("walBytes"),
             report.get("rawBytes"))!=(row[0],row[1],row[1],row[1]):
