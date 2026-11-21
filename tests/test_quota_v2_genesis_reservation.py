@@ -161,12 +161,21 @@ class SignedGenesisLeaseTests(unittest.TestCase):
         original = state / "genesis-quarantine-envelope.json"
         original.write_bytes(self.guard.canonical(self.origin))
         original.chmod(0o600)
+        intent = {
+            "nodeId":self.node, "runtimeId":self.f.runtime,
+            "activationReceiptSha256":self.f.activation,
+            "configSha256":self.origin["reply"]["revision"],
+            "challenge":self.f.challenge, "executableSha256":"e"*64,
+        }
+        intent_file = state / qp.INTENT_FILE
+        intent_file.write_bytes(self.guard.canonical(intent))
+        intent_file.chmod(0o600)
         actual = ("f"*64,"2026-11-21T00:00:00Z",4321,self.f.runtime)
         with (
             mock.patch.object(qp.wal_transport,"_panel_pin",return_value=self.f.pub),
             mock.patch.object(qp,"_enrolled_activation",return_value=self.identity),
             mock.patch.object(qp.wal_transport,"_measure_quarantined_runtime",
-                              return_value=actual),
+                              return_value=actual) as measured,
             mock.patch.object(qp,"_post_quarantined_desired",
                               side_effect=[self.prepared,self.signed("confirm")]) as network,
         ):
@@ -177,6 +186,23 @@ class SignedGenesisLeaseTests(unittest.TestCase):
         self.assertEqual(first["authorizedBytes"],0)
         self.assertEqual(second["authorizedBytes"],0)
         self.assertEqual(network.call_count,2)
+        self.assertEqual(measured.call_count,4)
+        for call in measured.call_args_list:
+            self.assertEqual(call.args,(("e"*64,self.origin["reply"]["revision"]),))
+        fd = os.open(state,os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            for key,value in (("runtimeId","a"*64 if self.f.runtime!="a"*64 else "b"*64),
+                              ("configSha256","f"*64),("challenge","b"*64)):
+                changed=dict(intent)
+                changed[key]=value
+                intent_file.write_bytes(self.guard.canonical(changed))
+                with self.assertRaises(ValueError):
+                    lease._original_measurement_pins(fd,self.origin,self.node,self.f.activation)
+            intent_file.unlink()
+            with self.assertRaises(FileNotFoundError):
+                lease._original_measurement_pins(fd,self.origin,self.node,self.f.activation)
+        finally:
+            os.close(fd)
         self.assertEqual(network.call_args_list[0].args[1],str(state))
         self.assertEqual(network.call_args_list[0].args[2],qp.LEASE_PATH)
         confirmed_body = network.call_args_list[1].args[0]
