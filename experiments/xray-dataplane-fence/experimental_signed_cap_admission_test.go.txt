@@ -308,3 +308,33 @@ func TestV2SignedCapConcurrentReplayExactlyOnceNoDebtReset(t *testing.T){
     contents,err:=os.ReadFile(filepath.Join(dir,"positive-cap-u101.json"))
     if err!=nil||!bytes.Equal(contents,raw){t.Fatal("lost exact signed grant on retry")}
 }
+
+func TestV2SignedFirstGenesisActualRegisterEnforcesCapBeforeUserSession(t *testing.T) {
+    _,manager,p,expected,pub,priv:=signedCapTestFixture(t)
+    incoming:=ctx(50001)
+    if err:=Register(incoming,capMain,func(){});err==nil {
+        t.Fatal("user session created before trusted Ed25519 grant")
+    }
+    if err:=installSignedFirstGenesisCap(
+        signedCapTestEnvelope(t,p,priv),pub,expected);err!=nil {
+        t.Fatalf("signed grant rejected: %v",err)
+    }
+    if err:=Register(incoming,capMain,func(){});err!=nil {
+        t.Fatalf("confirmed scoped user failed actual Register admission: %v",err)
+    }
+    Finish(incoming)
+    RouteFinish(incoming)
+    if err:=Register(ctx(50002),"xmesh-u101--unlisted",func(){});err==nil {
+        t.Fatal("unknown user inbound opened outside signed alias set")
+    }
+    c:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,c,capMain,"uplink",70) {
+        t.Fatal("failed to spend the exact signed Node allowance")
+    }
+    if err:=Register(ctx(50003),capMain,func(){});err==nil {
+        t.Fatal("exhausted Node quota still admitted a new VLESS stream")
+    }
+    if err:=Register(ctx(50004),capCDN,func(){});err==nil {
+        t.Fatal("switching to CDN reopens exhausted shared Node allowance")
+    }
+}
