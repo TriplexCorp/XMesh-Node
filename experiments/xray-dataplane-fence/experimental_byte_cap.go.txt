@@ -7,6 +7,7 @@ package xmeshdrain
 import (
     "errors"
     "fmt"
+    "path/filepath"
 )
 
 // Every field and counter is protected by gate.Mutex. Shared user counters
@@ -101,4 +102,115 @@ func diagnosticByteCapLocked(email string) (uint64,uint64,error) {
         return 0,0,fmt.Errorf("experimental quota: no scoped cap")
     }
     return cap.chargedAll,cap.chargedCDN,nil
+}
+
+// restoreExperimentalCapFromWitness is a CI-ONLY recovery primitive for a
+// control worker which restarted while the SAME instrumented Xray PID stayed
+// alive. The caller supplies an externally pinned inventory-head digest and
+// the current live StatsService counters. The digest MUST have been separately
+// authenticated as a Nexus-side witness; this function does NOT authenticate
+// it, accept a signature, or grant data-plane access in production.
+//
+// Never use a plain directory scan to infer missing WALs as zero usage.
+// A changed Xray runtime, unlisted alias, missing WAL birth inventory, torn
+// file, or local raw meter mismatch leaves the old reserve inaccessible.
+// Caller holds gate.Mutex from validation through installation, so no
+// concurrent counted write can race against the restored starting balance.
+func restoreExperimentalCapFromWitness(
+    billingUser, runtimeID, expectedInventoryHead string,
+    aliases map[string]bool, grant, node, cdn uint64,
+    current func(string,string)(uint64,error),
+) error {
+    gate.Lock()
+    defer gate.Unlock()
+    if !enabled || !experimentalByteCaps.strict || gate.journalDir=="" ||
+        gate.runtimeID=="" || runtimeID!=gate.runtimeID ||
+        current==nil || len(aliases)==0 || len(aliases)>16 {
+        return errors.New("experimental quota recovery: untrusted runtime or missing required evidence")
+    }
+    if len(expectedInventoryHead)!=64 || grant>maxSignedByteCeiling ||
+        node>maxSignedByteCeiling || cdn>maxSignedByteCeiling {
+        return errors.New("experimental quota recovery: invalid witness or caps")
+    }
+    for _,c:=range expectedInventoryHead {
+        if !(c>='0'&&c<='9'||c>='a'&&c<='f') {
+            return errors.New("experimental quota recovery: invalid witness digest")
+        }
+    }
+    if experimentalByteCaps.users!=nil &&
+        experimentalByteCaps.users[billingUser]!=nil {
+        return errors.New("experimental quota recovery: existing cap cannot be reissued")
+    }
+    for alias:=range aliases {
+        if alias=="" || canonicalMeterUser(alias)!=billingUser ||
+            !signedUserEmail.MatchString(alias) {
+            return errors.New("experimental quota recovery: alias not assigned to billing identity")
+        }
+    }
+    // Authenticate the index HEAD independently before treating its entries
+    // as complete. The local inventory is not independently durable against
+    // deletion; the caller MUST bind this exact head to an off-host witness.
+    inventory,err:=readInventory(gate.journalDir)
+    if err!=nil{return fmt.Errorf("experimental quota recovery: inventory: %w",err)}
+    if !inventory.exists || inventory.tail.Digest!=expectedInventoryHead {
+        return errors.New("experimental quota recovery: missing or stale external WAL witness")
+    }
+    // Check every WAL birth record, including for other users, so corruption
+    // of an unrelated historic journal cannot be overlooked on startup.
+    if err:=verifyMeterJournalDirectory(gate.journalDir);err!=nil {
+        return fmt.Errorf("experimental quota recovery: incomplete WAL history: %w",err)
+    }
+    var all,cdnBytes uint64
+    for filename,birth:=range inventory.steps {
+        if canonicalMeterUser(birth.Email)!=billingUser {continue}
+        isCDN,known:=aliases[birth.Email]
+        if !known || birth.RuntimeID!=runtimeID {
+            return errors.New("experimental quota recovery: foreign or previous-runtime user WAL")
+        }
+        tail,err:=readMeterTail(filepath.Join(gate.journalDir,filename))
+        if err!=nil{return fmt.Errorf("experimental quota recovery: unreadable WAL: %w",err)}
+        amount:=tail.last.NextBytes
+        if amount>maxSignedByteCeiling-all {
+            return errors.New("experimental quota recovery: shared WAL overflow")
+        }
+        all+=amount
+        if isCDN {
+            if amount>maxSignedByteCeiling-cdnBytes {
+                return errors.New("experimental quota recovery: CDN WAL overflow")
+            }
+            cdnBytes+=amount
+        }
+    }
+    // A live Xray process with a missing, extra, or regressed StatsService
+    // counter is not a safe continuation of the WAL. The raw counter and
+    // durable intent must match exactly in both directions for every alias.
+    for alias:=range aliases {
+        for _,direction:=range []string{"uplink","downlink"} {
+            raw,err:=current(alias,direction)
+            if err!=nil{return fmt.Errorf("experimental quota recovery: missing live counter: %w",err)}
+            name:=meterLedgerPath(gate.journalDir,runtimeID,alias,direction)
+            birth:=inventory.steps[filepath.Base(name)]
+            if birth.Filename=="" {
+                if raw!=0 {return errors.New("experimental quota recovery: missing WAL for live counter")}
+                continue
+            }
+            tail,err:=readMeterTail(name)
+            if err!=nil || raw!=tail.last.NextBytes {
+                return errors.New("experimental quota recovery: live Xray counter differs from WAL")
+            }
+        }
+    }
+    if all>grant || all>node || cdnBytes>cdn {
+        return errors.New("experimental quota recovery: previously fsynced bytes exceed signed ceilings")
+    }
+    cloned:=make(map[string]bool,len(aliases))
+    for name,isCDN:=range aliases { cloned[name]=isCDN }
+    if experimentalByteCaps.users==nil {
+        experimentalByteCaps.users=map[string]*experimentalByteCap{}
+    }
+    experimentalByteCaps.users[billingUser]=&experimentalByteCap{
+        runtimeID:runtimeID,grantCeiling:grant,nodeCeiling:node,
+        cdnCeiling:cdn,chargedAll:all,chargedCDN:cdnBytes,aliases:cloned,
+    }
+    return nil
 }
