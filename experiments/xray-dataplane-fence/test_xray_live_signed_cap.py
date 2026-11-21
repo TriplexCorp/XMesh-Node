@@ -51,7 +51,7 @@ def configs(root, destination, user):
     client_id = str(uuid.uuid4())
     server = {
         "log": {"loglevel": "warning"},
-        "api": {"listen": f"127.0.0.1:{api_port}", "services": ["StatsService"]},
+        "api": {"tag": "xmesh_stats_api", "listen": f"127.0.0.1:{api_port}", "services": ["StatsService"]},
         "stats": {},
         "policy": {"levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}}},
         "inbounds": [
