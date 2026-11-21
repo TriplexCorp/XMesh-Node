@@ -82,3 +82,25 @@ this operation could ever authorize traffic. It cannot restart Xray,
 reconstruct deleted WAL contents from their birth index, or erase
 unresolved old-runtime debt. There is still **no positive production
 admission** and no V2 rollout authorization.
+
+## Raw StatsService mutation bypass in the bounded experiment
+
+The precharge check is the only trusted positive counted-write path. A direct
+`Counter.Add`/`Counter.Set`, a wrong inbound or a post-fence mutation is
+not evidence of a delivered byte and must never be allowed to mutate the
+billable StatsService counter when strict byte limits are active. Previously
+the observed-only drain test path marked the meter tainted but still called
+the mutation callback, which would bypass the new cap check.
+
+When the CI-only experimental cap is armed, the same gate mutex now persists
+a durable taint and **panics before raw mutation** on every untrusted,
+unattributed or revoked billable user counter. A previously tainted meter
+cannot resume positive writes even through the trusted path. The old
+observed-only behavior is retained when the CI-only cap is not armed so
+existing continuity tests still measure historical taint semantics.
+
+The new regression verifies direct `Add`, direct `Set`, a different
+inbound during a valid in-flight write, unchanged raw counters, zero cap
+debit, fsynced forensic taint and refusal to recover positive spending
+from the tainted runtime. This remains a disposable Xray test, not
+production activation.
