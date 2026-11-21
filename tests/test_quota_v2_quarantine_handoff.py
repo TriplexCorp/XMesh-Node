@@ -154,6 +154,73 @@ class QuarantinePolicyTests(unittest.TestCase):
             qp.validate_response(b"x"*(qp.MAX_REPLY+1),self.node,
                                  self.prepared,self.pub,self.now)
 
+    def test_newly_enrolled_node_pins_policy_signer_by_owner_enrolled_xsp2(self):
+        pin=self.root/"policy-public-key"
+        identity={"nodeId":self.node,"activationReceiptSha256":self.activation}
+        response={
+            "status":"quarantine_pin_only","nodeId":self.node,
+            "activationReceiptSha256":self.activation,"policyPublicKey":self.pub,
+            "authorizedBytes":0,"canStart":False,"canResume":False,
+            "refundableBytes":0,
+        }
+        def read_pin():
+            if not pin.exists():
+                raise FileNotFoundError("first policy pin not present")
+            raw=pin.read_bytes()
+            if len(raw)!=65 or not raw.endswith(b"\n"):
+                raise ValueError("invalid first policy pin")
+            return raw[:-1].decode("ascii")
+        fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            with mock.patch.object(qp.wal_transport,"POLICY_KEY",str(pin)),\\
+                 mock.patch.object(qp.wal_transport,"_panel_pin",
+                                   side_effect=read_pin),\\
+                 mock.patch.object(qp,"_enrolled_activation",
+                                   return_value=identity) as enrolled,\\
+                 mock.patch.object(qp,"_post_quarantined_desired",
+                                   return_value=self.guard.canonical(response)) as remote:
+                self.assertEqual(qp._pinned_policy_before_genesis(
+                    "https://panel.example",self.node,str(self.root),fd),self.pub)
+                self.assertEqual(qp._pinned_policy_before_genesis(
+                    "https://panel.example",self.node,str(self.root),fd),self.pub)
+                self.assertEqual(remote.call_count,1)
+                self.assertEqual(enrolled.call_count,2)
+            self.assertEqual(pin.read_bytes(),(self.pub+"\n").encode())
+            self.assertEqual(pin.stat().st_mode&0o777,0o600)
+        finally:
+            os.close(fd)
+
+    def test_signed_product_pin_mismatch_or_authority_flag_keeps_disk_clean(self):
+        pin=self.root/"policy-public-key"
+        identity={"nodeId":self.node,"activationReceiptSha256":self.activation}
+        response={
+            "status":"quarantine_pin_only","nodeId":self.node,
+            "activationReceiptSha256":self.activation,"policyPublicKey":self.pub,
+            "authorizedBytes":0,"canStart":False,"canResume":False,
+            "refundableBytes":0,
+        }
+        fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            for altered in (
+                {**response,"authorizedBytes":1},
+                {**response,"nodeId":self.node+1},
+                {**response,"activationReceiptSha256":"f"*64},
+            ):
+                with self.subTest(altered=altered),\\
+                     mock.patch.object(qp.wal_transport,"POLICY_KEY",str(pin)),\\
+                     mock.patch.object(qp.wal_transport,"_panel_pin",
+                            side_effect=FileNotFoundError),\\
+                     mock.patch.object(qp,"_enrolled_activation",
+                            return_value=identity),\\
+                     mock.patch.object(qp,"_post_quarantined_desired",
+                            return_value=self.guard.canonical(altered)):
+                    with self.assertRaises(ValueError):
+                        qp._pinned_policy_before_genesis(
+                            "https://panel.example",self.node,str(self.root),fd)
+                    self.assertFalse(pin.exists())
+        finally:
+            os.close(fd)
+
     def test_private_durable_evidence_idempotency_and_tamper_denial(self):
         fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
         try:
@@ -173,7 +240,7 @@ class QuarantinePolicyTests(unittest.TestCase):
         def state_handles(_):
             return os.open(self.root,os.O_RDONLY|os.O_DIRECTORY),os.open(os.devnull,os.O_RDONLY)
         with mock.patch.object(qp,"_locked_private_state",side_effect=state_handles),\
-             mock.patch.object(qp.wal_transport,"_panel_pin",return_value=self.pub),\
+             mock.patch.object(qp,"_pinned_policy_before_genesis",return_value=self.pub),\
              mock.patch.object(qp.wal_transport,"_measure_quarantined_runtime",
                                side_effect=[before,before]) as measured,\
              mock.patch.object(qp.wal_transport,"prepare_measured_genesis",
@@ -199,7 +266,7 @@ class QuarantinePolicyTests(unittest.TestCase):
         def state_handles(_):
             return os.open(self.root,os.O_RDONLY|os.O_DIRECTORY),os.open(os.devnull,os.O_RDONLY)
         with mock.patch.object(qp,"_locked_private_state",side_effect=state_handles),\
-             mock.patch.object(qp.wal_transport,"_panel_pin",return_value=self.pub),\
+             mock.patch.object(qp,"_pinned_policy_before_genesis",return_value=self.pub),\
              mock.patch.object(qp.wal_transport,"_measure_quarantined_runtime",
                                side_effect=[initial,replaced]),\
              mock.patch.object(qp.wal_transport,"prepare_measured_genesis",
