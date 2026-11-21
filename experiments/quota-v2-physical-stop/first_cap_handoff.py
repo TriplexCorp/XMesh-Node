@@ -11,8 +11,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import tempfile
 import time
+
+import cap_install
 
 import quarantine_policy as quarantine
 import wal_transport
@@ -185,3 +188,59 @@ def verify_grant(grant_raw, evidence, pinned, runtime, now_ms=None):
         "reservationId": p["reservationId"], "revision": p["reservationRevision"],
         "nonce": p["nonce"], "aliases": aliases,
     }
+
+
+def install_staged_cap(panel, node_id, state, socket_path, grant_raw):
+    """Install into the SAME measured, network-isolated Xray; never start it.
+
+    This is only a reusable experiment entry point for a future authenticated
+    XSP/2 issuer. A caller cannot supply identity, policy, scope, or a process
+    PID: all are re-derived from the original signed staging evidence and the
+    kernel. This function itself does not fetch positive authority from Nexus.
+    """
+    if (not isinstance(panel, str) or not panel.startswith("https://")
+            or not _int(node_id, 1) or os.geteuid() != 0):
+        raise ValueError("positive cap needs root and a strict enrolled Node")
+    state_fd, lock = quarantine._locked_private_state(state)
+    try:
+        fd = os.open("genesis-quarantine-envelope.json",
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=state_fd)
+        try:
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or
+                    st.st_nlink != 1 or st.st_mode & 0o077 or
+                    st.st_size <= 0 or st.st_size > quarantine.MAX_REPLY + 4096):
+                raise ValueError("unsafe first-Genesis evidence file")
+            raw = os.read(fd, quarantine.MAX_REPLY + 4097)
+            if len(raw) != st.st_size:
+                raise ValueError("first-Genesis evidence changed while read")
+        finally:
+            os.close(fd)
+        evidence = wal_transport.observed.strict_json(raw)
+        if not isinstance(evidence, dict) or set(evidence) != {"prepared", "reply"}:
+            raise ValueError("invalid original quarantine evidence")
+        before = wal_transport._measure_quarantined_runtime()
+        if evidence["reply"].get("nodeId") != node_id:
+            raise ValueError("foreign stored quarantine Node identity")
+        pinned = wal_transport._panel_pin()
+        original = quarantine._enrolled_activation(panel, node_id)
+        activation = evidence["prepared"].get("payload", {}).get(
+            "activationReceiptSha256")
+        if original.get("activationReceiptSha256") != activation:
+            raise ValueError("original strict-XSP2 product activation changed")
+        scope = verify_grant(grant_raw, evidence, pinned, before[3])
+        if (before != wal_transport._measure_quarantined_runtime()
+                or original != quarantine._enrolled_activation(panel, node_id)):
+            raise ValueError("Xray runtime or enrolled Node changed before install")
+        # Socket peer PID, uid, runtime, signed cap, live StatsService, WAL,
+        # policy/revision and alias registry are independently checked by Xray.
+        genesis = wal_transport.observed.canonical(evidence["prepared"])
+        receipt = cap_install.install_in_xray(
+            socket_path, before[2], before[3], genesis, grant_raw, scope)
+        if before != wal_transport._measure_quarantined_runtime():
+            raise ValueError("Xray process changed while installing cap")
+        return receipt
+    finally:
+        os.close(lock)
+        os.close(state_fd)
