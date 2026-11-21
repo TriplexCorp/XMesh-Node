@@ -68,7 +68,7 @@ def issue(dsn,node,runtime,policy_sha,xray_pid):
     with psycopg.connect(dsn) as conn:
         conn.execute("SET LOCAL synchronous_commit TO on")
         # Same account row lock, same PostgreSQL reserve function as actual
-        # Nexus policy issuance. With Node 47 first, Node 48 can only hold 30.
+        # Nexus policy issuance. With Node 47 first, Node 48 can only hold 300.
         lease=conn.execute(
             "SELECT revision,ceiling_bytes,acknowledged_bytes "
             "FROM quota_v2_reserve(%s,%s,%s,%s,%s,%s,0,"
@@ -118,7 +118,7 @@ def issue(dsn,node,runtime,policy_sha,xray_pid):
             not isinstance(signed.get("publicKeyHex"),str) or
             len(signed["publicKeyHex"])!=64 or
             not isinstance(signed.get("signedEnvelope"),str) or
-            not signed["signedEnvelope"].endswith("\\n")):
+            not signed["signedEnvelope"].endswith("\n")):
         raise ValueError("real Nexus Rust policy signer returned invalid scope")
     print(json.dumps(signed,separators=(",",":")),flush=True)
 
