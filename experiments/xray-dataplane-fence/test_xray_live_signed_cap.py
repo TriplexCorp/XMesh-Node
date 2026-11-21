@@ -24,6 +24,7 @@ from test_quota_v2_xray_user_inbound_drain import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "quota-v2-physical-stop"))
 from cap_install import install_in_xray
+from first_cap_handoff import verify_grant
 from runtime_identity import trusted_runtime_identity
 
 MIB = 1024 * 1024
@@ -142,7 +143,40 @@ def run(xray, root, target, processes, *, restart):
         "preparedAtMs": now, "validUntilMs": now + 120_000,
         "authorizedBytes": 0, "canStart": False, "canResume": False,
     })
-    policy = hashlib.sha256((root / "server.json").read_bytes()).hexdigest()
+    # Build a real, independently Ed25519-signed quarantine policy for the
+    # EXACT Xray config/client which is serving the loopback VLESS streams.
+    # This is still a disposable fixture signer, NOT an enrolled Nexus issuer.
+    profile = json.loads((root / "server.json").read_bytes())
+    profile_sha = hashlib.sha256(canonical(profile)).hexdigest()
+    genesis_doc = json.loads(genesis)
+    g = genesis_doc["payload"]
+    first_policy = {
+        "version": 1, "kind": "xmesh.quota-v2.genesis-quarantine-policy",
+        "nodeId": node, "configSha256": profile_sha,
+        "issuedAtMs": now, "validUntilMs": now + 120_000,
+        "users": [{
+            "userId": user, "xrayId": profile["inbounds"][0]["settings"]["clients"][0]["id"],
+            "offlineBudgetBytes": 0, "onHold": True,
+        }],
+        "quotaV2Genesis": {
+            "mode": "quarantined", "runtimeId": runtime,
+            "challenge": g["challenge"],
+            "firstActivationReceiptSha256": activation,
+            "authorizedBytes": 0, "canStart": False, "canResume": False,
+            "refundableBytes": 0,
+        },
+    }
+    policy = hashlib.sha256(canonical(first_policy)).hexdigest()
+    response = {
+        "status": "quarantined", "nodeId": node, "profileId": 29,
+        "listen": "127.0.0.1", "port": profile["inbounds"][0]["port"],
+        "revision": profile_sha, "config": profile, "policy": first_policy,
+        "policySignature": json.loads(sign(root, key, b"", first_policy))["signature"],
+        "policyPublicKey": public[-32:].hex(), "policySha256": policy,
+        "publicIngressAllowed": False, "canStart": False, "canResume": False,
+        "authorizedBytes": 0,
+    }
+    staged = {"prepared": genesis_doc, "reply": response}
     scope = {"userId": user, "policySha256": policy, "accountEpoch": str(uuid.uuid4()),
              "meterEpoch": str(uuid.uuid4()), "reservationId": str(uuid.uuid4()), "revision": 1,
              "nonce": digest(), "aliases": [{"email": alias[n], "class": n} for n in ("cdn", "main")]}
@@ -163,6 +197,12 @@ def run(xray, root, target, processes, *, restart):
         return sign(root, key, b"XMESH_QUOTA_V2_XRAY_CAP_ADMISSION_V1\0", fields) + b"\n"
 
     grant = grant_for(claims)
+    # Unlike the older test, the scope handed to the live process is NOT a
+    # self-declared fixture: it must be re-derived from the genuine signed
+    # quarantine profile, original Genesis and Ed25519 cap envelope.
+    derived_scope = verify_grant(grant, staged, public[-32:].hex(), runtime, now)
+    assert derived_scope == scope, "signed policy did not independently bind the live VLESS clients"
+    scope = derived_scope
     reject(sock_path, server.pid, runtime, genesis, grant_for(dict(claims, nodeId=node + 1)), scope)
     reject(sock_path, server.pid, runtime, genesis, grant_for(dict(claims, runtimeId=digest())), scope)
     forged = json.loads(grant)
