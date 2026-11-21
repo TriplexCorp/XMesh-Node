@@ -33,8 +33,19 @@ No private signing keys may be stored in the repository or command line.
 
 ## What happens
 
-1. Require root, a root-owned private state directory and the already
-   pinned, root-owned Nexus Ed25519 policy key. Acquire one process lock.
+1. Require root and the existing root-owned private
+   `/var/lib/xmesh-xray-sync` state directory. Acquire the SAME
+   `state/lock` flock as `xmesh-xray-sync.sh` so the ordinary reconciler
+   cannot replace Xray during staging. An existing Ed25519 policy pin is
+   used unchanged and never silently rotated. If this is a newly enrolled
+   Node without the original policy key pin, request its public key
+   through **the existing owner-enrolled strict-PQ product tunnel** on
+   `/api/v1/node/quota-v2/policy-pin`. Nexus first checks original
+   activation and pristine Genesis. The already pinned product TLS/XSP
+   identity authenticates this response, including its 0-byte/no-start
+   status and activation digest. Write the first Ed25519 policy pin
+   atomically with root-only permissions and directory `fsync`.
+   Plain HTTPS or unauthenticated TOFU is never accepted.
 2. Generate an unpredictable 256-bit challenge internally. Inspect the
    isolated Docker Xray's real Linux process, executable, config and WAL
    without believing a caller-supplied runtime ID. Send a
@@ -61,6 +72,12 @@ No private signing keys may be stored in the repository or command line.
 7. Print only non-secret status and policy SHA256. Never connect the
    Docker network, run VLESS, install a cap, invoke Docker restart or
    mutate the existing active policy.
+
+The special installed helper is still opt-in and the lock is
+released after saving zero-authority evidence. A later automatic ordinary
+reconciliation intentionally refuses to open the staged Node: positive
+admission must eventually be integrated into the same supervised
+Agent lifecycle/lock interval before VLESS can be opened.
 
 Existing normal `xmesh-xray-sync.sh` intentionally REJECTS any such
 HTTP 200 response rather than applying the quarantined profile as an
