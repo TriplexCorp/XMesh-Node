@@ -91,6 +91,10 @@ def run(root: Path):
         shared / "experimental_signed_cap_admission_test.go",
     )
     shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_signed_cap_pg_integration_test.go.txt",
+        shared / "experimental_signed_cap_pg_integration_test.go",
+    )
+    shutil.copyfile(
         NODE_ROOT / "experiments/xray-dataplane-fence/meter_inventory.go.txt",
         shared / "meter_inventory.go",
     )
