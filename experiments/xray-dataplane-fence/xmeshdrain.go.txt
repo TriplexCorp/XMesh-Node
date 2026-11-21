@@ -22,6 +22,7 @@ import (
 
     c "github.com/xtls/xray-core/common/ctx"
     "github.com/xtls/xray-core/common/session"
+    "github.com/xtls/xray-core/common/xmeshquota"
 )
 
 var errFenced = errors.New("experimental xmesh drain: user is fenced")
@@ -303,6 +304,9 @@ func auditRawCounter(name string, preFenceUnsafe bool, trustedMeterOrigin bool, 
             panic("experimental Xray trusted counter intent callback absent")
         }
         if err:=meterIntent(email,direction);err!=nil {
+            if denial,ok:=err.(xmeshquota.Denied);ok {
+                panic(denial)
+            }
             panic(fmt.Sprintf("experimental Xray byte WAL cannot be persisted: %v",err))
         }
     }

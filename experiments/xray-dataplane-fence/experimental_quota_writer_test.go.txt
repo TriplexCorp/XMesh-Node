@@ -1,0 +1,67 @@
+package dispatcher
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/xmeshquota"
+)
+
+type experimentalWriterCounter struct {
+	charged int64
+	limit   int64
+}
+
+func (c *experimentalWriterCounter) Value() int64 { return c.charged }
+func (c *experimentalWriterCounter) Set(value int64) int64 {
+	previous := c.charged
+	c.charged = value
+	return previous
+}
+
+func (c *experimentalWriterCounter) Add(delta int64) int64 {
+	return c.Set(c.charged + delta)
+}
+
+func (c *experimentalWriterCounter) ExperimentalAddMetered(delta int64) int64 {
+	if delta > c.limit-c.charged {
+		panic(xmeshquota.Denied{Reason: errors.New("experimental quota: exhausted")})
+	}
+	return c.Add(delta)
+}
+
+type experimentalWriterSink struct{ delivered int64 }
+
+func (s *experimentalWriterSink) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	s.delivered += int64(mb.Len())
+	buf.ReleaseMulti(mb)
+	return nil
+}
+
+func TestExperimentalQuotaDeniedWriteDoesNotReachDownstream(t *testing.T) {
+	counter := &experimentalWriterCounter{limit: 9}
+	sink := &experimentalWriterSink{}
+	writer := &SizeStatWriter{
+		Counter: counter, Writer: sink, ExperimentalEmail: "xmesh-u1--vless-main",
+		ExperimentalDirection: "downlink",
+	}
+	write := func(n int32) error {
+		buffer := buf.New()
+		buffer.Extend(n)
+		return writer.WriteMultiBuffer(buf.MultiBuffer{buffer})
+	}
+	var denied xmeshquota.Denied
+	if err := write(10); !errors.As(err, &denied) || sink.delivered != 0 || counter.charged != 0 {
+		t.Fatalf("over-limit buffer reached accounting or transport: err=%v delivered=%d charged=%d",
+			err, sink.delivered, counter.charged)
+	}
+	if err := write(9); err != nil || sink.delivered != 9 || counter.charged != 9 {
+		t.Fatalf("previously rejected buffer changed remaining budget: err=%v delivered=%d charged=%d",
+			err, sink.delivered, counter.charged)
+	}
+	if err := write(1); !errors.As(err, &denied) || sink.delivered != 9 || counter.charged != 9 {
+		t.Fatalf("exhausted budget forwarded another byte: err=%v delivered=%d charged=%d",
+			err, sink.delivered, counter.charged)
+	}
+}

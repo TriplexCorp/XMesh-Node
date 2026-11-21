@@ -1,11 +1,14 @@
 package buf
 
 import (
+    "errors"
     "io"
     "sync"
     "sync/atomic"
     "testing"
     "time"
+
+    "github.com/xtls/xray-core/common/xmeshquota"
 )
 
 // Only injected into the disposable exact-pinned Xray checkout in CI.
@@ -221,5 +224,40 @@ func TestExperimentalDirectReadDiscardsDataWhenFencedInFlight(t *testing.T){
     if counter.Value()!=9 || begin.Load()!=1 || finish.Load()!=1 {
         t.Fatalf("direct in-flight read was not accounted before drain: %d %d %d",
             counter.Value(),begin.Load(),finish.Load())
+    }
+}
+
+type xmeshDeniedCounter struct{ xmeshCounter }
+
+func (c *xmeshDeniedCounter) ExperimentalAddMetered(int64) int64 {
+    panic(xmeshquota.Denied{Reason:errors.New("experimental quota: exhausted")})
+}
+
+func TestExperimentalQuotaDeniedReadReleasesBufferAndFinishesMeter(t *testing.T) {
+    for _, timed:=range []bool{false,true} {
+        t.Run(map[bool]string{false:"direct",true:"timed"}[timed],func(t *testing.T){
+            source:=&xmeshBlockingReader{unblock:make(chan struct{})}
+            close(source.unblock)
+            counter:=&xmeshDeniedCounter{}
+            var finished atomic.Int32
+            reader:=&TimeoutWrapperReader{
+                Reader:source,Counter:counter,
+                ExperimentalBegin:func()bool{return true},
+                ExperimentalEnd:func(){finished.Add(1)},
+                ExperimentalMayDeliver:func()bool{return true},
+            }
+            var mb MultiBuffer
+            var err error
+            if timed {
+                mb,err=reader.ReadMultiBufferTimeout(time.Second)
+            } else {
+                mb,err=reader.ReadMultiBuffer()
+            }
+            var denial xmeshquota.Denied
+            if !errors.As(err,&denial) || mb!=nil || finished.Load()!=1 || counter.Value()!=0 {
+                t.Fatalf("denied read escaped or left in-flight: buffer=%v err=%v finished=%d count=%d",
+                    mb,err,finished.Load(),counter.Value())
+            }
+        })
     }
 }

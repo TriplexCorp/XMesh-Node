@@ -111,6 +111,13 @@ def run(root: Path):
         shared / "historic_runtime_debt_test.go",
     )
 
+    quota_errors = root / "common/xmeshquota"
+    quota_errors.mkdir()
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_limit_error.go.txt",
+        quota_errors / "limit_error.go",
+    )
+
     dispatcher_file = root / "app/dispatcher/default.go"
     source = dispatcher_file.read_text(encoding="utf-8")
     source = replace_once(
@@ -370,6 +377,12 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     )
     meter_source = replace_once(
         meter_source,
+        '"github.com/xtls/xray-core/common/buf"\n',
+        '"github.com/xtls/xray-core/common/buf"\n'
+        '\t"github.com/xtls/xray-core/common/xmeshquota"\n',
+    )
+    meter_source = replace_once(
+        meter_source,
         '\tWriter  buf.Writer\n',
         '\tWriter  buf.Writer\n\tExperimentalEmail string\n'
         '\tExperimentalDirection string\n',
@@ -390,13 +403,21 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
             buf.ReleaseMulti(mb)
             panic("experimental Xray stats writer lacks trusted counter method")
         }
-        audited.ExperimentalAddMetered(int64(mb.Len()))
+        if err := xmeshquota.TryCharge(audited.ExperimentalAddMetered, int64(mb.Len())); err != nil {
+            buf.ReleaseMulti(mb)
+            return err
+        }
     } else {
         w.Counter.Add(int64(mb.Len()))
     }
     return w.Writer.WriteMultiBuffer(mb)''',
     )
     meter_writer_file.write_text(meter_source, encoding="utf-8")
+    meter_writer_test = root / "app/dispatcher/stats_experimental_quota_test.go"
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_quota_writer_test.go.txt",
+        meter_writer_test,
+    )
 
     # Xray's raw TCPConn.ReadFrom splice bypasses SizeStatWriter entirely:
     # upstream proxy.CopyRawConnIfExist increments statWriter.Counter.Add
@@ -592,6 +613,12 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
     )
     reader_source = replace_once(
         reader_source,
+        '"github.com/xtls/xray-core/common/errors"\n',
+        '"github.com/xtls/xray-core/common/errors"\n'
+        '\t"github.com/xtls/xray-core/common/xmeshquota"\n',
+    )
+    reader_source = replace_once(
+        reader_source,
         '\tdone chan struct{}\n}',
         '\tdone chan struct{}\n'
         '\tExperimentalMu sync.Mutex\n'
@@ -624,8 +651,12 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
             return nil, io.EOF
         }
         mb, err := r.Reader.ReadMultiBuffer()
-        r.experimentalMeterAdd(mb)
+        chargeErr := r.experimentalMeterAdd(mb)
         r.ExperimentalEnd()
+        if chargeErr != nil {
+            ReleaseMulti(mb)
+            return nil, chargeErr
+        }
         if r.ExperimentalMayDeliver == nil || !r.ExperimentalMayDeliver() {
             ReleaseMulti(mb)
             return nil, io.EOF
@@ -653,7 +684,10 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
             // is counted before done is closed, even if this call times out.
             go func() {
                 r.mb, r.err = r.Reader.ReadMultiBuffer()
-                r.experimentalMeterAdd(r.mb)
+                if err := r.experimentalMeterAdd(r.mb); err != nil {
+                    ReleaseMulti(r.mb)
+                    r.mb, r.err = nil, err
+                }
                 r.ExperimentalEnd()
                 close(r.done)
             }()
@@ -682,12 +716,12 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
         """// Every experimental timed/direct user-buffer read needs the trusted
 // StatsService counter method, not an ordinary Counter.Add shared with
 // untracked background callers. ExperimentalBegin/End bound the operation.
-func (r *TimeoutWrapperReader) experimentalMeterAdd(mb MultiBuffer) {
+func (r *TimeoutWrapperReader) experimentalMeterAdd(mb MultiBuffer) error {
     audited, ok := r.Counter.(interface { ExperimentalAddMetered(int64) int64 })
     if !ok || audited == nil {
         panic("experimental Xray timed meter lacks trusted counter method")
     }
-    audited.ExperimentalAddMetered(int64(mb.Len()))
+    return xmeshquota.TryCharge(audited.ExperimentalAddMetered, int64(mb.Len()))
 }
 
 type Writer interface {""",
@@ -708,8 +742,8 @@ type Writer interface {""",
          str(shared / "durable_counter_taint.go"),
          str(shared / "durable_counter_taint_test.go"),
          str(dispatcher_file), str(worker_file), str(mux_file),
-         str(meter_writer_file), str(counter_file), str(manager_file),
-         str(reader_file),
+         str(meter_writer_file), str(meter_writer_test), str(counter_file), str(manager_file),
+         str(reader_file), str(quota_errors / "limit_error.go"),
          str(root / "common/buf/io_experimental_timeout_test.go")],
         check=True,
         cwd=root,

@@ -68,7 +68,7 @@ jobs:
           go test -race ./app/xmeshdrain -run 'TestMeterRead' -count=15
           # The async timeout-reader probe exercises exact pinned common/buf.
           # Run concurrent-timeout / late-delivery races repeatedly.
-          go test -race ./common/buf -run TestExperimental -count=20
+          go test -race ./common/buf ./app/dispatcher -run TestExperimental -count=20
           # Real Linux TCP sockets with both peers splice-eligible: tracked
           # user bytes MUST go through trusted metered MultiBuffer writes,
           # while unrelated routes keep upstream raw TCP fast-path.

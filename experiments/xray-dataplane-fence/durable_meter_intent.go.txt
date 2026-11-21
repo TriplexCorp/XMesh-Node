@@ -18,6 +18,8 @@ import (
     "path/filepath"
     "strings"
     "syscall"
+
+    "github.com/xtls/xray-core/common/xmeshquota"
 )
 
 const meterLedgerMaxBytes = int64(64 << 20)
@@ -181,7 +183,9 @@ func commitMeterIntentBeforeMutation(email,direction string,delta,current int64)
     // Independently enforce experimental per-Node and CDN reservation ceilings
     // against ALL aliases/directions under the SAME lock as WAL fsync.
     // No byte can enter the WAL or StatsService if its capacity is exhausted.
-    if err:=checkExperimentalByteCapLocked(email,delta);err!=nil{return err}
+    if err:=checkExperimentalByteCapLocked(email,delta);err!=nil {
+        return xmeshquota.Denied{Reason:err}
+    }
     path:=meterLedgerPath(gate.journalDir,gate.runtimeID,email,direction)
     if gate.meterTails==nil{gate.meterTails=map[string]durableMeterTail{}}
     tail,cached:=gate.meterTails[path]

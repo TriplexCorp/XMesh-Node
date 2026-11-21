@@ -9,6 +9,7 @@ import (
     "testing"
     "sync/atomic"
 
+    "github.com/xtls/xray-core/common/xmeshquota"
     "github.com/xtls/xray-core/features/stats"
 )
 
@@ -50,20 +51,12 @@ func newCapCounter(t *testing.T,manager interface {
     return counter
 }
 
-func capAttempt(t *testing.T,c stats.Counter,email,direction string,n int64) (passed bool) {
+func capAttempt(t *testing.T,c stats.Counter,email,direction string,n int64) bool {
     t.Helper()
     if err:=BeginMeterWrite(email,direction);err!=nil {t.Fatal(err)}
     defer EndMeterWrite(email,direction)
-    defer func(){
-        if recovered:=recover();recovered!=nil {
-            if !strings.Contains(fmt.Sprint(recovered),"experimental quota:") {
-                t.Errorf("unrelated Xray meter panic is not a quota denial: %v",recovered)
-            }
-            passed=false
-        }
-    }()
-    c.(interface{ExperimentalAddMetered(int64)int64}).ExperimentalAddMetered(n)
-    return true
+    audited:=c.(interface{ExperimentalAddMetered(int64)int64})
+    return xmeshquota.TryCharge(audited.ExperimentalAddMetered,n)==nil
 }
 
 func capValues(t *testing.T) (uint64,uint64) {
@@ -88,7 +81,8 @@ func TestV2ExperimentalQuotaFsyncFailureCannotChargeUncommittedBytes(t *testing.
     var thrown interface{}
     func(){
         defer func(){thrown=recover()}()
-        counter.(interface{ExperimentalAddMetered(int64)int64}).ExperimentalAddMetered(17)
+        audited:=counter.(interface{ExperimentalAddMetered(int64)int64})
+        _=xmeshquota.TryCharge(audited.ExperimentalAddMetered,17)
     }()
     EndMeterWrite(capMain,"downlink")
     if thrown==nil || !strings.Contains(fmt.Sprint(thrown),"cannot fsync") {
@@ -432,8 +426,13 @@ func TestV2ExperimentalQuotaUntrustedRawCounterCannotBypassFsyncedCap(t *testing
             }
             // Neither a valid new metered Add nor an identical policy
             // re-install can clear this sticky, root-owned continuity loss.
-            if capAttempt(t,main,capMain,"uplink",1) {
-                t.Fatal("tainted Xray successfully continued quota spending")
+            panicked=nil
+            func(){
+                defer func(){panicked=recover()}()
+                capAttempt(t,main,capMain,"uplink",1)
+            }()
+            if !strings.Contains(fmt.Sprint(panicked),"previously tainted meter") {
+                t.Fatalf("tainted meter failure was suppressed or misclassified: %v",panicked)
             }
             if main.Value()!=0 {t.Fatal("tainted meter still advanced")}
         })
