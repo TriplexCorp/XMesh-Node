@@ -1,0 +1,52 @@
+name: Quota V2 experimental fsynced byte ceilings (disposable)
+on:
+  pull_request:
+    paths:
+      - 'experiments/xray-dataplane-fence/experimental_byte_cap.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_byte_cap_test.go.txt'
+      - 'experiments/xray-dataplane-fence/durable_meter_intent.go.txt'
+      - 'experiments/xray-dataplane-fence/apply-experiment.py'
+      - '.github/workflows/quota-v2-byte-ceilings.yml'
+permissions:
+  contents: read
+jobs:
+  measured-byte-budget:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      XMESH_EXPERIMENTAL_DRAIN: '1'
+      GOTOOLCHAIN: go1.27.4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Check injection tool and exact upstream pin
+        run: |
+          set -euo pipefail
+          python3 -m py_compile experiments/xray-dataplane-fence/apply-experiment.py
+          test -n "${GITHUB_ACTIONS:-}"
+          test "$XMESH_EXPERIMENTAL_DRAIN" = '1'
+      - name: Fetch exact reviewed upstream Xray and inject all experiment modules
+        run: |
+          set -Eeuo pipefail
+          source="$RUNNER_TEMP/xray-source"
+          git init "$source"
+          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+          python3 experiments/xray-dataplane-fence/apply-experiment.py "$source"
+          echo "XMESH_PINNED_XRAY_SOURCE=$source" >> "$GITHUB_ENV"
+      - name: Verify exact shared user, Node and CDN limits before byte delivery
+        run: |
+          set -euo pipefail
+          cd "$XMESH_PINNED_XRAY_SOURCE"
+          go test -race -count=1 -timeout=12m ./app/xmeshdrain -run '^TestV2ExperimentalQuota'
+      - name: Ensure all earlier WAL/fence/durable-meter regressions still pass
+        run: |
+          set -euo pipefail
+          cd "$XMESH_PINNED_XRAY_SOURCE"
+          go test -count=1 -timeout=12m ./app/xmeshdrain
