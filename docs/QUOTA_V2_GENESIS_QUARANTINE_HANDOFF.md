@@ -133,3 +133,43 @@ a complete historic WAL, privileged Linux kernel attestation, or the
 installed Agent's positive Xray control socket. This is only the safe
 first handoff that the existing ordinary policy path previously
 prevented. DO NOT set `XMESH_QUOTA_V2_ENABLED=1` on production.
+
+
+## Draft Agent control-v6.0.27: original strict-PQ SQL reserve/echo
+
+The opt-in `/usr/local/sbin/xmesh-quota-genesis-reservation` command
+is installed on the disposable staging Agent; it is **not** run by normal
+systemd control, and the main release remains unchanged. It requires
+root, a private state directory and the existing reconciliation flock.
+
+On a clean first-Genesis candidate that already has the original
+`genesis-quarantine-envelope.json`:
+
+```bash
+sudo /usr/local/sbin/xmesh-quota-genesis-reservation --panel https://DISPOSABLE-NEXUS.example --node-id 47 --user-id 101 --state /var/lib/xmesh-xray-sync --operation prepare
+sudo /usr/local/sbin/xmesh-quota-genesis-reservation --panel https://DISPOSABLE-NEXUS.example --node-id 47 --user-id 101 --state /var/lib/xmesh-xray-sync --operation confirm
+```
+
+No user-provided epoch/reservation is trusted by confirm: the installed
+helper reads the **original root-private signed prepare** receipt. It
+verifies the original Genesis and signed zero-budget policy, the same
+pinned Nexus signing key and original strict-PQ Node activation, the
+measured isolated Xray process and valid lease clock; the exact signed
+responses are persisted as separate immutable files under the normal
+reconciler lock. Both replies have `authorizedBytes=0` and cannot
+start/resume Xray or refund traffic.
+
+The later experimental `first_cap_handoff.install_staged_cap` now
+requires BOTH the signed prepared and signed confirmed lease evidence,
+with identical account/meter/reservation identity. It requires its
+positive Ed25519 grant's revision and byte ceiling to match the
+confirmed lease, remeasures the independently pinned executable/config,
+then delegates to the PID/Unix-peer verified local Xray socket.
+
+**This is NOT live release qualification.** No genuine Nexus positive
+XSP/2 cap issuance and independent historical WAL/kernel attestation
+is connected yet. A private reservation alone never enables public
+VLESS. Only run on isolated disposable guests with explicit opt-in
+staging and immutable Nexus commit pin; no production flags or VPS
+were changed.
+
