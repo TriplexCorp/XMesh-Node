@@ -54,7 +54,7 @@ func signedCapTestFixture(t *testing.T) (string,interface{
         ReservationID:p.ReservationID,
         ReservationRevision:p.ReservationRevision,
         InventoryTailDigest:p.InventoryTailDigest,
-        Aliases:aliases,FirstGenesisIndependentlyProved:true,
+        Aliases:append([]signedCapAlias(nil),aliases...),FirstGenesisIndependentlyProved:true,
         Current:func(email,direction string)(uint64,error){
             c:=manager.GetCounter(rawMeterName(email,direction))
             if c==nil{return 0,nil}
