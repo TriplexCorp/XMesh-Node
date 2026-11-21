@@ -27,9 +27,9 @@ NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
 [[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
   echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
 }
-if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
-  if [[ "$AGENT_VERSION" != control-v6.0.25 || "$WAL_STAGE_AGENT" != 1 || ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
-    echo "Agent 6.0.25 WAL rehearsal requires explicit staging and an exact Nexus revision." >&2; exit 2
+if [[ "$AGENT_VERSION" == control-v6.0.25 || "$AGENT_VERSION" == control-v6.0.27 || "$WAL_STAGE_AGENT" != 0 ]];then
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.27 ) || "$WAL_STAGE_AGENT" != 1 || ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
+    echo "Experimental WAL/Genesis Agent requires isolated staging and an exact Nexus revision." >&2; exit 2
   fi
 fi
 if [[ "$WAL_STAGE_AGENT" == 1 ]];then
@@ -70,7 +70,7 @@ WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
 for family in quota-v2-physical-stop xray-dataplane-fence; do
   install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
 done
-for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
+for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,genesis_reservation,first_cap_handoff,cap_install,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
   python3 -m py_compile "$ROOT/experiments/$helper.py"
   install -o root -g root -m 0700 "$ROOT/experiments/$helper.py" "$WAL_ROOT/$helper.py"
 done
@@ -79,6 +79,9 @@ ln -sfn "$WAL_ROOT/quota-v2-physical-stop/wal_transport.py" /usr/local/sbin/xmes
 # reviewed WAL operator. It does not run automatically, open ingress, install
 # any cap or alter the existing systemd Xray synchronizer.
 ln -sfn "$WAL_ROOT/quota-v2-physical-stop/quarantine_policy.py" /usr/local/sbin/xmesh-quota-genesis-quarantine
+# First-Genesis SQL lease helper is zero-authority and intentionally opt-in.
+# The positive signed-cap verifier is installed as a library, not a daemon.
+ln -sfn "$WAL_ROOT/quota-v2-physical-stop/genesis_reservation.py" /usr/local/sbin/xmesh-quota-genesis-reservation
 
 if [[ -f "$ROOT/deploy/xmesh-tls-renew-hook.sh" ]]; then
   install -o root -g root -m 0700 "$ROOT/deploy/xmesh-tls-renew-hook.sh" /usr/local/libexec/xmesh-tls-renew-hook
