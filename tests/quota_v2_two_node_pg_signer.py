@@ -81,8 +81,8 @@ def init_db(dsn,nexus):
             "VALUES(%s,%s,100)",(USER,EPOCH))
     print("PASS: real Nexus reservation and runtime-preflight SQL loaded",flush=True)
 
-def issue(dsn,node,runtime,policy_sha):
-    if node not in (47,48) or len(runtime)!=64 or len(policy_sha)!=64 or any(
+def issue(dsn,node,runtime,policy_sha,xray_pid):
+    if node not in (47,48) or not isinstance(xray_pid,int) or xray_pid<=0 or len(runtime)!=64 or len(policy_sha)!=64 or any(
             c not in "0123456789abcdef" for c in runtime+policy_sha):
         raise ValueError("invalid disposable Node process measurement")
     activation=("c" if node==47 else "d")*64
@@ -118,7 +118,7 @@ def issue(dsn,node,runtime,policy_sha):
             "FROM quota_v2_record_runtime_admission_preflight("
             "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (USER,EPOCH,node,METER[node],RID[node],revision,nonce,
-             runtime,"f"*64,os.getpid(),policy_sha,activation,0)).fetchone()
+             runtime,"f"*64,xray_pid,policy_sha,activation,0)).fetchone()
         if p[0]!=100 or p[1]!=0 or p[2]>100 or p[3]!=ceiling or p[4]!=0:
             raise ValueError("SQL preflight did not match serial allocation")
         c=conn.execute("SELECT COUNT(*) FROM quota_v2_runtime_admission_preflights "
@@ -204,6 +204,7 @@ def main():
     parser.add_argument("--node",type=int)
     parser.add_argument("--runtime")
     parser.add_argument("--policy-sha")
+    parser.add_argument("--xray-pid",type=int)
     parser.add_argument("--reports",type=Path)
     args=parser.parse_args()
     dsn=require_disposable()
@@ -212,7 +213,7 @@ def main():
             raise ValueError("pinned Nexus SQL checkout required")
         init_db(dsn,args.nexus_source)
     elif args.action=="issue":
-        issue(dsn,args.node,args.runtime,args.policy_sha)
+        issue(dsn,args.node,args.runtime,args.policy_sha,args.xray_pid)
     else:
         assert_complete(dsn,args.reports)
 
