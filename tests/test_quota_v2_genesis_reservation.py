@@ -184,9 +184,13 @@ class SignedGenesisLeaseTests(unittest.TestCase):
                          self.reservation["reservationId"])
         self.assertTrue((state/f"genesis-reservation-prepared-u{self.user}.json").is_file())
         self.assertTrue((state/f"genesis-reservation-confirmed-u{self.user}.json").is_file())
-        with self.assertRaises(ValueError):
-            qp._durable_store(os.open(state,os.O_DIRECTORY),
-                              {"forged":True},"genesis-reservation-../grant.json")
+        directory_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaises(ValueError):
+                qp._durable_store(directory_fd, {"forged":True},
+                                  "genesis-reservation-../grant.json")
+        finally:
+            os.close(directory_fd)
 
 
 if __name__ == "__main__":
