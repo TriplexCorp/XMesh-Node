@@ -172,11 +172,11 @@ class QuarantinePolicyTests(unittest.TestCase):
             return raw[:-1].decode("ascii")
         fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
         try:
-            with mock.patch.object(qp.wal_transport,"POLICY_KEY",str(pin)),\\
+            with mock.patch.object(qp.wal_transport,"POLICY_KEY",str(pin)),\
                  mock.patch.object(qp.wal_transport,"_panel_pin",
-                                   side_effect=read_pin),\\
+                                   side_effect=read_pin),\
                  mock.patch.object(qp,"_enrolled_activation",
-                                   return_value=identity) as enrolled,\\
+                                   return_value=identity) as enrolled,\
                  mock.patch.object(qp,"_post_quarantined_desired",
                                    return_value=self.guard.canonical(response)) as remote:
                 self.assertEqual(qp._pinned_policy_before_genesis(
@@ -206,12 +206,12 @@ class QuarantinePolicyTests(unittest.TestCase):
                 {**response,"nodeId":self.node+1},
                 {**response,"activationReceiptSha256":"f"*64},
             ):
-                with self.subTest(altered=altered),\\
-                     mock.patch.object(qp.wal_transport,"POLICY_KEY",str(pin)),\\
+                with self.subTest(altered=altered),\
+                     mock.patch.object(qp.wal_transport,"POLICY_KEY",str(pin)),\
                      mock.patch.object(qp.wal_transport,"_panel_pin",
-                            side_effect=FileNotFoundError),\\
+                            side_effect=FileNotFoundError),\
                      mock.patch.object(qp,"_enrolled_activation",
-                            return_value=identity),\\
+                            return_value=identity),\
                      mock.patch.object(qp,"_post_quarantined_desired",
                             return_value=self.guard.canonical(altered)):
                     with self.assertRaises(ValueError):
