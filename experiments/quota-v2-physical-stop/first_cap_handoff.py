@@ -190,7 +190,7 @@ def verify_grant(grant_raw, evidence, pinned, runtime, now_ms=None):
     }
 
 
-def install_staged_cap(panel, node_id, state, socket_path, grant_raw):
+def install_staged_cap(panel, node_id, state, socket_path, grant_raw, executable_pin):
     """Install into the SAME measured, network-isolated Xray; never start it.
 
     This is only a reusable experiment entry point for a future authenticated
@@ -199,7 +199,9 @@ def install_staged_cap(panel, node_id, state, socket_path, grant_raw):
     kernel. This function itself does not fetch positive authority from Nexus.
     """
     if (not isinstance(panel, str) or not panel.startswith("https://")
-            or not _int(node_id, 1) or os.geteuid() != 0):
+            or not _int(node_id, 1) or os.geteuid() != 0
+            or not isinstance(executable_pin, str)
+            or HEX64.fullmatch(executable_pin) is None):
         raise ValueError("positive cap needs root and a strict enrolled Node")
     state_fd, lock = quarantine._locked_private_state(state)
     try:
@@ -220,7 +222,17 @@ def install_staged_cap(panel, node_id, state, socket_path, grant_raw):
         evidence = wal_transport.observed.strict_json(raw)
         if not isinstance(evidence, dict) or set(evidence) != {"prepared", "reply"}:
             raise ValueError("invalid original quarantine evidence")
-        before = wal_transport._measure_quarantined_runtime()
+        # Hash the ORIGINAL signed Nexus config, then measure the actual
+        # config file through this Linux PID's mount namespace. The Xray
+        # executable pin must come from independent verified release state;
+        # it must never be learned from the live process or grant reply.
+        if not isinstance(evidence["reply"], dict) or not isinstance(
+                evidence["reply"].get("config"), dict):
+            raise ValueError("no signed Xray profile for an executable/config measurement")
+        config_pin = hashlib.sha256(wal_transport.observed.canonical(
+            evidence["reply"]["config"])).hexdigest()
+        pins = (executable_pin, config_pin)
+        before = wal_transport._measure_quarantined_runtime(pins)
         if evidence["reply"].get("nodeId") != node_id:
             raise ValueError("foreign stored quarantine Node identity")
         pinned = wal_transport._panel_pin()
@@ -230,7 +242,7 @@ def install_staged_cap(panel, node_id, state, socket_path, grant_raw):
         if original.get("activationReceiptSha256") != activation:
             raise ValueError("original strict-XSP2 product activation changed")
         scope = verify_grant(grant_raw, evidence, pinned, before[3])
-        if (before != wal_transport._measure_quarantined_runtime()
+        if (before != wal_transport._measure_quarantined_runtime(pins)
                 or original != quarantine._enrolled_activation(panel, node_id)):
             raise ValueError("Xray runtime or enrolled Node changed before install")
         # Socket peer PID, uid, runtime, signed cap, live StatsService, WAL,
@@ -238,7 +250,7 @@ def install_staged_cap(panel, node_id, state, socket_path, grant_raw):
         genesis = wal_transport.observed.canonical(evidence["prepared"])
         receipt = cap_install.install_in_xray(
             socket_path, before[2], before[3], genesis, grant_raw, scope)
-        if before != wal_transport._measure_quarantined_runtime():
+        if before != wal_transport._measure_quarantined_runtime(pins):
             raise ValueError("Xray process changed while installing cap")
         return receipt
     finally:
