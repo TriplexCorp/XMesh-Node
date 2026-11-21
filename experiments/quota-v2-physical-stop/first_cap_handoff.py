@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Experimental verifier for a first-Genesis Nexus cap before local Xray IPC.
 
 The caller must first authenticate the positive grant through the enrolled
@@ -8,7 +9,9 @@ Node, runtime or inbound alias from reaching the measured Xray socket.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
+import json
 import os
 import re
 import stat
@@ -290,3 +293,77 @@ def install_staged_cap(panel, node_id, state, socket_path, grant_raw, executable
     finally:
         os.close(lock)
         os.close(state_fd)
+
+
+def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
+                                executable_pin, request_challenge):
+    """Disposable installed Agent path. No arbitrary positive issuer or start.
+
+    An independent CI controller must have already staged the genuine
+    Nexus signer and exact SQL cap outbox. This client cannot create that
+    authority; a missing entry, foreign nonce or stale lease is denied.
+    """
+    if (os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
+            or os.geteuid() != 0 or not _int(node_id,1) or not _int(user_id,1)
+            or not isinstance(panel,str) or not panel.startswith("https://")
+            or not isinstance(executable_pin,str) or HEX64.fullmatch(executable_pin) is None
+            or not isinstance(request_challenge,str) or HEX64.fullmatch(request_challenge) is None):
+        raise ValueError("explicit disposable signed-cap rehearsal required")
+    state_fd,lock = quarantine._locked_private_state(state)
+    try:
+        pinned = wal_transport._panel_pin()
+        identity = quarantine._enrolled_activation(panel,node_id)
+        evidence = confirmed_lease._staged_original(
+            state_fd,node_id,user_id,pinned,identity["activationReceiptSha256"])
+        config_pin = evidence["reply"]["revision"]
+        pins = (executable_pin,config_pin)
+        before = wal_transport._measure_quarantined_runtime(pins)
+        raw = quarantine._post_quarantined_desired({
+            "nodeId":node_id,"userId":user_id,"requestChallenge":request_challenge,
+        },state,quarantine.CAP_DELIVERY_PATH)
+        if not isinstance(raw,bytes) or not 0 < len(raw) <= 16384:
+            raise ValueError("oversized strict signed cap delivery")
+        response = wal_transport.observed.strict_json(raw)
+        if (not isinstance(response,dict)
+                or set(response)!={"status","nodeId","userId","signedEnvelope"}
+                or response["status"]!="committed_first_cap"
+                or type(response["nodeId"]) is not int or response["nodeId"]!=node_id
+                or type(response["userId"]) is not int or response["userId"]!=user_id
+                or not isinstance(response["signedEnvelope"],str)):
+            raise ValueError("strict-XSP2 did not return one committed cap")
+        grant = response["signedEnvelope"].encode("utf-8")
+        scope = verify_grant(grant,evidence,pinned,before[3])
+        if (scope["userId"]!=user_id or scope["nonce"]!=request_challenge
+                or before != wal_transport._measure_quarantined_runtime(pins)
+                or identity != quarantine._enrolled_activation(panel,node_id)):
+            raise ValueError("delivered cap or independently measured runtime changed")
+        # Preserve the EXACT original cap bytes as a string in this root-only
+        # evidence file. This is not permission to start/restart Xray.
+        quarantine._durable_store(state_fd,response,
+                                  f"genesis-positive-cap-u{user_id}.json")
+    finally:
+        os.close(lock)
+        os.close(state_fd)
+    # Reacquire the same flock and independently recheck BOTH signed lease
+    # receipts, original policy, pins and live PID and private Unix peer.
+    return install_staged_cap(panel,node_id,state,socket_path,grant,executable_pin)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Disposable first-Genesis strict signed-cap handoff")
+    ap.add_argument("--panel",required=True)
+    ap.add_argument("--node-id",required=True,type=int)
+    ap.add_argument("--user-id",required=True,type=int)
+    ap.add_argument("--state",required=True)
+    ap.add_argument("--socket",required=True)
+    ap.add_argument("--executable-sha256",required=True)
+    ap.add_argument("--request-challenge",required=True)
+    args = ap.parse_args()
+    try:
+        proof=fetch_and_install_rehearsal(
+            args.panel,args.node_id,args.user_id,args.state,args.socket,
+            args.executable_sha256,args.request_challenge)
+        # No signed envelope, credentials or profile on the console.
+        print(json.dumps(proof,sort_keys=True,separators=(",",":")))
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        ap.exit(1,"Disposable Quota V2 signed-cap handoff denied: "+str(error)+"\n")
