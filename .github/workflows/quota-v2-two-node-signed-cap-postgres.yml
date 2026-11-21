@@ -13,7 +13,7 @@ permissions:
 jobs:
   two-node-signed-cap:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17
@@ -34,7 +34,7 @@ jobs:
       QUOTA_TEST_DSN: postgresql://quota_test:quota_test_disposable@127.0.0.1:5432/quota_test
       # Cross-repo reference is deliberately immutable, not a moving main
       # branch. It contains Nexus's production SQL allocator + staging 0138.
-      XMESH_PINNED_NEXUS_SHA: cf7a3092dbe4f18abd383e228c5cbc461ec07972
+      XMESH_PINNED_NEXUS_SHA: 9eb2c7de84b21d238db47d5eb263658d839c8def
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: TriplexCorp/XMesh-Nexus
-          ref: cf7a3092dbe4f18abd383e228c5cbc461ec07972
+          ref: 9eb2c7de84b21d238db47d5eb263658d839c8def
           path: nexus
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -56,6 +56,14 @@ jobs:
           python3 -m py_compile tests/quota_v2_two_node_pg_signer.py
           python3 -m pip install 'psycopg[binary]==3.2.3' --break-system-packages
           python3 tests/quota_v2_two_node_pg_signer.py init --nexus-source nexus
+      - name: Compile REAL Nexus PolicySigner CLI, not a stand-in OpenSSL signer
+        run: |
+          set -Eeuo pipefail
+          cargo build --manifest-path nexus/backend/Cargo.toml \
+            --features quota-v2-disposable-cap-issuer --bin quota-v2-ci-signed-cap
+          test -x "$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap"
+          echo "XMESH_CI_NEXUS_SIGNER=$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap" >> "$GITHUB_ENV"
+          echo "XMESH_CI_CAP_POLICY_KEY=$RUNNER_TEMP/quota-v2-ci-policy-key" >> "$GITHUB_ENV"
       - name: Fetch exact reviewed Xray and compile separate race-enabled Go process
         run: |
           set -Eeuo pipefail
