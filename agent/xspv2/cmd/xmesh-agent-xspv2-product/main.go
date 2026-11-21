@@ -1015,6 +1015,7 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 		"/api/v1/node/restart/progress": true,
 		"/api/v1/node/desired-config":   true,
 		"/api/v1/node/quota-v2/wal":     true,
+		"/api/v1/node/quota-v2/policy-pin": true,
 	}
 	if !allowed[path] {
 		return errors.New("operation is not registered for strict-PQ tunnel")
