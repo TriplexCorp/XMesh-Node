@@ -1,0 +1,84 @@
+name: Quota V2 two-process Xray + real Nexus PostgreSQL signed cap (disposable)
+on:
+  pull_request:
+    paths:
+      - 'tests/quota_v2_two_node_pg_signer.py'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_pg_integration_test.go.txt'
+      - 'experiments/xray-dataplane-fence/apply-experiment.py'
+      - '.github/workflows/quota-v2-two-node-signed-cap-postgres.yml'
+permissions:
+  contents: read
+jobs:
+  two-node-signed-cap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: quota_test
+          POSTGRES_PASSWORD: quota_test_disposable
+          POSTGRES_DB: quota_test
+        ports: ['127.0.0.1:5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      XMESH_AUDIT_DISPOSABLE: '1'
+      XMESH_EXPERIMENTAL_DRAIN: '0'
+      GOTOOLCHAIN: go1.27.4
+      QUOTA_TEST_DSN: postgresql://quota_test:quota_test_disposable@127.0.0.1:5432/quota_test
+      # Cross-repo reference is deliberately immutable, not a moving main
+      # branch. It contains Nexus's production SQL allocator + staging 0138.
+      XMESH_PINNED_NEXUS_SHA: cf7a3092dbe4f18abd383e228c5cbc461ec07972
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: TriplexCorp/XMesh-Nexus
+          ref: cf7a3092dbe4f18abd383e228c5cbc461ec07972
+          path: nexus
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Verify pinned PostgreSQL issuer checkout and Python syntax
+        run: |
+          set -euo pipefail
+          test "$(git -C nexus rev-parse HEAD)" = "$XMESH_PINNED_NEXUS_SHA"
+          python3 -m py_compile tests/quota_v2_two_node_pg_signer.py
+          python3 -m pip install 'psycopg[binary]==3.2.3' --break-system-packages
+          python3 tests/quota_v2_two_node_pg_signer.py init --nexus-source nexus
+      - name: Fetch exact reviewed Xray and compile separate race-enabled Go process
+        run: |
+          set -Eeuo pipefail
+          source="$RUNNER_TEMP/xray-source"
+          git init "$source"
+          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+          python3 experiments/xray-dataplane-fence/apply-experiment.py "$source"
+          cd "$source"
+          go test -race -c -o "$RUNNER_TEMP/xmeshdrain.test" ./app/xmeshdrain
+          echo "XMESH_CI_QUOTA_SQL_SIGNER=$GITHUB_WORKSPACE/tests/quota_v2_two_node_pg_signer.py" >> "$GITHUB_ENV"
+          echo "XMESH_CI_QUOTA_RESULTS=$RUNNER_TEMP/quota-v2-signed-cap-results" >> "$GITHUB_ENV"
+      - name: Run two INDEPENDENT measured Go Xray processes and real SQL serial grants
+        run: |
+          set -Eeuo pipefail
+          mkdir -m 0700 -p "$XMESH_CI_QUOTA_RESULTS"
+          XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+          XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+      - name: Assert shared database reservation = both distinct Xray WAL byte totals
+        run: |
+          set -Eeuo pipefail
+          python3 tests/quota_v2_two_node_pg_signer.py assert \
+            --reports "$XMESH_CI_QUOTA_RESULTS"
