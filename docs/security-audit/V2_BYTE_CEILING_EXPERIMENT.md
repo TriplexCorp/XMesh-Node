@@ -104,3 +104,23 @@ inbound during a valid in-flight write, unchanged raw counters, zero cap
 debit, fsynced forensic taint and refusal to recover positive spending
 from the tainted runtime. This remains a disposable Xray test, not
 production activation.
+
+## Signed-reservation expiry boundary in the test-only cap
+
+Even when bytes remain in a granted ceiling, an expiry is an independent
+reason to deny the **next** metered write. The test-only cap now requires a
+positive absolute `validUntilMs`; the check runs while the byte/WAL mutex
+is held, before every fsync attempt. The precise boundary
+`now >= validUntilMs` is denied. A backwards local clock transition is
+also treated as loss of time continuity and latches denial for that cap:
+returning the clock to the former valid window does not restore authority.
+
+Same-process WAL recovery requires a still-valid expiry and cannot mint
+another grant from an already expired receipt. CI exercises exact expiry,
+backwards-clock refusal and unsuccessful expired WAL restoration.
+
+**Not a substitute for signed time verification:** these are Go-side,
+test-only invariants. The current cap fixture supplies its own expiry; no
+production Nexus receipt is verified or installed by this patch. On actual
+rollout, signed Nexus reservation validity and clock continuity must both
+be checked at issuance, installation, restart and in the dataplane.
