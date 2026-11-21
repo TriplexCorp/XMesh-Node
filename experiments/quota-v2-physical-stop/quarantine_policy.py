@@ -177,6 +177,25 @@ def _durable_store(state_fd, data):
         except FileNotFoundError:pass
 
 
+def _post_quarantined_desired(request, state):
+    """The installed product client owns strict-PQ transport and enrollment.
+
+    No curl, raw HTTP, Ed25519 legacy fallback, insecure TLS or alternate host
+    is reachable from this operation.
+    """
+    with tempfile.TemporaryDirectory(prefix="xmesh-quarantine-",dir=state) as root:
+        root=Path(root)
+        body,reply,status=(root/n for n in ("request.json","response.json","status.txt"))
+        body.write_bytes(wal_transport.observed.canonical(request))
+        subprocess.run([PRODUCT,"request","--path",PATH,
+            "--body-file",str(body),"--output-file",str(reply),
+            "--status-file",str(status)],timeout=30,check=True)
+        if status.read_text(encoding="ascii").strip()!="200":
+            raise ValueError("Nexus did not accept strict quarantined desired policy")
+        with reply.open("rb") as stream:
+            return stream.read(MAX_REPLY+1)
+
+
 def request_quarantine(panel,node_id,state):
     """Separate opt-in root-Agent operation. Never launches or activates Xray."""
     if not isinstance(panel,str) or not panel.startswith("https://") or node_id<=0:
@@ -202,16 +221,7 @@ def request_quarantine(panel,node_id,state):
             "quotaGenesisRuntimeId":payload["candidateRuntimeId"],
             "quotaGenesisChallenge":challenge,
         }
-        with tempfile.TemporaryDirectory(prefix="xmesh-quarantine-",dir=state) as root:
-            root=Path(root)
-            body,reply,status=(root/n for n in ("request.json","response.json","status.txt"))
-            body.write_bytes(wal_transport.observed.canonical(request))
-            subprocess.run([PRODUCT,"request","--path",PATH,
-                "--body-file",str(body),"--output-file",str(reply),
-                "--status-file",str(status)],timeout=30,check=True)
-            if status.read_text(encoding="ascii").strip()!="200":
-                raise ValueError("Nexus did not accept strict quarantined desired policy")
-            raw=reply.read_bytes()
+        raw=_post_quarantined_desired(request,state)
         doc=validate_response(raw,node_id,prepared,pinned)
         after=wal_transport._measure_quarantined_runtime()
         if before!=after:
