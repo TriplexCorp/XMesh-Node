@@ -487,13 +487,19 @@ class SignedPolicyTests(unittest.TestCase):
         # Identical policy re-pulled cannot reauthorize a locally denied user.
         self.run_guard("prepare", NOW + 20000)
         self.assertEqual(self.num_clients(), 0)
-        # A fresh signed panel accounting increase can issue another offline budget.
+        # A fresh signed panel GLOBAL usage increase is not a node-specific
+        # acknowledgement. It can come entirely from another Node, so even a
+        # fresh signed policy cannot refill the exhausted local V1 allowance.
         self.policy["issuedAtMs"] = NOW + 25000
         self.policy["panelUsageRevision"] = 2
         self.policy["users"][0]["panelUsedBytes"] = 150
         self.write_envelope()
         self.run_guard("prepare", NOW + 30000)
-        self.assertEqual(self.num_clients(), 1)
+        self.assertEqual(self.num_clients(), 0)
+        entry = json.loads((self.state / "policy-usage.json").read_text())["users"]["1"]
+        self.assertEqual(entry["anchor"], 0)
+        self.assertEqual(entry["budget"], 150)
+        self.assertEqual(entry["revokedReason"], "quota")
 
     def test_expiration_offline_and_policy_key_pin(self):
         self.run_guard("prepare")
