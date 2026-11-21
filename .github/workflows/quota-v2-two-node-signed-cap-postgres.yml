@@ -34,7 +34,7 @@ jobs:
       QUOTA_TEST_DSN: postgresql://quota_test:quota_test_disposable@127.0.0.1:5432/quota_test
       # Cross-repo reference is deliberately immutable, not a moving main
       # branch. It contains Nexus's production SQL allocator + staging 0138.
-      XMESH_PINNED_NEXUS_SHA: 7a5e9c047f36e4224bf4e3ae8e516c3e92367f89
+      XMESH_PINNED_NEXUS_SHA: 235b42b55f6fff2e6f5137d3fdbb0acea46c6ad6
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: TriplexCorp/XMesh-Nexus
-          ref: 7a5e9c047f36e4224bf4e3ae8e516c3e92367f89
+          ref: 235b42b55f6fff2e6f5137d3fdbb0acea46c6ad6
           path: nexus
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -63,7 +63,48 @@ jobs:
             --features quota-v2-disposable-cap-issuer --bin quota-v2-ci-signed-cap
           test -x "$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap"
           echo "XMESH_CI_NEXUS_SIGNER=$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap" >> "$GITHUB_ENV"
-          echo "XMESH_CI_CAP_POLICY_KEY=$RUNNER_TEMP/quota-v2-ci-policy-key" >> "$GITHUB_ENV"
+          export XMESH_CI_CAP_POLICY_KEY="$RUNNER_TEMP/quota-v2-ci-policy-key"
+          echo "XMESH_CI_CAP_POLICY_KEY=$XMESH_CI_CAP_POLICY_KEY" >> "$GITHUB_ENV"
+          # Pin the verifier out-of-band BEFORE asking Nexus to sign any
+          # reservation. Later grant replies cannot redefine this key.
+          "$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap" --public > "$RUNNER_TEMP/nexus-policy-pinned.hex"
+          chmod 0600 "$RUNNER_TEMP/nexus-policy-pinned.hex"
+          grep -Eq '^[0-9a-f]{64}      - name: Fetch exact reviewed Xray and compile separate race-enabled Go process
+        run: |
+          set -Eeuo pipefail
+          source="$RUNNER_TEMP/xray-source"
+          git init "$source"
+          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+          python3 experiments/xray-dataplane-fence/apply-experiment.py "$source"
+          cd "$source"
+          go test -race -c -o "$RUNNER_TEMP/xmeshdrain.test" ./app/xmeshdrain
+          echo "XMESH_CI_QUOTA_SQL_SIGNER=$GITHUB_WORKSPACE/tests/quota_v2_two_node_pg_signer.py" >> "$GITHUB_ENV"
+          echo "XMESH_CI_QUOTA_RESULTS=$RUNNER_TEMP/quota-v2-signed-cap-results" >> "$GITHUB_ENV"
+          echo "XMESH_CI_QUOTA_PERSIST_DIR=$RUNNER_TEMP/quota-v2-fsynced-wal" >> "$GITHUB_ENV"
+      - name: Run two INDEPENDENT measured Go Xray processes and real SQL serial grants
+        run: |
+          set -Eeuo pipefail
+          mkdir -m 0700 -p "$XMESH_CI_QUOTA_RESULTS" "$XMESH_CI_QUOTA_PERSIST_DIR"
+          XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+          XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+      - name: Restart BOTH Xray test processes and reject reuse of prior signed cap
+        run: |
+          set -Eeuo pipefail
+          XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant$' -test.timeout 2m
+          XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant$' -test.timeout 2m
+      - name: Assert shared database reservation = both distinct Xray WAL byte totals
+        run: |
+          set -Eeuo pipefail
+          python3 tests/quota_v2_two_node_pg_signer.py assert \
+            --reports "$XMESH_CI_QUOTA_RESULTS"
+ "$RUNNER_TEMP/nexus-policy-pinned.hex"
+          echo "XMESH_CI_NEXUS_PINNED_PUBLIC=$RUNNER_TEMP/nexus-policy-pinned.hex" >> "$GITHUB_ENV"
       - name: Fetch exact reviewed Xray and compile separate race-enabled Go process
         run: |
           set -Eeuo pipefail
