@@ -58,18 +58,18 @@ def install_in_xray(path, trusted_pid, runtime, genesis, grant, scope):
             if peer_pid != trusted_pid or peer_uid != uid:
                 raise ValueError("Unix peer is not the measured Xray process")
             check_runtime()
-            http = http.client.HTTPConnection("localhost", timeout=12)
+            client = http.client.HTTPConnection("localhost", timeout=12)
             # Never reconnect by TCP if the checked Unix peer disconnects.
-            http.auto_open = False
-            http.sock = conn
+            client.auto_open = False
+            client.sock = conn
             try:
-                http.request("POST", "/v1/quota-cap", body=body, headers={"Connection": "close"})
-                response = http.getresponse()
+                client.request("POST", "/v1/quota-cap", body=body, headers={"Connection": "close"})
+                response = client.getresponse()
                 raw = response.read(1025)
                 if response.status != 200 or len(raw) > 1024:
                     raise ValueError(f"Xray rejected quota installation (HTTP {response.status})")
             finally:
-                http.close()
+                client.close()
         receipt = wal_transport.observed.strict_json(raw)
         expected = {"runtimeId": runtime, "grantSha256": hashlib.sha256(grant).hexdigest()}
         if receipt != expected:

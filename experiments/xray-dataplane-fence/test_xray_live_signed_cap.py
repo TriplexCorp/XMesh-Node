@@ -7,6 +7,8 @@ The production Nexus/XSP/2 issuance path is outside this test.
 import hashlib
 import json
 import os
+import socket
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -97,7 +99,7 @@ def reject(sock_path, pid, runtime, genesis, grant, scope):
         raise AssertionError("Xray installed an unauthorized or repeated grant")
 
 
-def run(xray, root, target, processes):
+def run(xray, root, target, processes, *, restart):
     node, user = 4719, 8317
     digest = lambda: os.urandom(32).hex()
     activation = digest()
@@ -116,13 +118,17 @@ def run(xray, root, target, processes):
                XMESH_EXPERIMENTAL_SCOPED_INBOUNDS="vless-cdn,vless-main",
                XMESH_EXPERIMENTAL_OBSERVED_DIR=str(root),
                XMESH_EXPERIMENTAL_DRAIN_SOCKET=str(sock_path))
-    for role, launch_env in (("server", env), ("client", os.environ)):
-        with (root / f"{role}.log").open("w") as log:
-            processes.append(subprocess.Popen(
+    def launch(role, launch_env):
+        with (root / f"{role}.log").open("a") as log:
+            proc = subprocess.Popen(
                 [xray, "run", "-config", str(root / f"{role}.json")],
                 env=launch_env, stdout=log, stderr=subprocess.STDOUT,
-            ))
-    server, client = processes
+            )
+            processes.append(proc)
+            return proc
+
+    server = launch("server", env)
+    client = launch("client", os.environ)
     await_socket(sock_path, server)
     runtime = trusted_runtime_identity(server.pid)
 
@@ -169,6 +175,28 @@ def run(xray, root, target, processes):
     install_in_xray(sock_path, server.pid, runtime, genesis, grant, scope)
     assert (root / f"positive-cap-u{user}.json").read_bytes() == grant
 
+    if restart:
+        with open_stream("main") as sock:
+            echo_bytes(sock, 16384)
+            stats = query_direction_counters(xray, api_port, alias["main"])
+            assert stats == dict(uplink=16384, downlink=16384), stats
+            server.kill()
+            assert server.wait(timeout=10) == -9
+            assert not probe_echo(sock, 1), "stopped Xray still served its existing stream"
+        old_wal = {path.name: path.read_bytes() for path in root.glob("meter-*.jsonl")}
+        assert len(old_wal) == 2
+        assert all(json.loads(raw.splitlines()[-1])["nextBytes"] == 16384 for raw in old_wal.values())
+        replacement = launch("server", env)
+        wait_for_peer(sock_path, replacement)
+        new_runtime = trusted_runtime_identity(replacement.pid)
+        assert new_runtime != runtime
+        reject(sock_path, replacement.pid, new_runtime, genesis, grant, scope)
+        with open_stream("main") as sock:
+            assert not probe_echo(sock, 1), "replacement served with unresolved old WAL"
+        assert {path.name: path.read_bytes() for path in root.glob("meter-*.jsonl")} == old_wal
+        print("PASS: SIGKILL after 32768 accounted bytes preserved the WAL and denied reuse by new Xray")
+        return
+
     for name, echoed in (("cdn", MIB), ("main", 3 * MIB)):
         with open_stream(name) as sock:
             for _ in range(echoed // 16384):
@@ -188,25 +216,43 @@ def run(xray, root, target, processes):
     print("PASS: local signed grant enabled live VLESS; 8 MiB bidirectional bytes, including 2 MiB CDN; WAL and StatsService exact")
 
 
-def main():
-    assert os.environ.get("GITHUB_ACTIONS") == "true"
-    assert os.environ.get("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
+def wait_for_peer(path, process):
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline and process.poll() is None:
+        try:
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(1)
+                probe.connect(str(path))
+                raw = probe.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+                if struct.unpack("3i", raw)[0] == process.pid:
+                    return
+        except OSError:
+            pass
+        time.sleep(0.1)
+    raise AssertionError("replacement Xray did not expose its measured control socket")
+
+
+def scenario(restart):
     with tempfile.TemporaryDirectory(prefix="xmesh-cap-") as tmp, EchoServer(("127.0.0.1", 0), EchoHandler) as echo:
         root = Path(tmp)
         threading.Thread(target=echo.serve_forever, daemon=True).start()
         processes = []
         try:
-            run(sys.argv[1], root, echo.server_address[1], processes)
+            run(sys.argv[1], root, echo.server_address[1], processes, restart=restart)
         except BaseException:
             for log in root.glob("*.log"):
                 print(f"{log.name}:\n{log.read_text()[-3000:]}", file=sys.stderr)
             raise
         finally:
             for process in reversed(processes):
-                process.kill()
+                if process.poll() is None:
+                    process.kill()
                 process.wait(timeout=10)
             echo.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    assert os.environ.get("GITHUB_ACTIONS") == "true"
+    assert os.environ.get("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
+    scenario(restart=False)
+    scenario(restart=True)
