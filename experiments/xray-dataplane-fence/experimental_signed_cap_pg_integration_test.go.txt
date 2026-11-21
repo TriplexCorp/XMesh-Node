@@ -96,8 +96,6 @@ func TestV2SignedRealPostgreSQLTwoNodeProcess(t *testing.T) {
     if mainBytes>0 && !capAttempt(t,main,capMain,"uplink",mainBytes){
         t.Fatal("validated remaining MAIN spending failed")
     }
-    for _,write:=range []struct{counter interface{Value()int64};email,dir string}{
-    }{} { _=write }
     // All attempted extra bytes are denied *before* WAL mutation.
     if capAttempt(t,main,capMain,"uplink",1) ||
         capAttempt(t,cdn,capCDN,"downlink",1) {
