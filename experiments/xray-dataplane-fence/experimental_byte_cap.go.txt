@@ -7,12 +7,13 @@ package xmeshdrain
 import (
     "errors"
     "fmt"
-    "math"
 )
 
 // Every field and counter is protected by gate.Mutex. Shared user counters
 // cover both directions and *all* inbound aliases; CDN aliases additionally
 // consume the CDN bucket. No counter can refill a budget by switching tags.
+const maxSignedByteCeiling = uint64(1<<63-1)
+
 type experimentalByteCap struct {
     runtimeID string
     grantCeiling uint64
@@ -50,9 +51,9 @@ func checkExperimentalByteCapLocked(email string, delta int64) error {
         return errors.New("experimental quota: unassigned alias or changed Xray process")
     }
     amount := uint64(delta)
-    if amount > math.MaxInt64 || cap.chargedAll > math.MaxInt64 ||
-        cap.grantCeiling > math.MaxInt64 || cap.nodeCeiling > math.MaxInt64 ||
-        cap.cdnCeiling > math.MaxInt64 {
+    if amount > maxSignedByteCeiling || cap.chargedAll > maxSignedByteCeiling ||
+        cap.grantCeiling > maxSignedByteCeiling || cap.nodeCeiling > maxSignedByteCeiling ||
+        cap.cdnCeiling > maxSignedByteCeiling {
         return errors.New("experimental quota: invalid signed-byte range")
     }
     // Subtraction form prevents uint64 overflow and refuses exact-ceiling
@@ -67,8 +68,8 @@ func checkExperimentalByteCapLocked(email string, delta int64) error {
         amount > cap.cdnCeiling-cap.chargedCDN) {
         return errors.New("experimental quota: CDN ceiling exhausted")
     }
-    if cap.chargedAll > math.MaxInt64-amount ||
-        (cdn && cap.chargedCDN > math.MaxInt64-amount) {
+    if cap.chargedAll > maxSignedByteCeiling-amount ||
+        (cdn && cap.chargedCDN > maxSignedByteCeiling-amount) {
         return errors.New("experimental quota: cumulative byte overflow")
     }
     return nil
