@@ -2,21 +2,17 @@
 """DISPOSABLE only: real Nexus quota SQL -> Ed25519 -> real Xray Go unit binary.
 
 This is NOT the actual XSP/2 endpoint, Node binary identity service or
-production Nexus private signing key. The signer and independent-genesis
+production Nexus private signing key. The CI key and independent-genesis
 context are test substitutes. They deliberately live in an isolated CI job
 and never install to production. The actual PostgreSQL allocator, immutable
 preflight, canonical signature and instrumented Xray WAL are exercised.
 """
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
 import subprocess
-import sys
-import tempfile
-import time
 import uuid
 
 import psycopg
@@ -28,7 +24,6 @@ METER={47:"22222222-2222-4222-8222-222222222247",
 RID={47:"33333333-3333-4333-8333-333333333347",
      48:"33333333-3333-4333-8333-333333333348"}
 USER=101
-ZERO="0"*64
 
 def require_disposable():
     if (os.getenv("XMESH_AUDIT_DISPOSABLE")!="1" or
@@ -37,28 +32,6 @@ def require_disposable():
             "quota_test" not in os.environ.get("QUOTA_TEST_DSN","")):
         raise SystemExit("only disposable GitHub-hosted PostgreSQL test is permitted")
     return os.environ["QUOTA_TEST_DSN"]
-
-def sign(payload):
-    canonical=json.dumps(payload,sort_keys=True,separators=(",",":"),
-                         ensure_ascii=False,allow_nan=False).encode()
-    with tempfile.TemporaryDirectory(prefix="xmesh-sql-signer-") as temp:
-        root=Path(temp)
-        key=root/"test-only-ed25519.pem"
-        message=root/"message"
-        sig=root/"signature"
-        subprocess.run(["openssl","genpkey","-algorithm","Ed25519",
-                        "-out",str(key)],check=True,capture_output=True)
-        message.write_bytes(DOMAIN+canonical)
-        subprocess.run(["openssl","pkeyutl","-sign","-rawin","-inkey",str(key),
-                        "-in",str(message),"-out",str(sig)],check=True,capture_output=True)
-        pub=subprocess.check_output(
-            ["openssl","pkey","-in",str(key),"-pubout","-outform","DER"])
-        assert len(pub)==44 and len(sig.read_bytes())==64
-        envelope={"algorithm":"Ed25519","payload":payload,
-                  "signature":sig.read_bytes().hex()}
-        signed=json.dumps(envelope,sort_keys=True,separators=(",",":"),
-                          ensure_ascii=False,allow_nan=False)+"\n"
-        return pub[-32:].hex(),signed
 
 def init_db(dsn,nexus):
     migrations=[
@@ -79,6 +52,11 @@ def init_db(dsn,nexus):
         conn.execute(
             "INSERT INTO quota_v2_accounts(user_id,epoch,limit_bytes) "
             "VALUES(%s,%s,1000)",(USER,EPOCH))
+        for node in (47,48):
+            activation=("c" if node==47 else "d")*64
+            conn.execute(
+                "INSERT INTO node_xsp_product_nodes(node_id,state,receipt_sha256) "
+                "VALUES(%s,'active',decode(%s,'hex'))",(node,activation))
     print("PASS: real Nexus reservation and runtime-preflight SQL loaded",flush=True)
 
 def issue(dsn,node,runtime,policy_sha,xray_pid):
@@ -126,35 +104,23 @@ def issue(dsn,node,runtime,policy_sha,xray_pid):
                        (node,USER)).fetchone()[0]
         if c!=1:
             raise ValueError("signed grant snapshot was not recorded exactly once")
-        until=conn.execute(
-            "SELECT (EXTRACT(EPOCH FROM valid_until)*1000)::bigint "
-            "FROM quota_v2_reservations WHERE user_id=%s AND node_id=%s",
-            (USER,node)).fetchone()[0]
-        # COMMIT, including fsync, BEFORE issuing a signed grant.
-    now=int(time.time()*1000)
-    policy={
-        "schemaVersion":1,"kind":"xmesh.quota-v2.xray-cap-admission",
-        "nodeId":node,"userId":USER,"activationReceiptSha256":activation,
-        "runtimeId":runtime,"policySha256":policy_sha,
-        "accountEpoch":EPOCH,"meterEpoch":METER[node],
-        "reservationId":RID[node],"reservationRevision":revision,
-        "nonce":nonce,"inventoryTailDigest":ZERO,
-        "witnessedWalBytes":0,"witnessedCdnBytes":0,
-        "sharedCeilingBytes":ceiling,"nodeCeilingBytes":ceiling,
-        "cdnCeilingBytes":min(150,ceiling),
-        "aliasScopes":[
-            {"email":"xmesh-u101--vless-cdn","class":"cdn"},
-            {"email":"xmesh-u101--vless-main","class":"main"}],
-        "issuedAtMs":now-1000,"installBeforeMs":now+60000,
-        "validUntilMs":min(until,now+3600000),
-        "canSpend":True,"canStart":False,"canResume":False,
-        "finalMeterVerified":False,"refundableBytes":0,
-    }
-    pub,envelope=sign(policy)
-    print(json.dumps({
-        "nodeId":node,"ceiling":ceiling,"signedEnvelope":envelope,
-        "publicKeyHex":pub,"phase":"sql-committed-signed-disposable",
-    },separators=(",",":")),flush=True)
+        # COMMIT synchronously BEFORE the actual Nexus signer reads the
+        # immutable preflight in a NEW database transaction.
+    binary=os.environ.get("XMESH_CI_NEXUS_SIGNER","")
+    if not binary or not Path(binary).is_file():
+        raise ValueError("actual Nexus PolicySigner binary missing from disposable CI")
+    result=subprocess.run(
+        [binary,str(node),nonce,str(xray_pid),policy_sha],
+        capture_output=True,text=True,check=True,timeout=15)
+    signed=json.loads(result.stdout)
+    if (signed.get("nodeId")!=node or signed.get("ceiling")!=ceiling or
+            signed.get("phase")!="sql-committed-nexus-policy-signer-disposable" or
+            not isinstance(signed.get("publicKeyHex"),str) or
+            len(signed["publicKeyHex"])!=64 or
+            not isinstance(signed.get("signedEnvelope"),str) or
+            not signed["signedEnvelope"].endswith("\\n")):
+        raise ValueError("real Nexus Rust policy signer returned invalid scope")
+    print(json.dumps(signed,separators=(",",":")),flush=True)
 
 def assert_complete(dsn,root):
     reports=[]
