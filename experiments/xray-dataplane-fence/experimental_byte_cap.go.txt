@@ -8,12 +8,17 @@ import (
     "errors"
     "fmt"
     "path/filepath"
+    "time"
 )
 
 // Every field and counter is protected by gate.Mutex. Shared user counters
 // cover both directions and *all* inbound aliases; CDN aliases additionally
 // consume the CDN bucket. No counter can refill a budget by switching tags.
 const maxSignedByteCeiling = uint64(1<<63-1)
+
+// Override only in sequential CI unit tests. Production time and receipt
+// attestation are intentionally NOT wired to this experimental cap.
+var experimentalCapClockMs = func() int64 { return time.Now().UnixMilli() }
 
 type experimentalByteCap struct {
     runtimeID string
@@ -22,6 +27,9 @@ type experimentalByteCap struct {
     cdnCeiling uint64
     chargedAll uint64
     chargedCDN uint64
+    validUntilMs int64
+    lastSeenMs int64
+    expired bool
     aliases map[string]bool // exact alias -> CDN marker
 }
 
@@ -51,6 +59,18 @@ func checkExperimentalByteCapLocked(email string, delta int64) error {
     if !allowedAlias || cap.runtimeID != gate.runtimeID {
         return errors.New("experimental quota: unassigned alias or changed Xray process")
     }
+    // A previously valid signed reservation is never perpetual authority.
+    // Once expired or once the local clock moves backward, latch denial even
+    // if a future clock correction would make the old window appear valid.
+    // The actual production protocol must additionally verify signed expiry
+    // and off-host time continuity at (re)admission.
+    now:=experimentalCapClockMs()
+    if cap.expired || now<=0 || cap.validUntilMs<=0 ||
+        now>=cap.validUntilMs || (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
+        cap.expired=true
+        return errors.New("experimental quota: expired or nonmonotonic reservation")
+    }
+    cap.lastSeenMs=now
     amount := uint64(delta)
     if amount > maxSignedByteCeiling || cap.chargedAll > maxSignedByteCeiling ||
         cap.grantCeiling > maxSignedByteCeiling || cap.nodeCeiling > maxSignedByteCeiling ||
@@ -119,7 +139,7 @@ func diagnosticByteCapLocked(email string) (uint64,uint64,error) {
 func restoreExperimentalCapFromWitness(
     billingUser, runtimeID, expectedInventoryHead string,
     aliases map[string]bool, grant, node, cdn uint64,
-    current func(string,string)(uint64,error),
+    validUntilMs int64, current func(string,string)(uint64,error),
 ) error {
     gate.Lock()
     defer gate.Unlock()
@@ -128,8 +148,10 @@ func restoreExperimentalCapFromWitness(
         current==nil || len(aliases)==0 || len(aliases)>16 {
         return errors.New("experimental quota recovery: untrusted runtime or missing required evidence")
     }
+    now:=experimentalCapClockMs()
     if len(expectedInventoryHead)!=64 || grant>maxSignedByteCeiling ||
-        node>maxSignedByteCeiling || cdn>maxSignedByteCeiling {
+        node>maxSignedByteCeiling || cdn>maxSignedByteCeiling ||
+        now<=0 || validUntilMs<=now {
         return errors.New("experimental quota recovery: invalid witness or caps")
     }
     for _,c:=range expectedInventoryHead {
@@ -210,7 +232,8 @@ func restoreExperimentalCapFromWitness(
     }
     experimentalByteCaps.users[billingUser]=&experimentalByteCap{
         runtimeID:runtimeID,grantCeiling:grant,nodeCeiling:node,
-        cdnCeiling:cdn,chargedAll:all,chargedCDN:cdnBytes,aliases:cloned,
+        cdnCeiling:cdn,chargedAll:all,chargedCDN:cdnBytes,
+        validUntilMs:validUntilMs,lastSeenMs:now,aliases:cloned,
     }
     return nil
 }
