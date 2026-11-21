@@ -391,3 +391,48 @@ func TestV2ExperimentalQuotaRecoveryRefusesOldProcessEvenWithIntactInventory(t *
         t.Fatal("old process precharge was silently erased on new PID")
     }
 }
+
+func TestV2ExperimentalQuotaUntrustedRawCounterCannotBypassFsyncedCap(t *testing.T) {
+    for _,kind:=range []string{"direct-add","direct-set","different-inbound"}{
+        t.Run(kind,func(t *testing.T){
+            dir,manager:=setupUnfencedMeter(t)
+            installTestQuota(t,50,50,10,map[string]bool{
+                capMain:false,capCDN:true,
+            })
+            main:=newCapCounter(t,manager,capMain,"uplink")
+            target:=main
+            if kind=="different-inbound"{
+                target=newCapCounter(t,manager,capCDN,"uplink")
+            }
+            // Even if a legitimate writer is currently in flight for
+            // ANOTHER alias, a StatsService Add without the trusted origin
+            // bit must be fenced before the raw count can change.
+            if err:=BeginMeterWrite(capMain,"uplink");err!=nil{t.Fatal(err)}
+            var panicked interface{}
+            func(){
+                defer func(){panicked=recover()}()
+                if kind=="direct-set"{target.Set(6)}else{target.Add(6)}
+            }()
+            EndMeterWrite(capMain,"uplink")
+            if !strings.Contains(fmt.Sprint(panicked),
+                    "experimental quota: untrusted or revoked") {
+                t.Fatalf("raw metering bypass was not denied: %v",panicked)
+            }
+            if target.Value()!=0 || main.Value()!=0 {
+                t.Fatal("untrusted raw mutation changed billable StatsService bytes")
+            }
+            all,cdn:=capValues(t)
+            if all!=0 || cdn!=0 {t.Fatal("untrusted raw Add spent or refilled cap")}
+            marker:=durableCounterTaintPath(dir,canonicalMeterUser(capMain))
+            if _,err:=readDurableCounterTaint(marker);err!=nil {
+                t.Fatalf("raw bypass failed to persist forensic taint: %v",err)
+            }
+            // Neither a valid new metered Add nor an identical policy
+            // re-install can clear this sticky, root-owned continuity loss.
+            if capAttempt(t,main,capMain,"uplink",1) {
+                t.Fatal("tainted Xray successfully continued quota spending")
+            }
+            if main.Value()!=0 {t.Fatal("tainted meter still advanced")}
+        })
+    }
+}
