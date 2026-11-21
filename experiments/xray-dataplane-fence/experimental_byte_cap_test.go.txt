@@ -7,12 +7,15 @@ import (
     "strings"
     "sync"
     "testing"
+    "sync/atomic"
 
     "github.com/xtls/xray-core/features/stats"
 )
 
 const capMain = "xmesh-u101--vless-main"
 const capCDN = "xmesh-u101--vless-cdn"
+
+func futureCapExpiryMs() int64 { return experimentalCapClockMs()+3600_000 }
 
 func installTestQuota(t *testing.T, grant, node, cdn uint64, aliases map[string]bool) {
     t.Helper()
@@ -26,7 +29,7 @@ func installTestQuota(t *testing.T, grant, node, cdn uint64, aliases map[string]
         "xmesh-u101": {
             runtimeID: gate.runtimeID, grantCeiling: grant,
             nodeCeiling: node, cdnCeiling: cdn,
-            aliases: aliases,
+            aliases: aliases, validUntilMs: futureCapExpiryMs(),
         },
     }
     gate.Unlock()
@@ -274,7 +277,7 @@ func TestV2ExperimentalQuotaWitnessedRecoveryOfMainAndCDNCaps(t *testing.T) {
     gate.Unlock()
     forgetTestCapButPreserveSameRunningXray(t)
     if err:=restoreExperimentalCapFromWitness("xmesh-u101",id,head,
-         aliases,65,55,15,liveMeterAt(t,manager));err!=nil{
+         aliases,65,55,15,futureCapExpiryMs(),liveMeterAt(t,manager));err!=nil{
         t.Fatalf("same-runtime full WAL + external witness was rejected: %v",err)
     }
     all,cdn:=capValues(t)
@@ -298,7 +301,7 @@ func TestV2ExperimentalQuotaWitnessedRecoveryOfMainAndCDNCaps(t *testing.T) {
     // A second install, even with a larger entitlement, must not replace a
     // live cap and reset in-memory committed spend.
     if err:=restoreExperimentalCapFromWitness("xmesh-u101",id,
-        witnessHead(t,dir),aliases,100,100,100,liveMeterAt(t,manager));err==nil {
+        witnessHead(t,dir),aliases,100,100,100,futureCapExpiryMs(),liveMeterAt(t,manager));err==nil {
         t.Fatal("duplicate cap install was allowed to enlarge grant")
     }
 }
@@ -360,7 +363,7 @@ func TestV2ExperimentalQuotaRecoveryRejectsUnprovedHistoryAndLiveMismatch(t *tes
                 if err:=os.WriteFile(path,raw[:len(raw)-1],0600);err!=nil{t.Fatal(err)}
             }
             if err:=restoreExperimentalCapFromWitness(
-                 user,id,head,aliases,grant,node,cdn,read);err==nil{
+                 user,id,head,aliases,grant,node,cdn,futureCapExpiryMs(),read);err==nil{
                 t.Fatalf("%s: unproved or unsafe WAL was accepted",kind)
             }
             gate.Lock()
@@ -387,7 +390,7 @@ func TestV2ExperimentalQuotaRecoveryRefusesOldProcessEvenWithIntactInventory(t *
     experimentalByteCaps.users=nil
     gate.Unlock()
     if err:=restoreExperimentalCapFromWitness("xmesh-u101",newRuntime,
-        oldHead,aliases,60,60,0,liveMeterAt(t,manager));err==nil {
+        oldHead,aliases,60,60,0,futureCapExpiryMs(),liveMeterAt(t,manager));err==nil {
         t.Fatal("old process precharge was silently erased on new PID")
     }
 }
