@@ -127,6 +127,7 @@ def _locked_private_state(directory):
         or info.st_mode & 0o077):
         raise ValueError("quarantine state directory must be root-owned 0700")
     fd = os.open(path, os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    lock = None
     try:
         # Use the SAME root-owned lock as xmesh-xray-sync.sh. A normal
         # reconciler must never change the measured Xray during staging.
@@ -136,9 +137,13 @@ def _locked_private_state(directory):
         info = os.fstat(lock)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
             raise ValueError("unsafe quarantine lock")
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        return fd,lock
+        # A wedged normal reconcilier cannot silently stall the trusted
+        # process measurement or outlive the short 120s signed Genesis.
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd, lock
     except Exception:
+        if lock is not None:
+            os.close(lock)
         os.close(fd)
         raise
 
