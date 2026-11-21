@@ -1,0 +1,184 @@
+package xmeshdrain
+
+import (
+    "errors"
+    "os"
+    "sync"
+    "testing"
+
+    "github.com/xtls/xray-core/features/stats"
+)
+
+const capMain = "xmesh-u101--vless-main"
+const capCDN = "xmesh-u101--vless-cdn"
+
+func installTestQuota(t *testing.T, grant, node, cdn uint64, aliases map[string]bool) {
+    t.Helper()
+    gate.Lock()
+    if gate.runtimeID == "" {
+        gate.Unlock()
+        t.Fatal("missing measured Xray runtime")
+    }
+    experimentalByteCaps.strict = true
+    experimentalByteCaps.users = map[string]*experimentalByteCap{
+        "xmesh-u101": {
+            runtimeID: gate.runtimeID, grantCeiling: grant,
+            nodeCeiling: node, cdnCeiling: cdn,
+            aliases: aliases,
+        },
+    }
+    gate.Unlock()
+    t.Cleanup(func(){
+        gate.Lock()
+        experimentalByteCaps.strict = false
+        experimentalByteCaps.users = nil
+        gate.Unlock()
+    })
+}
+
+func newCapCounter(t *testing.T,manager interface {
+    RegisterCounter(string) (stats.Counter,error)
+},email,direction string) stats.Counter {
+    t.Helper()
+    counter,err:=manager.RegisterCounter(rawMeterName(email,direction))
+    if err!=nil{t.Fatal(err)}
+    return counter
+}
+
+func capAttempt(t *testing.T,c stats.Counter,email,direction string,n int64) (passed bool) {
+    t.Helper()
+    if err:=BeginMeterWrite(email,direction);err!=nil {t.Fatal(err)}
+    defer EndMeterWrite(email,direction)
+    defer func(){ if recovered:=recover();recovered!=nil {passed=false} }()
+    c.(interface{ExperimentalAddMetered(int64)int64}).ExperimentalAddMetered(n)
+    return true
+}
+
+func capValues(t *testing.T) (uint64,uint64) {
+    t.Helper()
+    gate.Lock()
+    defer gate.Unlock()
+    all,cdn,err:=diagnosticByteCapLocked(capMain)
+    if err!=nil {t.Fatal(err)}
+    return all,cdn
+}
+
+func TestV2ExperimentalQuotaUserAndNodeAndCDNBeforeDurableWAL(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,100,90,20,map[string]bool{capMain:false,capCDN:true})
+    up:=newCapCounter(t,manager,capMain,"uplink")
+    down:=newCapCounter(t,manager,capMain,"downlink")
+    cdnUp:=newCapCounter(t,manager,capCDN,"uplink")
+    cdnDown:=newCapCounter(t,manager,capCDN,"downlink")
+    for _,write:=range []struct{c stats.Counter;email,dir string;bytes int64}{
+        {up,capMain,"uplink",30},
+        {down,capMain,"downlink",30},
+        {cdnUp,capCDN,"uplink",10},
+        {cdnDown,capCDN,"downlink",10},
+    }{
+        if !capAttempt(t,write.c,write.email,write.dir,write.bytes) {
+            t.Fatalf("valid metered write rejected for %s",write.email)
+        }
+    }
+    all,cdn:=capValues(t)
+    if all!=80 || cdn!=20 {t.Fatalf("wrong combined budgets all=%d CDN=%d",all,cdn)}
+    if capAttempt(t,cdnUp,capCDN,"uplink",1) {
+        t.Fatal("CDN exceeded its independent 20-byte limit")
+    }
+    if cdnUp.Value()!=10 {t.Fatal("denied CDN delta entered StatsService")}
+    if !capAttempt(t,down,capMain,"downlink",10) {
+        t.Fatal("remaining 10 bytes of Node grant not usable on main inbound")
+    }
+    if capAttempt(t,up,capMain,"uplink",1) {
+        t.Fatal("shared Node ceiling exceeded through different alias/direction")
+    }
+    all,cdn=capValues(t)
+    if all!=90 || cdn!=20 || up.Value()!=30 || down.Value()!=40 {
+        t.Fatalf("quota cap leaked bytes: %d %d %d %d",all,cdn,up.Value(),down.Value())
+    }
+    for _,pair:=range []struct{email,dir string;c stats.Counter;value int64}{
+        {capMain,"uplink",up,30},
+        {capMain,"downlink",down,40},
+        {capCDN,"uplink",cdnUp,10},
+        {capCDN,"downlink",cdnDown,10},
+    }{
+        tail,err:=readMeterTail(meterTestFile(t,dir,pair.email,pair.dir))
+        if err!=nil || tail.last.NextBytes!=uint64(pair.value) {
+            t.Fatalf("durable WAL diverged from exact quota precharge %s/%s: %+v %v",
+                pair.email,pair.dir,tail.last,err)
+        }
+        if pair.c.Value()!=pair.value {t.Fatal("raw counter differs from durable charged bytes")}
+    }
+}
+
+func TestV2ExperimentalQuotaDoesNotWriteWALAboveGrant(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,5,7,2,map[string]bool{capMain:false,capCDN:true})
+    main:=newCapCounter(t,manager,capMain,"uplink")
+    if capAttempt(t,main,capMain,"uplink",6) {
+        t.Fatal("oversized initial write passed the policy ceiling")
+    }
+    if main.Value()!=0 {t.Fatal("rejected bytes changed the counter")}
+    path:=meterTestFile(t,dir,capMain,"uplink")
+    if _,err:=os.Stat(path);!errors.Is(err,os.ErrNotExist) {
+        t.Fatal("rejected write created a byte-intent WAL")
+    }
+    if !capAttempt(t,main,capMain,"uplink",5) {
+        t.Fatal("exactly available budget should precharge and then count")
+    }
+    if capAttempt(t,main,capMain,"uplink",1) {
+        t.Fatal("exhausted grant was replenished through another write")
+    }
+    all,cdn:=capValues(t)
+    if all!=5 || cdn!=0 {t.Fatal("wrong cap accounting")}
+}
+
+func TestV2ExperimentalQuotaRejectsUnknownAliasAndReplacementProcess(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,50,50,10,map[string]bool{capMain:false,capCDN:true})
+    forged:="xmesh-u101--unlisted"
+    outsider:=newCapCounter(t,manager,forged,"uplink")
+    if capAttempt(t,outsider,forged,"uplink",1) {
+        t.Fatal("unlisted alias bypassed signed inbound scope")
+    }
+    if outsider.Value()!=0 {t.Fatal("unlisted alias changed Xray byte counter")}
+    original:=newCapCounter(t,manager,capMain,"uplink")
+    gate.Lock()
+    gate.runtimeID="f"+gate.runtimeID[1:]
+    gate.Unlock()
+    if capAttempt(t,original,capMain,"uplink",1) {
+        t.Fatal("old runtime quota reused for a replaced Xray process")
+    }
+    if original.Value()!=0 {t.Fatal("new process spent old runtime quota")}
+    _ = dir
+}
+
+func TestV2ExperimentalQuotaConcurrentWritersUseOneAtomicBudget(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,60,60,0,map[string]bool{capMain:false})
+    counter:=newCapCounter(t,manager,capMain,"downlink")
+    var wg sync.WaitGroup
+    result:=make(chan bool,80)
+    for i:=0;i<8;i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for j:=0;j<10;j++{
+                result<-capAttempt(t,counter,capMain,"downlink",1)
+            }
+        }()
+    }
+    wg.Wait()
+    close(result)
+    accepted:=0
+    for ok:=range result {if ok {accepted++}}
+    if accepted!=60 || counter.Value()!=60 {
+        t.Fatalf("concurrent signed budget overspent/undercounted: %d, counter=%d",accepted,counter.Value())
+    }
+    all,cdn:=capValues(t)
+    if all!=60 || cdn!=0 {t.Fatal("wrong concurrent cap total")}
+    tail,err:=readMeterTail(meterTestFile(t,dir,capMain,"downlink"))
+    if err!=nil || tail.last.NextBytes!=60 || tail.last.Sequence!=60 {
+        t.Fatalf("concurrent quota WAL sequence gap: %+v, %v",tail.last,err)
+    }
+}
