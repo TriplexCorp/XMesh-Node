@@ -34,6 +34,7 @@ jobs:
       - run: python3 tests/test_hot_user_reconcile.py
       - run: python3 tests/test_user_meter.py
       - run: python3 tests/test_quota_v2_revocation_marker.py
+      - run: python3 tests/test_quota_v2_quarantine_response.py
       - run: python3 tests/test_quota_v2_reservation.py
       - run: python3 tests/test_quota_v2_verify_nexus_wal_anchor.py
       - run: python3 tests/test_quota_v2_measured_genesis.py
