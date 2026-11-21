@@ -14,7 +14,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
-      XMESH_EXPERIMENTAL_DRAIN: '1'
+      # Go TestMain enables only the in-memory gate; no live Unix control listener.
+      XMESH_EXPERIMENTAL_DRAIN: '0'
       GOTOOLCHAIN: go1.27.4
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -29,7 +30,7 @@ jobs:
           set -euo pipefail
           python3 -m py_compile experiments/xray-dataplane-fence/apply-experiment.py
           test -n "${GITHUB_ACTIONS:-}"
-          test "$XMESH_EXPERIMENTAL_DRAIN" = '1'
+          test "$XMESH_EXPERIMENTAL_DRAIN" = '0'
       - name: Fetch exact reviewed upstream Xray and inject all experiment modules
         run: |
           set -Eeuo pipefail
