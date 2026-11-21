@@ -25,6 +25,8 @@ jobs:
         run: python3 deploy/test-xmesh-policy-guard.py
       - name: Two independent Node ledgers and cross-Node partial ACK
         run: python3 tests/test_two_node_quota_model.py
+      - name: Two real signed-Ed25519 Node guard subprocesses
+        run: python3 tests/test_two_node_signed_policy_process.py
       - name: Ensure V2 reservation contract remains unchanged
         run: python3 tests/test_quota_v2_reservation.py
       - name: Offline safety and revocation negative regressions
