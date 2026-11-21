@@ -120,6 +120,22 @@ class MeasuredGenesisTests(unittest.TestCase):
                     "https://disposable.example", self.node, self.challenge)
             issued.assert_called_once()
 
+    def test_network_attached_during_external_preparation_is_rejected(self):
+        first = copy.deepcopy(self.runtime)
+        connected = copy.deepcopy(self.runtime)
+        connected["NetworkSettings"]["Networks"]["bridge"] = {"IPAddress": "172.18.0.2"}
+        with mock.patch.object(wal_transport.os, "geteuid", return_value=0), \
+             mock.patch.object(wal_transport, "_bound_journal",
+                               side_effect=[(first, "/unused"), (connected, "/unused")]), \
+             mock.patch.object(runtime_identity, "inspect_managed_xray",
+                               return_value=(self.cid, self.started, self.child.pid)), \
+             mock.patch.object(wal_transport, "prepare_genesis",
+                               return_value={"payload": {"canStart": False}}) as signed:
+            with self.assertRaisesRegex(ValueError, "network-isolated"):
+                wal_transport.prepare_measured_genesis(
+                    "https://disposable.example", self.node, self.challenge)
+            signed.assert_called_once()
+
     def test_failure_to_obtain_pidfd_prevents_any_genesis_request(self):
         self.overrides()
         with mock.patch.object(runtime_identity.os, "pidfd_open",
