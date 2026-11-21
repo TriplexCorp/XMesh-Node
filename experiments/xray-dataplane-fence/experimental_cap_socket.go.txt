@@ -229,11 +229,14 @@ func (c *localCapControl) admit(req localCapRequest) (string, error) {
 		ReservationRevision: scope.Revision, InventoryTailDigest: zeroCapInventory,
 		Aliases: scope.Aliases, FirstGenesisIndependentlyProved: true, Current: current,
 		BeforeInstall: func() error {
+			if err := verifyObservedCounterRegistry(manager, "xmesh-u"+strconv.FormatInt(scope.UserID, 10), aliases); err != nil {
+				return err
+			}
 			now := experimentalCapClockMs()
 			if now < genesisVerifiedAt || !c.verifyGenesis(req.Genesis, runtime, now) {
 				return errors.New("first-genesis proof expired during signed-cap installation")
 			}
-			return verifyObservedCounterRegistry(manager, "xmesh-u"+strconv.FormatInt(scope.UserID, 10), aliases)
+			return nil
 		},
 	}
 	if err := installSignedFirstGenesisCap(req.Grant, c.signer, expected); err != nil {

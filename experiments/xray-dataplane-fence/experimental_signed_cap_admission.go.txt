@@ -303,14 +303,14 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     err=dir.Sync()
     _=dir.Close()
     if err!=nil{return fmt.Errorf("signed Xray cap: grant directory fsync failed: %w",err)}
+    if expected.BeforeInstall!=nil {
+        if err:=expected.BeforeInstall();err!=nil{return err}
+    }
     installedAt:=experimentalCapClockMs()
     if installedAt<lockedAt || installedAt>=payload.InstallBeforeMs {
         // Keep the durable attempt. A later retry must not reopen the grant
         // after this process failed to prove timely installation.
         return errors.New("signed Xray cap: installation deadline or clock changed before publication")
-    }
-    if expected.BeforeInstall!=nil {
-        if err:=expected.BeforeInstall();err!=nil{return err}
     }
     if experimentalByteCaps.users==nil {
         experimentalByteCaps.users=map[string]*experimentalByteCap{}

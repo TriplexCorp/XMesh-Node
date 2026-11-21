@@ -51,7 +51,7 @@ def configs(root, destination, user):
     client_id = str(uuid.uuid4())
     server = {
         "log": {"loglevel": "warning"},
-        "api": {"tag": "stats-api", "services": ["StatsService"]},
+        "api": {"tag": "xmesh_stats_api", "services": ["StatsService"]},
         "stats": {},
         "policy": {"levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}}},
         "inbounds": [
@@ -60,12 +60,12 @@ def configs(root, destination, user):
                  "clients": [{"id": client_id, "email": alias[name], "level": 0}]}}
             for name in names
         ] + [{"tag": "xmesh_stats_in", "listen": "127.0.0.1", "port": api_port,
-              "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1", "port": api_port}}],
+              "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1", "port": api_port, "network": "tcp"}}],
         "outbounds": [{"tag": "direct", "protocol": "freedom", "settings": {"finalRules": [
             {"action": "allow", "network": "tcp", "ip": ["127.0.0.1/32"], "port": str(destination)},
         ]}}],
         "routing": {"rules": [{"type": "field", "inboundTag": ["xmesh_stats_in"],
-                              "outboundTag": "stats-api"}]},
+                              "outboundTag": "xmesh_stats_api"}]},
     }
     client = {
         "log": {"loglevel": "warning"},
@@ -239,7 +239,9 @@ def scenario(restart):
         processes = []
         try:
             run(sys.argv[1], root, echo.server_address[1], processes, restart=restart)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, subprocess.CalledProcessError):
+                print(f"command stderr: {exc.stderr}", file=sys.stderr)
             for log in root.glob("*.log"):
                 print(f"{log.name}:\n{log.read_text()[-3000:]}", file=sys.stderr)
             raise
