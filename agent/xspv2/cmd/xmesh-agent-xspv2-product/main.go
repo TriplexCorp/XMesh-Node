@@ -999,6 +999,24 @@ func verifyActive(panel string, nodeID int64) error {
 	return nil
 }
 
+// Owner-enrolled product client signs only explicitly registered tunneled
+// paths, never an arbitrary API endpoint or caller-supplied redirect.
+func allowedProductTunnelPath(path string) bool {
+	switch path {
+	case "/api/v1/metrics/ingest",
+		"/api/v1/node/heartbeat",
+		"/api/v1/node/restart/poll",
+		"/api/v1/node/restart/ack",
+		"/api/v1/node/restart/progress",
+		"/api/v1/node/desired-config",
+		"/api/v1/node/quota-v2/wal",
+		"/api/v1/node/quota-v2/policy-pin":
+		return true
+	default:
+		return false
+	}
+}
+
 func request(path, bodyPath, outputPath, statusPath string) error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -1007,17 +1025,8 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 	if err := verifyActive(cfg.PanelURL, cfg.NodeID); err != nil {
 		return err
 	}
-	allowed := map[string]bool{
-		"/api/v1/metrics/ingest":           true,
-		"/api/v1/node/heartbeat":           true,
-		"/api/v1/node/restart/poll":        true,
-		"/api/v1/node/restart/ack":         true,
-		"/api/v1/node/restart/progress":    true,
-		"/api/v1/node/desired-config":      true,
-		"/api/v1/node/quota-v2/wal":        true,
-		"/api/v1/node/quota-v2/policy-pin": true,
-	}
-	if !allowed[path] {
+	
+	if !allowedProductTunnelPath(path) {
 		return errors.New("operation is not registered for strict-PQ tunnel")
 	}
 	body, err := os.ReadFile(bodyPath)
