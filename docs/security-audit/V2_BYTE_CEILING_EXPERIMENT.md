@@ -53,3 +53,32 @@ no Xray start permission, and no production flag change.
 
 `XMESH_QUOTA_V2_ENABLED=0` remains unchanged. Do not merge this experiment
 as proof of end-to-end quota correctness.
+
+## Same-Xray-runtime recovery experiment
+
+A second CI-only function can recover a control component's cap counters
+without resetting already fsynced byte intents, **provided Xray itself is
+still the same process**. It must be given a separately authenticated,
+exact off-host inventory-head digest and independently read live per-alias
+StatsService counters. It checks the entire local WAL directory against
+its inventory, refuses every prior-runtime or unlisted alias for the same
+billing identity, verifies the inventory head equals the pinned witness,
+and compares each raw user direction against its WAL tail. Only then can
+the in-memory remaining ceilings be reconstructed by summing durable WAL
+entries across MAIN and CDN aliases and both directions. Duplicate
+installations are refused, even if they claim a larger cap.
+
+The new negative matrix exercises deleted/modified WALs, deleted
+inventories, stale/mismatched witnesses, changed Xray identity,
+unknown aliases, reduced grants, erroneous or missing live counters,
+and old runtime history. Exact same-runtime residual bytes are tested.
+
+**Trust boundary:** the Go helper is not allowed to trust a digest just
+because its caller provides one; the CI fixture merely simulates the
+independently authenticated off-host anchor. Nexus must sign and
+persist a specific inventory checkpoint, and the production Node must
+verify that signature and the exact registered Agent/Xray process before
+this operation could ever authorize traffic. It cannot restart Xray,
+reconstruct deleted WAL contents from their birth index, or erase
+unresolved old-runtime debt. There is still **no positive production
+admission** and no V2 rollout authorization.
