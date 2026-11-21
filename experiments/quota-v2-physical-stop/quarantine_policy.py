@@ -128,7 +128,9 @@ def _locked_private_state(directory):
         raise ValueError("quarantine state directory must be root-owned 0700")
     fd = os.open(path, os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        lock = os.open("genesis-quarantine.lock",
+        # Use the SAME root-owned lock as xmesh-xray-sync.sh. A normal
+        # reconciler must never change the measured Xray during staging.
+        lock = os.open("lock",
             os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
             dir_fd=fd)
         info = os.fstat(lock)
