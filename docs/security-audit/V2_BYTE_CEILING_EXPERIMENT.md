@@ -28,7 +28,7 @@ The local cap is tied to one observed runtime fingerprint.
 
 The unit suite asserts the actual StatsService counter equals the fsynced
 per-alias WAL for all accepted bytes, no WAL exists for a denied first write,
-concurrent writers cannot overspend a shared grant, CDN exhaustion doesn't
+concurrent writers cannot overspend a shared grant, an injected WAL fsync failure cannot advance either raw byte counters or an in-memory grant, unrelated Xray/WAL panics are never silently counted as quota-denial successes, CDN exhaustion doesn't
 reduce a separate main bucket beyond its shared portion, and a stale runtime
 cannot reuse an old cap. The pinned Xray test job runs with `-race` and
 then runs the earlier complete `xmeshdrain` suite.
