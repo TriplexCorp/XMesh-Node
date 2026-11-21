@@ -34,7 +34,7 @@ lowered spent floors are refused.
 
 When a prior authenticated candidate exists, the verifier requires
 the same immutable Node/runtime/lease identity, monotonic revisions,
-nondecreasing WAL totals and byte-floor continuity. A repeated
+nondecreasing acknowledged totals, WAL totals, issuance timestamps and byte-floor continuity. A repeated
 revision must be **byte-for-byte identical**; a new revision may
 advance signed conservative floors without resurrecting previously
 reported capacity.
