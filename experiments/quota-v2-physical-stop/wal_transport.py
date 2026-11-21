@@ -220,8 +220,8 @@ def _measure_quarantined_runtime():
             devices not in (None, []) or
             host.get("ReadonlyRootfs") is not True or
             not isinstance(security, list) or
-            not any(option.startswith("no-new-privileges") for option in security
-                    if isinstance(option, str)) or
+            not any(option in ("no-new-privileges", "no-new-privileges:true")
+                    for option in security if isinstance(option, str)) or
             not isinstance(mounts, list) or len(mounts) != 2 or
             {mount.get("Destination") for mount in mounts
              if isinstance(mount, dict)} !=
