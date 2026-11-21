@@ -1,0 +1,333 @@
+// CI-only positive, signed per-process Xray byte-cap admission.
+// This is NOT a shipping API: callers must independently prove the
+// registered Node, signed policy, first Genesis, WAL completeness, and
+// remote PostgreSQL reservation before constructing the trusted context.
+// No path in production invokes this function. It cannot start Xray, bind
+// an inbound, settle traffic, or authorize refunds.
+package xmeshdrain
+
+import (
+    "bytes"
+    "crypto/ed25519"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "os"
+    "path/filepath"
+    "reflect"
+    "regexp"
+    "strconv"
+    "syscall"
+)
+
+const signedCapDomain = "XMESH_QUOTA_V2_XRAY_CAP_ADMISSION_V1\x00"
+const signedCapKind = "xmesh.quota-v2.xray-cap-admission"
+const maxSignedCapGrant = uint64(64 * 1024 * 1024)
+
+var signedCapHex64 = regexp.MustCompile("^[0-9a-f]{64}$")
+var signedCapUUID = regexp.MustCompile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+type signedCapAlias struct {
+    Email string `json:"email"`
+    Class string `json:"class"`
+}
+type signedCapPayload struct {
+    SchemaVersion int `json:"schemaVersion"`
+    Kind string `json:"kind"`
+    NodeID int64 `json:"nodeId"`
+    UserID int64 `json:"userId"`
+    ActivationReceiptSHA256 string `json:"activationReceiptSha256"`
+    RuntimeID string `json:"runtimeId"`
+    PolicySHA256 string `json:"policySha256"`
+    AccountEpoch string `json:"accountEpoch"`
+    MeterEpoch string `json:"meterEpoch"`
+    ReservationID string `json:"reservationId"`
+    ReservationRevision int64 `json:"reservationRevision"`
+    Nonce string `json:"nonce"`
+    InventoryTailDigest string `json:"inventoryTailDigest"`
+    WitnessedWalBytes uint64 `json:"witnessedWalBytes"`
+    WitnessedCdnBytes uint64 `json:"witnessedCdnBytes"`
+    SharedCeilingBytes uint64 `json:"sharedCeilingBytes"`
+    NodeCeilingBytes uint64 `json:"nodeCeilingBytes"`
+    CdnCeilingBytes uint64 `json:"cdnCeilingBytes"`
+    AliasScopes []signedCapAlias `json:"aliasScopes"`
+    IssuedAtMs int64 `json:"issuedAtMs"`
+    InstallBeforeMs int64 `json:"installBeforeMs"`
+    ValidUntilMs int64 `json:"validUntilMs"`
+    CanSpend bool `json:"canSpend"`
+    CanStart bool `json:"canStart"`
+    CanResume bool `json:"canResume"`
+    FinalMeterVerified bool `json:"finalMeterVerified"`
+    RefundableBytes uint64 `json:"refundableBytes"`
+}
+type signedCapEnvelope struct {
+    Algorithm string `json:"algorithm"`
+    Payload signedCapPayload `json:"payload"`
+    Signature string `json:"signature"`
+}
+
+// Must be independently obtained by a trusted local process verifier and
+// an authenticated Nexus off-host WAL/Genesis scope verifier. The Xray
+// parser does not turn a caller's chosen values into trust.
+type signedCapContext struct {
+    NodeID int64
+    UserID int64
+    ActivationReceiptSHA256 string
+    RuntimeID string
+    PolicySHA256 string
+    AccountEpoch string
+    MeterEpoch string
+    ReservationID string
+    ReservationRevision int64
+    InventoryTailDigest string
+    Aliases []signedCapAlias
+    FirstGenesisIndependentlyProved bool
+    Current func(string,string)(uint64,error)
+}
+
+// Reject duplicate keys at any JSON nesting depth, unknown fields,
+// noncanonical payload bytes, float->integer ambiguity and trailing data.
+// Go's canonical map JSON has lexical property sorting, matching Python's
+// sorted-key canonical JSON used by the independent Node verifier.
+func decodeCanonicalSignedCap(raw []byte) (signedCapEnvelope,[]byte,error) {
+    var out signedCapEnvelope
+    if len(raw)==0 || len(raw)>8192 || !bytes.HasSuffix(raw,[]byte{'\n'}) {
+        return out,nil,errors.New("signed Xray cap: missing canonical newline or too large")
+    }
+    d:=json.NewDecoder(bytes.NewReader(raw))
+    d.UseNumber()
+    var document interface{}
+    if err:=d.Decode(&document);err!=nil{return out,nil,err}
+    var trailing interface{}
+    if err:=d.Decode(&trailing);!errors.Is(err,io.EOF) {
+        return out,nil,errors.New("signed Xray cap: trailing JSON")
+    }
+    canonical,err:=json.Marshal(document)
+    if err!=nil || !bytes.Equal(raw,append(canonical,'\n')) {
+        return out,nil,errors.New("signed Xray cap: duplicate, noncanonical or ambiguous fields")
+    }
+    payloadMap,ok:=document.(map[string]interface{})
+    if !ok || len(payloadMap)!=3 {
+        return out,nil,errors.New("signed Xray cap: invalid envelope fields")
+    }
+    for _,key:=range []string{"algorithm","payload","signature"} {
+        if _,present:=payloadMap[key];!present{
+            return out,nil,errors.New("signed Xray cap: incomplete envelope")
+        }
+    }
+    strict:=json.NewDecoder(bytes.NewReader(raw))
+    strict.DisallowUnknownFields()
+    if err:=strict.Decode(&out);err!=nil{return out,nil,err}
+    var extra interface{}
+    if err:=strict.Decode(&extra);!errors.Is(err,io.EOF){
+        return out,nil,errors.New("signed Xray cap: trailing signed object")
+    }
+    payloadBytes,err:=json.Marshal(payloadMap["payload"])
+    if err!=nil{return out,nil,err}
+    // The typed roundtrip catches unknown nested alias scopes, omitted
+    // fields and malformed integer types before attempting verification.
+    var typedFields map[string]json.RawMessage
+    if err:=json.Unmarshal(payloadBytes,&typedFields);err!=nil{return out,nil,err}
+    if len(typedFields)!=reflect.TypeOf(signedCapPayload{}).NumField() {
+        return out,nil,errors.New("signed Xray cap: incomplete payload contract")
+    }
+    return out,payloadBytes,nil
+}
+
+func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
+    expected signedCapContext, now int64) (signedCapPayload,error) {
+    deny:=func(message string)(signedCapPayload,error) {
+        return signedCapPayload{},errors.New("signed Xray cap: "+message)
+    }
+    if len(pinned)!=ed25519.PublicKeySize || now<=0 {
+        return deny("missing pinned signer or verified clock")
+    }
+    envelope,payloadBytes,err:=decodeCanonicalSignedCap(raw)
+    if err!=nil{return deny("noncanonical signed envelope")}
+    payload:=envelope.Payload
+    signature,err:=hex.DecodeString(envelope.Signature)
+    if err!=nil || len(signature)!=ed25519.SignatureSize ||
+        envelope.Algorithm!="Ed25519" ||
+        !ed25519.Verify(pinned,append([]byte(signedCapDomain),payloadBytes...),signature) {
+        return deny("signature or signer invalid")
+    }
+    if payload.SchemaVersion!=1 || payload.Kind!=signedCapKind ||
+        payload.NodeID<=0 || payload.UserID<=0 ||
+        payload.ReservationRevision<=0 || !payload.CanSpend ||
+        payload.CanStart || payload.CanResume ||
+        payload.FinalMeterVerified || payload.RefundableBytes!=0 {
+        return deny("signed admission attempted start, resume or refund authority")
+    }
+    for _,v:=range []string{payload.ActivationReceiptSHA256,
+        payload.RuntimeID,payload.PolicySHA256,payload.Nonce,
+        payload.InventoryTailDigest} {
+        if !signedCapHex64.MatchString(v) {return deny("invalid signed fingerprint")}
+    }
+    for _,v:=range []string{payload.AccountEpoch,payload.MeterEpoch,
+        payload.ReservationID} {
+        if !signedCapUUID.MatchString(v) {return deny("invalid signed lease identity")}
+    }
+    if payload.IssuedAtMs<=0 || payload.InstallBeforeMs<=payload.IssuedAtMs ||
+        payload.InstallBeforeMs-payload.IssuedAtMs>120000 ||
+        payload.ValidUntilMs<=payload.InstallBeforeMs ||
+        payload.ValidUntilMs-payload.IssuedAtMs>24*60*60*1000 ||
+        now<payload.IssuedAtMs || now>=payload.InstallBeforeMs ||
+        now>=payload.ValidUntilMs {
+        return deny("invalid signed installation time or expired reservation")
+    }
+    if payload.SharedCeilingBytes==0 ||
+        payload.SharedCeilingBytes>maxSignedCapGrant ||
+        payload.NodeCeilingBytes==0 ||
+        payload.NodeCeilingBytes>maxSignedCapGrant ||
+        payload.CdnCeilingBytes>maxSignedCapGrant ||
+        payload.WitnessedWalBytes!=0 || payload.WitnessedCdnBytes!=0 {
+        // Staged FIRST-GENESIS admission only. Nonzero-history issuance
+        // needs the separately tested complete WAL recovery path, not
+        // another zeroed StatsService or manually asserted unused bytes.
+        return deny("only bounded first-genesis zero-spend cap supported")
+    }
+    if payload.NodeID!=expected.NodeID || payload.UserID!=expected.UserID ||
+        payload.ActivationReceiptSHA256!=expected.ActivationReceiptSHA256 ||
+        payload.RuntimeID!=expected.RuntimeID ||
+        payload.PolicySHA256!=expected.PolicySHA256 ||
+        payload.AccountEpoch!=expected.AccountEpoch ||
+        payload.MeterEpoch!=expected.MeterEpoch ||
+        payload.ReservationID!=expected.ReservationID ||
+        payload.ReservationRevision!=expected.ReservationRevision ||
+        payload.InventoryTailDigest!=expected.InventoryTailDigest {
+        return deny("signed candidate conflicts with independent Node/runtime/lease")
+    }
+    if len(payload.AliasScopes)==0 || len(payload.AliasScopes)>16 ||
+        !reflect.DeepEqual(payload.AliasScopes,expected.Aliases) {
+        return deny("signed inbound topology differs from independently verified policy")
+    }
+    expectedBase:="xmesh-u"+strconv.FormatInt(payload.UserID,10)
+    last:=""
+    hasCDN:=false
+    for _,scope:=range payload.AliasScopes {
+        if scope.Email<=last || canonicalMeterUser(scope.Email)!=expectedBase ||
+            !signedUserEmail.MatchString(scope.Email) ||
+            (scope.Class!="main" && scope.Class!="cdn") {
+            return deny("duplicate, foreign or malformed inbound alias")
+        }
+        if scope.Class=="cdn" {hasCDN=true}
+        last=scope.Email
+    }
+    if !hasCDN && payload.CdnCeilingBytes!=0 {
+        return deny("CDN budget without scoped CDN inbound")
+    }
+    if !expected.FirstGenesisIndependentlyProved || expected.Current==nil {
+        return deny("first genesis or actual live meters unverified")
+    }
+    return payload,nil
+}
+
+// This function is reachable exclusively via disposable Xray unit tests.
+// It refuses to install from a mere caller-provided signed JSON unless a
+// separately obtained context independently pins the first-genesis Node,
+// process, policy, signed lease, and all user inbound aliases.
+func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
+    expected signedCapContext) error {
+    payload,err:=verifySignedCapCandidate(raw,pinned,expected,
+        experimentalCapClockMs())
+    if err!=nil{return err}
+    gate.Lock()
+    defer gate.Unlock()
+    if !enabled || !experimentalByteCaps.strict ||
+        gate.runtimeID=="" || gate.runtimeID!=payload.RuntimeID ||
+        gate.journalDir=="" || !filepath.IsAbs(gate.journalDir) ||
+        gate.meterTails==nil || len(gate.meterTails)!=0 {
+        return errors.New("signed Xray cap: no pristine measured runtime or strict gate")
+    }
+    identity:="xmesh-u"+strconv.FormatInt(payload.UserID,10)
+    if experimentalByteCaps.users!=nil &&
+        experimentalByteCaps.users[identity]!=nil {
+        return errors.New("signed Xray cap: an installed reservation cannot be reissued")
+    }
+    if u:=gate.users[identity];u!=nil && (
+        u.historicDebtUnresolved || len(u.active)!=0 || u.writes!=0 ||
+        u.reads!=0 || u.fenced || u.lateCounterMutation) {
+        return errors.New("signed Xray cap: existing, fenced or tainted user history")
+    }
+    // For a first-ever Xray, there can be NO local counted WAL. An observed
+    // index alone does not prove history; the independent Nexus first
+    // activation receipt must also be pinned in expected.
+    inventory,err:=readInventory(gate.journalDir)
+    if err!=nil{return err}
+    if inventory.exists || len(inventory.steps)!=0 {
+        return errors.New("signed Xray cap: historic WAL cannot use zero-spend genesis")
+    }
+    if err:=verifyMeterJournalDirectory(gate.journalDir);err!=nil{return err}
+    aliases:=make(map[string]bool,len(payload.AliasScopes))
+    for _,scope:=range payload.AliasScopes {
+        aliases[scope.Email]=scope.Class=="cdn"
+        for _,direction:=range []string{"uplink","downlink"} {
+            actual,err:=expected.Current(scope.Email,direction)
+            if err!=nil || actual!=0 {
+                return errors.New("signed Xray cap: live user counter has unproved bytes")
+            }
+        }
+    }
+    // Durable evidence is committed BEFORE exposing the in-memory cap.
+    // A crash before fsync leaves the grant unusable; reusing a file name
+    // on restart is impossible without separately proven rollover.
+    name:="positive-cap-u"+strconv.FormatInt(payload.UserID,10)+".json"
+    file:=filepath.Join(gate.journalDir,name)
+    fd,err:=os.OpenFile(file,os.O_WRONLY|os.O_CREATE|os.O_EXCL|
+        syscall.O_NOFOLLOW,0600)
+    if err!=nil{return fmt.Errorf("signed Xray cap: prior grant or unsafe file: %w",err)}
+    if _,err=fd.Write(raw);err!=nil{
+        fd.Close()
+        return fmt.Errorf("signed Xray cap: failed durable write: %w",err)
+    }
+    if err=fd.Sync();err!=nil{
+        fd.Close()
+        return fmt.Errorf("signed Xray cap: failed durable fsync: %w",err)
+    }
+    if err=fd.Close();err!=nil {
+        return fmt.Errorf("signed Xray cap: cannot close grant record: %w",err)
+    }
+    dir,err:=os.Open(gate.journalDir)
+    if err!=nil{return err}
+    err=dir.Sync()
+    _=dir.Close()
+    if err!=nil{return fmt.Errorf("signed Xray cap: grant directory fsync failed: %w",err)}
+    if experimentalByteCaps.users==nil {
+        experimentalByteCaps.users=map[string]*experimentalByteCap{}
+    }
+    experimentalByteCaps.users[identity]=&experimentalByteCap{
+        runtimeID:payload.RuntimeID,grantCeiling:payload.SharedCeilingBytes,
+        nodeCeiling:payload.NodeCeilingBytes,cdnCeiling:payload.CdnCeilingBytes,
+        validUntilMs:payload.ValidUntilMs,lastSeenMs:experimentalCapClockMs(),
+        aliases:aliases,
+    }
+    return nil
+}
+
+// All authenticated VLESS streams are denied until their exact inbound is
+// covered by an installed, unexpired, process-bound grant. This check shares
+// the same mutex as the byte WAL and every new Register() operation.
+func checkSignedCapBeforeRegisterLocked(email string) error {
+    if !experimentalByteCaps.strict {return nil}
+    cap:=experimentalByteCaps.users[canonicalMeterUser(email)]
+    if cap==nil || cap.runtimeID!=gate.runtimeID {
+        return errors.New("signed Xray cap: user has no measured process-bound grant")
+    }
+    isCDN,ok:=cap.aliases[email]
+    if !ok {return errors.New("signed Xray cap: inbound not covered by grant")}
+    now:=experimentalCapClockMs()
+    if cap.expired || now<=0 || now>=cap.validUntilMs ||
+        (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
+        cap.expired=true
+        return errors.New("signed Xray cap: grant expired or clock rolled back")
+    }
+    if cap.chargedAll>=cap.grantCeiling ||
+        cap.chargedAll>=cap.nodeCeiling ||
+        (isCDN && cap.chargedCDN>=cap.cdnCeiling) {
+        return errors.New("signed Xray cap: no spendable bytes remain")
+    }
+    cap.lastSeenMs=now
+    return nil
+}

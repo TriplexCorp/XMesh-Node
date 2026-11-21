@@ -4,6 +4,8 @@ on:
     paths:
       - 'experiments/xray-dataplane-fence/experimental_byte_cap.go.txt'
       - 'experiments/xray-dataplane-fence/experimental_byte_cap_test.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt'
       - 'experiments/xray-dataplane-fence/durable_meter_intent.go.txt'
       - 'experiments/xray-dataplane-fence/apply-experiment.py'
       - '.github/workflows/quota-v2-byte-ceilings.yml'
@@ -45,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$XMESH_PINNED_XRAY_SOURCE"
-          go test -race -count=1 -timeout=12m ./app/xmeshdrain -run '^TestV2ExperimentalQuota'
+          go test -race -count=1 -timeout=12m ./app/xmeshdrain -run '^(TestV2ExperimentalQuota|TestV2Signed)'
       - name: Ensure all earlier WAL/fence/durable-meter regressions still pass
         run: |
           set -euo pipefail

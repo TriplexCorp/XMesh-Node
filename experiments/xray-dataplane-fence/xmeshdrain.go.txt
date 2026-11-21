@@ -189,6 +189,7 @@ func Register(ctx context.Context, email string, stop func()) error {
     }
     gate.Lock()
     defer gate.Unlock()
+    if err:=checkSignedCapBeforeRegisterLocked(email);err!=nil{return err}
     u := ensureUser(canonicalMeterUser(email))
     if u.fenced {
         return errFenced
