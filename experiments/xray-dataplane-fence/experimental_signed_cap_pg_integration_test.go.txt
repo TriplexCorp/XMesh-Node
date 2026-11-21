@@ -43,7 +43,7 @@ func TestV2SignedRealPostgreSQLTwoNodeProcess(t *testing.T) {
     if err:=json.Unmarshal(output,&issued);err!=nil{
         t.Fatalf("bad independent SQL output: %v",err)
     }
-    if issued.Phase!="sql-committed-signed-disposable" ||
+    if issued.Phase!="sql-committed-nexus-policy-signer-disposable" ||
         issued.NodeID!=node || issued.Ceiling==0 ||
         issued.Ceiling>1000 {
         t.Fatal("SQL signer reported invalid grant")
