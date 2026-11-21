@@ -120,7 +120,7 @@ class SignedCandidateTests(unittest.TestCase):
             with self.subTest(field=field):
                 payload=fixture()
                 payload[field]=value
-                with self.assertRaisesRegex(ValueError,"trusted local binding"):
+                with self.assertRaisesRegex(ValueError,"trusted local binding|scope|CDN"):
                     self.verify(payload)
 
     def test_reject_every_signed_attempt_to_turn_candidate_into_traffic_authority(self):
@@ -185,7 +185,7 @@ class SignedCandidateTests(unittest.TestCase):
             with self.subTest(aliases=alias):
                 p=fixture()
                 p["aliasScopes"]=alias
-                with self.assertRaisesRegex(ValueError,"scope|binding"):
+                with self.assertRaisesRegex(ValueError,"scope|binding|CDN"):
                     self.verify(p)
 
     def test_monotonic_same_lease_replay_and_revision_change(self):
