@@ -70,11 +70,15 @@ WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
 for family in quota-v2-physical-stop xray-dataplane-fence; do
   install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
 done
-for helper in quota-v2-physical-stop/{wal_transport,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
+for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
   python3 -m py_compile "$ROOT/experiments/$helper.py"
   install -o root -g root -m 0700 "$ROOT/experiments/$helper.py" "$WAL_ROOT/$helper.py"
 done
 ln -sfn "$WAL_ROOT/quota-v2-physical-stop/wal_transport.py" /usr/local/sbin/xmesh-quota-wal
+# Expose the opt-in ZERO-AUTHORITY first-Genesis handoff alongside the already
+# reviewed WAL operator. It does not run automatically, open ingress, install
+# any cap or alter the existing systemd Xray synchronizer.
+ln -sfn "$WAL_ROOT/quota-v2-physical-stop/quarantine_policy.py" /usr/local/sbin/xmesh-quota-genesis-quarantine
 
 if [[ -f "$ROOT/deploy/xmesh-tls-renew-hook.sh" ]]; then
   install -o root -g root -m 0700 "$ROOT/deploy/xmesh-tls-renew-hook.sh" /usr/local/libexec/xmesh-tls-renew-hook
