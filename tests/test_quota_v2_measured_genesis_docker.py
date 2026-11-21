@@ -72,6 +72,24 @@ def main():
                    "--entrypoint", "xray",
                    IMAGE, "run", "-config", "/etc/xray/config.json")
             created = True
+            # Print only isolation metadata, never the config or keys.
+            inspected = json.loads(docker("inspect", NAME).stdout)[0]
+            h = inspected["HostConfig"]
+            print("ISOLATION_DIAGNOSTIC=" + json.dumps({
+                "networkMode": h.get("NetworkMode"),
+                "privileged": h.get("Privileged"),
+                "pidMode": h.get("PidMode"),
+                "ipcMode": h.get("IpcMode"),
+                "capAdd": h.get("CapAdd"),
+                "capDrop": h.get("CapDrop"),
+                "securityOpt": h.get("SecurityOpt"),
+                "readonlyRoot": h.get("ReadonlyRootfs"),
+                "devicesCount": len(h.get("Devices") or []),
+                "mounts": sorted([
+                    {"destination": m.get("Destination"), "type": m.get("Type")}
+                    for m in inspected.get("Mounts", [])],
+                    key=lambda m: str(m["destination"])),
+            }, sort_keys=True), flush=True)
             deadline = time.monotonic() + 15
             while True:
                 try:
