@@ -106,6 +106,23 @@ class MeasuredGenesisTests(unittest.TestCase):
                             "https://disposable.example", self.node, self.challenge)
                     sign.assert_not_called()
 
+    def test_only_anonymous_upstream_docker_volumes_are_allowed(self):
+        candidate = copy.deepcopy(self.runtime)
+        for destination, letter in (("/usr/local/etc/xray", "a"),
+                                    ("/var/log/xray", "b")):
+            candidate["Mounts"].append({
+                "Destination": destination, "Type": "volume",
+                "Driver": "local", "Name": letter * 64})
+        self.overrides(runtime=candidate)
+        expected = runtime_identity.trusted_runtime_identity(self.child.pid)
+        with mock.patch.object(wal_transport, "prepare_genesis",
+                               return_value={"authorizedBytes": 0,
+                                             "canStart": False}) as signer:
+            wal_transport.prepare_measured_genesis(
+                "https://disposable.example", self.node, self.challenge)
+            signer.assert_called_once_with(
+                "https://disposable.example", self.node, expected, self.challenge)
+
     def test_privilege_and_host_namespace_escape_is_rejected(self):
         mutations = [
             lambda x: x["HostConfig"].update(Privileged=True),
@@ -119,6 +136,14 @@ class MeasuredGenesisTests(unittest.TestCase):
             lambda x: x["HostConfig"].update(Devices=[{"PathOnHost": "/dev/sda"}]),
             lambda x: x["Mounts"].append({
                 "Destination": "/var/run/docker.sock", "Type": "bind"}),
+            lambda x: x["Mounts"].append({
+                "Destination": "/var/log/xray", "Type": "bind"}),
+            lambda x: x["Mounts"].append({
+                "Destination": "/var/log/xray", "Type": "volume",
+                "Driver": "local", "Name": "user-provided-volume"}),
+            lambda x: x["Mounts"].append({
+                "Destination": "/var/log/xray", "Type": "volume",
+                "Driver": "evil-driver", "Name": "a" * 64}),
         ]
         for mutate in mutations:
             candidate = copy.deepcopy(self.runtime)
