@@ -199,6 +199,36 @@ class FirstCapHandoffTests(unittest.TestCase):
                              self.pub, self.runtime, self.now + 120_000)
 
 
+    def confirmed_lease(self):
+        reserve = {
+            "epoch":self.claims["accountEpoch"],
+            "meterEpoch":self.claims["meterEpoch"],
+            "reservationId":self.claims["reservationId"],
+            "revision":self.claims["reservationRevision"],
+            "acknowledgedBytes":0,
+            "ceilingBytes":self.claims["sharedCeilingBytes"],
+            "validUntilMs":self.now+3_600_000,
+        }
+        payload = {
+            "schemaVersion":1,
+            "kind":"xmesh.quota-v2.genesis-lease-identity",
+            "status":"confirmed",
+            "nodeId":self.node,
+            "userId":self.claims["userId"],
+            "activationReceiptSha256":self.fixture.activation,
+            "runtimeId":self.runtime,
+            "genesisChallenge":self.prepared["payload"]["challenge"],
+            "policySha256":self.reply["policySha256"],
+            "reservation":reserve,
+            "issuedAtMs":self.now,
+            "authorizedBytes":0,"canSpend":False,"canStart":False,
+            "canResume":False,"finalMeterVerified":False,"refundableBytes":0,
+        }
+        return {
+            "algorithm":"Ed25519","payload":payload,
+            "signature":self.sign(b"",payload),
+        }
+
     def test_private_genesis_evidence_delivers_only_derived_signed_scope(self):
         if __import__("os").geteuid() != 0:
             self.skipTest("private installed Agent evidence requires root")
@@ -207,6 +237,9 @@ class FirstCapHandoffTests(unittest.TestCase):
         evidence_path = state / "genesis-quarantine-envelope.json"
         evidence_path.write_bytes(self.guard.canonical(self.evidence()))
         evidence_path.chmod(0o600)
+        confirmed_path = state / "genesis-reservation-confirmed-u100.json"
+        confirmed_path.write_bytes(self.guard.canonical(self.confirmed_lease()))
+        confirmed_path.chmod(0o600)
         observed = ("f" * 64, "2026-11-21T00:00:00Z", 4321, self.runtime)
         product = {
             "nodeId": self.node,
