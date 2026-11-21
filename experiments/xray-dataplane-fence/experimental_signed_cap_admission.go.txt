@@ -230,11 +230,15 @@ func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
 // process, policy, signed lease, and all user inbound aliases.
 func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     expected signedCapContext) error {
-    payload,err:=verifySignedCapCandidate(raw,pinned,expected,
-        experimentalCapClockMs())
+    verifiedAt:=experimentalCapClockMs()
+    payload,err:=verifySignedCapCandidate(raw,pinned,expected,verifiedAt)
     if err!=nil{return err}
     gate.Lock()
     defer gate.Unlock()
+    lockedAt:=experimentalCapClockMs()
+    if lockedAt<verifiedAt || lockedAt>=payload.InstallBeforeMs {
+        return errors.New("signed Xray cap: installation deadline or clock changed before validation")
+    }
     if !enabled || !experimentalByteCaps.strict ||
         gate.runtimeID=="" || gate.runtimeID!=payload.RuntimeID ||
         gate.journalDir=="" || !filepath.IsAbs(gate.journalDir) ||
@@ -294,13 +298,19 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     err=dir.Sync()
     _=dir.Close()
     if err!=nil{return fmt.Errorf("signed Xray cap: grant directory fsync failed: %w",err)}
+    installedAt:=experimentalCapClockMs()
+    if installedAt<lockedAt || installedAt>=payload.InstallBeforeMs {
+        // Keep the durable attempt. A later retry must not reopen the grant
+        // after this process failed to prove timely installation.
+        return errors.New("signed Xray cap: installation deadline or clock changed before publication")
+    }
     if experimentalByteCaps.users==nil {
         experimentalByteCaps.users=map[string]*experimentalByteCap{}
     }
     experimentalByteCaps.users[identity]=&experimentalByteCap{
         runtimeID:payload.RuntimeID,grantCeiling:payload.SharedCeilingBytes,
         nodeCeiling:payload.NodeCeilingBytes,cdnCeiling:payload.CdnCeilingBytes,
-        validUntilMs:payload.ValidUntilMs,lastSeenMs:experimentalCapClockMs(),
+        validUntilMs:payload.ValidUntilMs,lastSeenMs:installedAt,
         aliases:aliases,
     }
     return nil

@@ -338,3 +338,44 @@ func TestV2SignedFirstGenesisActualRegisterEnforcesCapBeforeUserSession(t *testi
         t.Fatal("switching to CDN reopens exhausted shared Node allowance")
     }
 }
+
+func TestV2SignedCapCannotPublishAfterInstallDeadlineOrClockRollback(t *testing.T) {
+    for _, scenario := range []string{"deadline", "rollback"} {
+        t.Run(scenario, func(t *testing.T) {
+            dir, _, payload, expected, public, private := signedCapTestFixture(t)
+            now := payload.IssuedAtMs + 1000
+            originalClock := experimentalCapClockMs
+            experimentalCapClockMs = func() int64 { return now }
+            t.Cleanup(func() { experimentalCapClockMs = originalClock })
+            raw := signedCapTestEnvelope(t, payload, private)
+            originalRead := expected.Current
+            expected.Current = func(alias, direction string) (uint64, error) {
+                if scenario == "deadline" {
+                    now = payload.InstallBeforeMs
+                } else {
+                    now = payload.IssuedAtMs
+                }
+                return originalRead(alias, direction)
+            }
+            if err := installSignedFirstGenesisCap(raw, public, expected); err == nil ||
+                !strings.Contains(err.Error(), "before publication") {
+                t.Fatalf("signed cap installation accepted an invalid clock at publication: %v", err)
+            }
+            persisted, err := os.ReadFile(filepath.Join(dir, "positive-cap-u101.json"))
+            if err != nil || !bytes.Equal(persisted, raw) {
+                t.Fatalf("failed publication lost its durable attempt: %v", err)
+            }
+            now = payload.IssuedAtMs + 1000
+            expected.Current = originalRead
+            gate.Lock()
+            denied := checkSignedCapBeforeRegisterLocked(capMain)
+            gate.Unlock()
+            if denied == nil {
+                t.Fatal("failed publication still exposed spending authority")
+            }
+            if err := installSignedFirstGenesisCap(raw, public, expected); err == nil {
+                t.Fatal("an old durable attempt was reusable after the clock changed")
+            }
+        })
+    }
+}
