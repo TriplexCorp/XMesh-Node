@@ -34,7 +34,14 @@ class MeasuredGenesisTests(unittest.TestCase):
             "Id": self.cid, "Name": "/xmesh-managed-xray",
             "State": {"Running": True, "Pid": self.child.pid, "StartedAt": self.started},
             "HostConfig": {"NetworkMode": "none", "RestartPolicy": {"Name": "no"},
-                           "PortBindings": {}},
+                           "PortBindings": {}, "Privileged": False,
+                           "CapAdd": None, "CapDrop": ["ALL"], "PidMode": "",
+                           "IpcMode": "private", "Devices": None,
+                           "ReadonlyRootfs": True,
+                           "SecurityOpt": ["no-new-privileges:true"]},
+            "Mounts": [
+                {"Destination": "/etc/xray/config.json", "Type": "bind"},
+                {"Destination": wal_transport.journal.JOURNAL_DEST, "Type": "bind"}],
             "NetworkSettings": {"Networks": {"none": {}}, "Ports": {"443/tcp": None}},
         }
 
@@ -98,6 +105,34 @@ class MeasuredGenesisTests(unittest.TestCase):
                         wal_transport.prepare_measured_genesis(
                             "https://disposable.example", self.node, self.challenge)
                     sign.assert_not_called()
+
+    def test_privilege_and_host_namespace_escape_is_rejected(self):
+        mutations = [
+            lambda x: x["HostConfig"].update(Privileged=True),
+            lambda x: x["HostConfig"].update(CapAdd=["SYS_ADMIN"]),
+            lambda x: x["HostConfig"].update(CapDrop=[]),
+            lambda x: x["HostConfig"].update(PidMode="host"),
+            lambda x: x["HostConfig"].update(IpcMode="host"),
+            lambda x: x["HostConfig"].update(ReadonlyRootfs=False),
+            lambda x: x["HostConfig"].update(SecurityOpt=[]),
+            lambda x: x["HostConfig"].update(SecurityOpt=["no-new-privileges:false"]),
+            lambda x: x["HostConfig"].update(Devices=[{"PathOnHost": "/dev/sda"}]),
+            lambda x: x["Mounts"].append({
+                "Destination": "/var/run/docker.sock", "Type": "bind"}),
+        ]
+        for mutate in mutations:
+            candidate = copy.deepcopy(self.runtime)
+            mutate(candidate)
+            with self.subTest(candidate=candidate), \
+                 mock.patch.object(wal_transport, "_bound_journal",
+                                   return_value=(candidate, "/unused")), \
+                 mock.patch.object(wal_transport.os, "geteuid",
+                                   return_value=0), \
+                 mock.patch.object(wal_transport, "prepare_genesis") as remote:
+                with self.assertRaisesRegex(ValueError, "hardened isolated"):
+                    wal_transport.prepare_measured_genesis(
+                        "https://disposable.example", self.node, self.challenge)
+                remote.assert_not_called()
 
     def test_docker_kernel_pid_disagreement_fails_before_external_signature(self):
         self.overrides(inspected=(self.cid, self.started, self.child.pid + 1))
