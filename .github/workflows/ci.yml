@@ -36,6 +36,7 @@ jobs:
       - run: python3 tests/test_quota_v2_revocation_marker.py
       - run: python3 tests/test_quota_v2_reservation.py
       - run: python3 tests/test_quota_v2_verify_nexus_wal_anchor.py
+      - run: python3 tests/test_quota_v2_measured_genesis.py
       - name: Check installed WAL reconciliation against an isolated Xray container
         run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="${RUNNER_ENVIRONMENT:?}" XMESH_DISPOSABLE_WAL_RUNTIME=1 bash tests/test_quota_wal_reconcile_runtime.sh
       - run: python3 tests/test_quota_v2_meter_continuity.py
