@@ -178,6 +178,10 @@ func commitMeterIntentBeforeMutation(email,direction string,delta,current int64)
         return errors.New("Xray metered intent runtime not configured")
     }
     if delta>int64(1<<63-1)-current{return errors.New("metered intent overflow")}
+    // Independently enforce experimental per-Node and CDN reservation ceilings
+    // against ALL aliases/directions under the SAME lock as WAL fsync.
+    // No byte can enter the WAL or StatsService if its capacity is exhausted.
+    if err:=checkExperimentalByteCapLocked(email,delta);err!=nil{return err}
     path:=meterLedgerPath(gate.journalDir,gate.runtimeID,email,direction)
     if gate.meterTails==nil{gate.meterTails=map[string]durableMeterTail{}}
     tail,cached:=gate.meterTails[path]
@@ -252,6 +256,9 @@ func commitMeterIntentBeforeMutation(email,direction string,delta,current int64)
         last:step,size:st.Size+int64(len(data)),
         dev:uint64(st.Dev),ino:st.Ino,
     }
+    // Charge this exact shared/Node/CDN grant AFTER durable WAL precharge.
+    // On a crash here the WAL remains conservative evidence; never refund.
+    commitExperimentalByteCapLocked(email,delta)
     return nil
 }
 
