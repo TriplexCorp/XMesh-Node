@@ -1,0 +1,27 @@
+name: Quota V2 reservation downgrade proof (staging)
+on:
+  pull_request:
+    paths:
+      - 'deploy/xmesh-policy-guard-base.py'
+      - 'deploy/test-xmesh-policy-guard.py'
+      - 'tests/test_quota_v2_reservation.py'
+      - 'docs/security-audit/V2_RESERVATION_DOWNGRADE_FENCE.md'
+      - '.github/workflows/quota-v2-reservation-downgrade.yml'
+permissions:
+  contents: read
+jobs:
+  reservation-transition:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check candidate and test syntax
+        run: python3 -m py_compile deploy/xmesh-policy-guard-base.py tests/test_quota_v2_reservation.py
+      - name: Verify signed Ed25519 policy and durable guard lifecycle
+        run: python3 deploy/test-xmesh-policy-guard.py
+      - name: Deny V2 reservation rollback and unlimited downgrade
+        run: python3 tests/test_quota_v2_reservation.py
+      - name: Verify continuity and irreversible revocation rules
+        run: python3 tests/test_quota_v2_meter_continuity.py

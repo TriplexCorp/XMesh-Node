@@ -441,6 +441,35 @@ class SignedPolicyTests(unittest.TestCase):
         active["inbounds"][1]["settings"]["users"] = [{"auth": "injected"}]
         self.assertFalse(module.is_restricted_copy(self.config, active))
 
+    def test_signed_unlimited_transition_does_not_erase_v2_reservation(self):
+        self.policy["version"] = 2
+        self.policy["users"][0]["limitBytes"] = 1000
+        self.policy["users"][0]["quotaReservation"] = {
+            "epoch": "11111111-1111-4111-8111-111111111111",
+            "meterEpoch": "22222222-2222-4222-8222-222222222222",
+            "reservationId": "33333333-3333-4333-8333-333333333333",
+            "revision": 1, "acknowledgedBytes": 0,
+            "ceilingBytes": 100, "validUntilMs": NOW + 7200000
+        }
+        self.write_envelope()
+        self.run_guard("prepare")
+        self.run_guard("commit")
+        self.assertEqual(self.num_clients(), 1)
+        # Same signing key, new issuedAt, but an omitted reservation is not
+        # a Node-specific proof that prior outstanding bytes were settled.
+        self.policy["issuedAtMs"] = NOW + 1000
+        self.policy["users"][0]["limitBytes"] = 0
+        self.policy["users"][0]["offlineBudgetBytes"] = None
+        del self.policy["users"][0]["quotaReservation"]
+        self.write_envelope()
+        result = self.run_guard("prepare", NOW + 1000, success=False)
+        self.assertIn("verified explicit close", result.stderr)
+        # Failed prepare must not replace the previously committed signed
+        # version or gain an unmetered user account in the active config.
+        committed = json.loads((self.state / "policy-envelope.json").read_text())
+        self.assertEqual(committed["policy"]["version"], 2)
+        self.assertEqual(committed["policy"]["users"][0]["limitBytes"], 1000)
+
     def test_signed_hysteria_email_with_s_in_tag(self):
         # Regression: raw regex [^\\\\s] accidentally rejected the letter s.
         self.configure_protocol("hysteria")
