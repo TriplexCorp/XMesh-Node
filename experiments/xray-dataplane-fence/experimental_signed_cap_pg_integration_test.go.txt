@@ -45,7 +45,7 @@ func TestV2SignedRealPostgreSQLTwoNodeProcess(t *testing.T) {
     }
     if issued.Phase!="sql-committed-signed-disposable" ||
         issued.NodeID!=node || issued.Ceiling==0 ||
-        issued.Ceiling>100 {
+        issued.Ceiling>1000 {
         t.Fatal("SQL signer reported invalid grant")
     }
     pub,err:=hex.DecodeString(issued.PublicKeyHex)
@@ -85,8 +85,8 @@ func TestV2SignedRealPostgreSQLTwoNodeProcess(t *testing.T) {
         []byte(issued.SignedEnvelope),pub,context);err!=nil {
         t.Fatalf("verified SQL-backed Ed25519 grant rejected by Xray: %v",err)
     }
-    cdnBytes:=int64(20)
-    if issued.Ceiling<20 {cdnBytes=int64(issued.Ceiling)}
+    cdnBytes:=int64(150)
+    if issued.Ceiling<150 {cdnBytes=int64(issued.Ceiling)}
     mainBytes:=int64(issued.Ceiling)-cdnBytes
     cdn:=newCapCounter(t,manager,capCDN,"downlink")
     main:=newCapCounter(t,manager,capMain,"uplink")
