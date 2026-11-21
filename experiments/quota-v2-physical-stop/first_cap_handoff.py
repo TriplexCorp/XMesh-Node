@@ -299,9 +299,9 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
                                 executable_pin, request_challenge):
     """Disposable installed Agent path. No arbitrary positive issuer or start.
 
-    An independent CI controller must have already staged the genuine
-    Nexus signer and exact SQL cap outbox. This client cannot create that
-    authority; a missing entry, foreign nonce or stale lease is denied.
+    Nexus issues the first signed cap from its existing confirmed SQL lease.
+    The runtime measurement is local evidence. Nexus does not treat the
+    remote host PID or its report as trusted kernel attestation.
     """
     if (os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
             or os.geteuid() != 0 or not _int(node_id,1) or not _int(user_id,1)
@@ -319,7 +319,10 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
         pins = (executable_pin,config_pin)
         before = wal_transport._measure_quarantined_runtime(pins)
         raw = quarantine._post_quarantined_desired({
-            "nodeId":node_id,"userId":user_id,"requestChallenge":request_challenge,
+            "nodeId":node_id, "userId":user_id, "requestChallenge":request_challenge,
+            "measurement":{
+                "containerId":before[0], "hostPid":before[2], "runtimeId":before[3],
+            },
         },state,quarantine.CAP_DELIVERY_PATH)
         if not isinstance(raw,bytes) or not 0 < len(raw) <= 16384:
             raise ValueError("oversized strict signed cap delivery")

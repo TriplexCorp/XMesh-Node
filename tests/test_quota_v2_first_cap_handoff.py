@@ -270,6 +270,37 @@ class FirstCapHandoffTests(unittest.TestCase):
         self.assertEqual(sent[5]["aliases"], self.aliases)
         self.assertEqual(sent[5]["reservationId"], self.claims["reservationId"])
 
+    def test_first_issuance_sends_the_measured_runtime_over_the_product_client(self):
+        import os
+
+        if os.geteuid() != 0:
+            self.skipTest("private installed Agent evidence requires root")
+        state = self.fixture.root / "state"
+        state.mkdir(mode=0o700)
+        grant = self.signed_grant()
+        identity = {"nodeId": self.node, "activationReceiptSha256": self.fixture.activation}
+        observed = ("f"*64, "2026-11-21T00:00:00Z", 4321, self.runtime)
+        response = {"status": "committed_first_cap", "nodeId": self.node,
+                    "userId": 100, "signedEnvelope": grant.decode()}
+        with (
+            mock.patch.dict(os.environ, {"XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1"}),
+            mock.patch.object(cap.wal_transport, "_panel_pin", return_value=self.pub),
+            mock.patch.object(cap.wal_transport, "_measure_quarantined_runtime", return_value=observed),
+            mock.patch.object(quarantine, "_enrolled_activation", return_value=identity),
+            mock.patch.object(cap.confirmed_lease, "_staged_original", return_value=self.evidence()),
+            mock.patch.object(quarantine, "_post_quarantined_desired",
+                              return_value=self.guard.canonical(response)) as posted,
+            mock.patch.object(cap, "install_staged_cap", return_value={"runtimeId": self.runtime}),
+        ):
+            cap.fetch_and_install_rehearsal(
+                "https://isolated-ci.example", self.node, 100, str(state),
+                "/private/measured-xray.sock", "e"*64, self.claims["nonce"])
+        posted.assert_called_once_with({
+            "nodeId": self.node, "userId": 100, "requestChallenge": self.claims["nonce"],
+            "measurement": {"containerId": "f"*64, "hostPid": 4321, "runtimeId": self.runtime},
+        }, str(state), quarantine.CAP_DELIVERY_PATH)
+        self.assertEqual(json.loads((state/"genesis-positive-cap-u100.json").read_bytes()), response)
+
     def test_signed_cap_cannot_skip_the_original_prepared_echo(self):
         if __import__("os").geteuid() != 0:
             self.skipTest("root-private signed prepare evidence requires root")
