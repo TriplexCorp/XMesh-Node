@@ -1,0 +1,31 @@
+name: V1 offline budget invariant (draft security regression)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/xmesh-policy-guard-base.py'
+      - 'deploy/test-xmesh-policy-guard.py'
+      - 'tests/test_two_node_quota_model.py'
+      - 'tests/test_quota_v2_reservation.py'
+      - 'docs/security-audit/V1_OFFLINE_GRANT_CONSERVATION.md'
+      - '.github/workflows/security-v1-node-budget.yml'
+permissions:
+  contents: read
+jobs:
+  v1-offline-budget:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Guard script syntax
+        run: python3 -m py_compile deploy/xmesh-policy-guard-base.py tests/test_two_node_quota_model.py
+      - name: Actual policy guard end-to-end signed envelope tests
+        run: python3 deploy/test-xmesh-policy-guard.py
+      - name: Two independent Node ledgers and cross-Node partial ACK
+        run: python3 tests/test_two_node_quota_model.py
+      - name: Ensure V2 reservation contract remains unchanged
+        run: python3 tests/test_quota_v2_reservation.py
+      - name: Offline safety and revocation negative regressions
+        run: python3 tests/test_quota_v2_offline_policy_cutoff.py
