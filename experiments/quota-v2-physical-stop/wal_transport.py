@@ -203,6 +203,34 @@ def _measure_quarantined_runtime():
             not isinstance(network.get("Ports"), dict) or
             any(v is not None for v in network["Ports"].values())):
         raise ValueError("measured Xray genesis requires a network-isolated nonrestarting candidate")
+    mounts = inspect.get("Mounts")
+    privileged = host.get("Privileged")
+    cap_add = host.get("CapAdd")
+    cap_drop = host.get("CapDrop")
+    pid_mode = host.get("PidMode")
+    ipc_mode = host.get("IpcMode")
+    devices = host.get("Devices")
+    security = host.get("SecurityOpt")
+    if (privileged is not False or
+            cap_add not in (None, []) or
+            not isinstance(cap_drop, list) or
+            "ALL" not in cap_drop or
+            pid_mode not in ("", "private") or
+            ipc_mode not in ("", "private") or
+            devices not in (None, []) or
+            host.get("ReadonlyRootfs") is not True or
+            not isinstance(security, list) or
+            not any(option.startswith("no-new-privileges") for option in security
+                    if isinstance(option, str)) or
+            not isinstance(mounts, list) or len(mounts) != 2 or
+            {mount.get("Destination") for mount in mounts
+             if isinstance(mount, dict)} !=
+            {journal.JOURNAL_DEST, "/etc/xray/config.json"} or
+            any(not isinstance(mount, dict) or mount.get("Type") != "bind"
+                for mount in mounts)):
+        # A privileged Docker container, host PID/IPC namespace, added Linux
+        # capabilities or Docker socket mount could escape "network none".
+        raise ValueError("measured Xray genesis requires a hardened isolated container")
     pid = state.get("Pid")
     started = state.get("StartedAt")
     cid = inspect.get("Id")
