@@ -91,6 +91,26 @@ jobs:
             -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
           XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" \
             -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+      - name: Restart disposable PostgreSQL 17 and replay lost signed replies
+        run: |
+          set -Eeuo pipefail
+          container_id="$(docker ps --filter 'ancestor=postgres:17' --format '{{.ID}}')"
+          test "$(echo "$container_id" | wc -w)" -eq 1
+          docker restart "$container_id"
+          python3 - <<'PY'
+          import os,time,psycopg
+          for attempt in range(30):
+              try:
+                  with psycopg.connect(os.environ["QUOTA_TEST_DSN"],connect_timeout=2) as conn:
+                      assert conn.execute("SELECT 1").fetchone()[0]==1
+                  break
+              except (psycopg.Error,AssertionError):
+                  time.sleep(1)
+          else:
+              raise RuntimeError("disposable PostgreSQL failed to recover")
+          PY
+          python3 tests/quota_v2_two_node_pg_signer.py replay \
+            --persist "$XMESH_CI_QUOTA_PERSIST_DIR"
       - name: Restart BOTH Xray test processes and reject reuse of prior signed cap
         run: |
           set -Eeuo pipefail
