@@ -27,6 +27,7 @@ PRODUCT = "/usr/local/bin/xmesh-agent-xspv2-product"
 PATH = "/api/v1/node/desired-config"
 PIN_PATH = "/api/v1/node/quota-v2/policy-pin"
 LEASE_PATH = "/api/v1/node/quota-v2/genesis-reservation"
+CAP_DELIVERY_PATH = "/api/v1/node/quota-v2/genesis-cap-delivery"
 MAX_REPLY = 262144
 PREVIEW_FILE = "genesis-config-preview.json"
 INTENT_FILE = "genesis-prepare-intent.json"
@@ -154,7 +155,7 @@ def _locked_private_state(directory):
 
 def _durable_store(state_fd, data, target="genesis-quarantine-envelope.json"):
     if target not in ("genesis-quarantine-envelope.json", PREVIEW_FILE, INTENT_FILE) and not re.fullmatch(
-            r"genesis-reservation-(prepared|confirmed)-u[1-9][0-9]{0,18}\.json", target):
+            r"genesis-(?:reservation-(?:prepared|confirmed)|positive-cap)-u[1-9][0-9]{0,18}\.json", target):
         raise ValueError("unregistered immutable Genesis evidence name")
     raw=json.dumps(data,sort_keys=True,separators=(",",":"),
                    ensure_ascii=False,allow_nan=False).encode("utf-8")
@@ -198,7 +199,7 @@ def _post_quarantined_desired(request, state, path=PATH):
     No curl, raw HTTP, Ed25519 legacy fallback, insecure TLS or alternate host
     is reachable from this operation.
     """
-    if path not in (PATH,PIN_PATH,LEASE_PATH):
+    if path not in (PATH,PIN_PATH,LEASE_PATH,CAP_DELIVERY_PATH):
         raise ValueError("unregistered XSP/2 product operation")
     with tempfile.TemporaryDirectory(prefix="xmesh-quarantine-",dir=state) as root:
         root=Path(root)
