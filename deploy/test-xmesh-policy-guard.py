@@ -498,7 +498,7 @@ class SignedPolicyTests(unittest.TestCase):
         self.assertEqual(self.num_clients(), 0)
         entry = json.loads((self.state / "policy-usage.json").read_text())["users"]["1"]
         self.assertEqual(entry["anchor"], 0)
-        self.assertEqual(entry["budget"], 150)
+        self.assertEqual(entry["budget"], 100)  # original signed local lease, never reissued
         self.assertEqual(entry["revokedReason"], "quota")
 
     def test_expiration_offline_and_policy_key_pin(self):
