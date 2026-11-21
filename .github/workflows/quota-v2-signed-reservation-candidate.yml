@@ -24,4 +24,4 @@ jobs:
       - name: Confirm existing signed WAL and measured genesis regressions
         run: |
           python3 tests/test_quota_v2_measured_genesis.py
-          python3 tests/test_quota_v2_wal_transport.py
+          python3 tests/test_quota_v2_verify_nexus_wal_anchor.py
