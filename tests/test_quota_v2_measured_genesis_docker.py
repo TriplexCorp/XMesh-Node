@@ -103,25 +103,28 @@ def main():
                 "https://disposable.invalid", 42, fingerprint, CHALLENGE)
             print("PASS: real Xray PID/pidfd bound to a no-network, no-restart candidate", flush=True)
 
-            # A running container attached to any user network must no longer
-            # be eligible even if its CID/PID are unchanged.
-            docker("network", "create", "quota-v2-forbidden-network")
-            try:
-                docker("network", "connect", "quota-v2-forbidden-network", NAME)
-                stopped_or_rejected(
-                    wal_transport._measure_quarantined_runtime,
-                    "network-isolated")
-                print("PASS: network-attached candidate rejected", flush=True)
-            finally:
-                docker("network", "disconnect", "-f",
-                       "quota-v2-forbidden-network", NAME, check=False)
-                docker("network", "rm", "quota-v2-forbidden-network", check=False)
-
+            # Docker normally disallows attaching another network to a
+            # container created with --network none. Independently verify
+            # that a real bridged Xray cannot pass the measured candidate
+            # check, without trying to circumvent Docker isolation.
             docker("stop", "-t", "1", NAME)
             stopped_or_rejected(
                 wal_transport._measure_quarantined_runtime,
                 "network-isolated")
             print("PASS: stopped Xray cannot replay an old measured runtime", flush=True)
+            docker("rm", NAME)
+            created = False
+            docker("run", "-d", "--name", NAME, "--network", "bridge",
+                   "--restart", "no", "--read-only", "--cap-drop", "ALL",
+                   "--security-opt", "no-new-privileges", "--user", "0:0",
+                   "-v", str(config) + ":/etc/xray/config.json:ro",
+                   "-v", str(journal) + ":" + journal_integrity.JOURNAL_DEST + ":rw",
+                   "--entrypoint", "xray", IMAGE, "run", "-config", "/etc/xray/config.json")
+            created = True
+            stopped_or_rejected(
+                wal_transport._measure_quarantined_runtime,
+                "network-isolated")
+            print("PASS: real network-attached Xray cannot prepare genesis", flush=True)
         finally:
             if created:
                 docker("rm", "-f", NAME, check=False)
