@@ -221,6 +221,28 @@ class QuarantinePolicyTests(unittest.TestCase):
         finally:
             os.close(fd)
 
+    def test_shared_xray_reconciler_flock_excludes_concurrent_genesis(self):
+        fd,lock=qp._locked_private_state(str(self.root))
+        try:
+            with self.assertRaises(BlockingIOError):
+                qp._locked_private_state(str(self.root))
+            assert (self.root/"lock").stat().st_mode & 0o777 == 0o600
+        finally:
+            os.close(lock)
+            os.close(fd)
+        # Closing the same installed lock lets a different serialized
+        # reconciler proceed. This stage never overrides the normal lock.
+        other_fd,other_lock=qp._locked_private_state(str(self.root))
+        os.close(other_lock)
+        os.close(other_fd)
+        link=self.root.parent/"xmesh-symlink-should-not-be-state"
+        if link.exists():
+            link.unlink()
+        link.symlink_to(self.root, target_is_directory=True)
+        self.addCleanup(lambda: link.unlink(missing_ok=True))
+        with self.assertRaises(ValueError):
+            qp._locked_private_state(str(link))
+
     def test_private_durable_evidence_idempotency_and_tamper_denial(self):
         fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
         try:
