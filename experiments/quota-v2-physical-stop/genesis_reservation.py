@@ -148,7 +148,27 @@ def verify_lease_response(raw, node, user, op, original, pinned, activation,
     return envelope
 
 
-def run(panel, node, user, state, operation):
+def _original_measurement_pins(state_fd, original, node, activation):
+    """Recover the pins persisted before the original Genesis network call."""
+    intent = _identity_file(state_fd, quarantine.INTENT_FILE, 4096)
+    genesis = original["prepared"]["payload"]
+    expected = {
+        "nodeId":node, "runtimeId":genesis["candidateRuntimeId"],
+        "activationReceiptSha256":activation,
+        "configSha256":original["reply"]["revision"],
+        "challenge":genesis["challenge"],
+    }
+    if (not isinstance(intent,dict)
+            or set(intent)!=set(expected)|{"executableSha256"}
+            or any(type(intent[k]) is not type(v) or intent[k]!=v
+                   for k,v in expected.items())
+            or not quarantine._hex(intent["executableSha256"])
+            or not quarantine._hex(intent["configSha256"])):
+        raise ValueError("original measured Genesis intent mismatches lease")
+    return (intent["executableSha256"],intent["configSha256"])
+
+
+def run(panel, node, user, state, operation, *, require_pins=True):
     if (os.geteuid() != 0 or not isinstance(panel, str)
             or not panel.startswith("https://") or node <= 0 or user <= 0
             or operation not in ("prepare", "confirm")):
@@ -160,7 +180,8 @@ def run(panel, node, user, state, operation):
         activation = identity["activationReceiptSha256"]
         original = _staged_original(state_fd, node, user, pinned, activation)
         genesis = original["prepared"]["payload"]
-        before = wal_transport._measure_quarantined_runtime()
+        pins = _original_measurement_pins(state_fd, original, node, activation) if require_pins else None
+        before = wal_transport._measure_quarantined_runtime(pins)
         if before[3] != genesis["candidateRuntimeId"]:
             raise ValueError("measured Xray replaced since original signed Genesis")
         previous = None
@@ -183,7 +204,7 @@ def run(panel, node, user, state, operation):
         result = verify_lease_response(
             raw, node, user, operation, original, pinned, activation,
             previous=previous)
-        if (before != wal_transport._measure_quarantined_runtime()
+        if (before != wal_transport._measure_quarantined_runtime(pins)
                 or identity != quarantine._enrolled_activation(panel, node)):
             raise ValueError("strict Node activation or kernel Xray changed during lease stage")
         # A reserved SQL ceiling is NOT an installed Xray byte-cap.
