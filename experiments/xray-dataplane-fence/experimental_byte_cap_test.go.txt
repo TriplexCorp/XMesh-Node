@@ -2,7 +2,9 @@ package xmeshdrain
 
 import (
     "errors"
+    "fmt"
     "os"
+    "strings"
     "sync"
     "testing"
 
@@ -49,7 +51,14 @@ func capAttempt(t *testing.T,c stats.Counter,email,direction string,n int64) (pa
     t.Helper()
     if err:=BeginMeterWrite(email,direction);err!=nil {t.Fatal(err)}
     defer EndMeterWrite(email,direction)
-    defer func(){ if recovered:=recover();recovered!=nil {passed=false} }()
+    defer func(){
+        if recovered:=recover();recovered!=nil {
+            if !strings.Contains(fmt.Sprint(recovered),"experimental quota:") {
+                t.Errorf("unrelated Xray meter panic is not a quota denial: %v",recovered)
+            }
+            passed=false
+        }
+    }()
     c.(interface{ExperimentalAddMetered(int64)int64}).ExperimentalAddMetered(n)
     return true
 }
