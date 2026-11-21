@@ -76,8 +76,9 @@ class SignedCandidateTests(unittest.TestCase):
 
     def prior_from(self,receipt):
         return {key:copy.deepcopy(receipt[key]) for key in (
-            "bindings","reservationRevision","observedWalBytes",
-            "observedCdnWalBytes","receiptDigest")}
+            "bindings","reservationRevision","acknowledgedBytes",
+            "observedWalBytes","observedCdnWalBytes","issuedAtMs",
+            "receiptDigest")}
 
     def test_valid_exact_signature_still_has_no_start_authority(self):
         result=self.verify()
@@ -198,7 +199,9 @@ class SignedCandidateTests(unittest.TestCase):
         moved["observedCdnWalBytes"]=12
         self.assertEqual(self.verify(moved,prior=prior)["reservationRevision"],2)
         for field,value in (("reservationRevision",0),("observedWalBytes",29),
-                            ("observedCdnWalBytes",11)):
+                            ("observedCdnWalBytes",11),
+                            ("acknowledgedBytes",9),
+                            ("issuedAtMs",NOW-1)):
             p=fixture()
             p["reservationRevision"]=2
             p[field]=value
