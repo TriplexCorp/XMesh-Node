@@ -90,10 +90,10 @@ NODE_RELEASE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
 }
 AGENT_VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/AGENT_VERSION")"
 WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
-if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
-  if [[ "$AGENT_VERSION" != control-v6.0.25 || "$WAL_STAGE_AGENT" != 1 ||
+if [[ "$AGENT_VERSION" == control-v6.0.25 || "$AGENT_VERSION" == control-v6.0.27 || "$WAL_STAGE_AGENT" != 0 ]];then
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.27 ) || "$WAL_STAGE_AGENT" != 1 ||
         ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
-    echo "Agent 6.0.25 WAL rehearsal requires explicit staging and an exact Nexus revision." >&2
+    echo "Experimental WAL/Genesis Agent requires explicit staging and an exact Nexus revision." >&2
     exit 2
   fi
   for path in /usr/local/sbin/xmesh-node-control /etc/systemd/system/xmesh-node-control.{service,timer};do
