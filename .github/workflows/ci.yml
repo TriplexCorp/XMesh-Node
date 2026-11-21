@@ -40,6 +40,8 @@ jobs:
       - run: python3 tests/test_quota_v2_local_audit.py
       - name: Guard against V1 cross-Node offline budget replenishment
         run: python3 tests/test_two_node_quota_model.py
+      - name: Verify V1 two-Node signed policy and process reload
+        run: python3 tests/test_two_node_signed_policy_process.py
       - run: python3 tests/test_quota_v2_offline_policy_cutoff.py
       - run: python3 tests/test_quota_v2_prestop_capture.py
       - run: python3 tests/test_meter_scope_publish.py
