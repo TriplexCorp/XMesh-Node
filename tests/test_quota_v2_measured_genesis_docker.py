@@ -86,7 +86,12 @@ def main():
                 "readonlyRoot": h.get("ReadonlyRootfs"),
                 "devicesCount": len(h.get("Devices") or []),
                 "mounts": sorted([
-                    {"destination": m.get("Destination"), "type": m.get("Type")}
+                    {"destination": m.get("Destination"), "type": m.get("Type"),
+                     "driver": m.get("Driver"),
+                     "anonymousName64": bool(
+                         isinstance(m.get("Name"), str) and
+                         len(m["Name"]) == 64 and
+                         all(ch in "0123456789abcdef" for ch in m["Name"]))}
                     for m in inspected.get("Mounts", [])],
                     key=lambda m: str(m["destination"])),
             }, sort_keys=True), flush=True)
