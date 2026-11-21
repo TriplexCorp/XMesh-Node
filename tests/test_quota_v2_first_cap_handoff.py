@@ -224,7 +224,7 @@ class FirstCapHandoffTests(unittest.TestCase):
         ):
             receipt = cap.install_staged_cap(
                 "https://isolated-ci.example", self.node, str(state),
-                "/private/measured-xray.sock", grant)
+                "/private/measured-xray.sock", grant, "e" * 64)
         self.assertEqual(receipt["runtimeId"], self.runtime)
         installed.assert_called_once()
         sent = installed.call_args.args
@@ -258,7 +258,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cap.install_staged_cap(
                     "https://isolated-ci.example", self.node, str(state),
-                    "/private/measured-xray.sock", self.signed_grant())
+                    "/private/measured-xray.sock", self.signed_grant(), "e" * 64)
         installed.assert_not_called()
 
 
