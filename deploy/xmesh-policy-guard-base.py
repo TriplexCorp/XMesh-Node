@@ -980,7 +980,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         # this user to "unlimited" (or back to a legacy policy). A positive
         # zero-debt rollover requires a *separate* signed settlement/epoch
         # transition, not absence of quotaReservation in the new JSON.
-        if isinstance(record.get("quotaReservation"), dict) and (
+        if "quotaReservation" in record and (
                 policy.get("version") != 2 or limit <= 0):
             raise ValueError(
                 "Existing V2 reservation needs verified explicit close before downgrade")
