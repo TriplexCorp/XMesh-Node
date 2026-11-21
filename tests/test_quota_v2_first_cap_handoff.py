@@ -199,20 +199,20 @@ class FirstCapHandoffTests(unittest.TestCase):
                              self.pub, self.runtime, self.now + 120_000)
 
 
-    def confirmed_lease(self):
+    def confirmed_lease(self, status="confirmed"):
         reserve = {
             "epoch":self.claims["accountEpoch"],
             "meterEpoch":self.claims["meterEpoch"],
             "reservationId":self.claims["reservationId"],
             "revision":self.claims["reservationRevision"],
             "acknowledgedBytes":0,
-            "ceilingBytes":self.claims["sharedCeilingBytes"],
+            "ceilingBytes":self.claims["sharedCeilingBytes"] if status == "confirmed" else 0,
             "validUntilMs":self.now+3_600_000,
         }
         payload = {
             "schemaVersion":1,
             "kind":"xmesh.quota-v2.genesis-lease-identity",
-            "status":"confirmed",
+            "status":status,
             "nodeId":self.node,
             "userId":self.claims["userId"],
             "activationReceiptSha256":self.fixture.activation,
@@ -237,6 +237,9 @@ class FirstCapHandoffTests(unittest.TestCase):
         evidence_path = state / "genesis-quarantine-envelope.json"
         evidence_path.write_bytes(self.guard.canonical(self.evidence()))
         evidence_path.chmod(0o600)
+        prepared_path = state / "genesis-reservation-prepared-u100.json"
+        prepared_path.write_bytes(self.guard.canonical(self.confirmed_lease("prepared")))
+        prepared_path.chmod(0o600)
         confirmed_path = state / "genesis-reservation-confirmed-u100.json"
         confirmed_path.write_bytes(self.guard.canonical(self.confirmed_lease()))
         confirmed_path.chmod(0o600)
