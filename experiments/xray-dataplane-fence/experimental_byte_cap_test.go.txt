@@ -144,7 +144,11 @@ func TestV2ExperimentalQuotaRejectsUnknownAliasAndReplacementProcess(t *testing.
     if outsider.Value()!=0 {t.Fatal("unlisted alias changed Xray byte counter")}
     original:=newCapCounter(t,manager,capMain,"uplink")
     gate.Lock()
-    gate.runtimeID="f"+gate.runtimeID[1:]
+    if gate.runtimeID[0]=='f' {
+        gate.runtimeID="e"+gate.runtimeID[1:]
+    } else {
+        gate.runtimeID="f"+gate.runtimeID[1:]
+    }
     gate.Unlock()
     if capAttempt(t,original,capMain,"uplink",1) {
         t.Fatal("old runtime quota reused for a replaced Xray process")
