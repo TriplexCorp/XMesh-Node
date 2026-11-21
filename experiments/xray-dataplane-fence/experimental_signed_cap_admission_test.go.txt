@@ -2,6 +2,7 @@ package xmeshdrain
 
 import (
     "bytes"
+    "context"
     "crypto/ed25519"
     "crypto/rand"
     "encoding/hex"
@@ -13,6 +14,7 @@ import (
     "sync"
     "testing"
 
+    xstats "github.com/xtls/xray-core/app/stats"
     "github.com/xtls/xray-core/features/stats"
 )
 
@@ -21,7 +23,32 @@ func signedCapTestFixture(t *testing.T) (string,interface{
     RegisterCounter(string)(stats.Counter,error)
 },signedCapPayload,signedCapContext,ed25519.PublicKey,ed25519.PrivateKey) {
     t.Helper()
-    dir,manager:=setupUnfencedMeter(t)
+    // Only the cross-process PostgreSQL job uses a stable, root-private
+    // WAL directory, so a genuinely NEW Go Xray process can verify prior
+    // history after the first process exits. All normal unit tests retain
+    // independent t.TempDir() sandboxes.
+    var dir string
+    var manager *xstats.Manager
+    root:=os.Getenv("XMESH_CI_QUOTA_PERSIST_DIR")
+    if root!="" && t.Name()=="TestV2SignedRealPostgreSQLTwoNodeProcess" &&
+        os.Getenv("XMESH_AUDIT_DISPOSABLE")=="1" {
+        dir=filepath.Join(root,"node-"+os.Getenv("XMESH_CI_QUOTA_NODE"))
+        if err:=os.MkdirAll(dir,0700);err!=nil{t.Fatal(err)}
+        if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+        resetGate()
+        observed.Lock()
+        observed.manager=nil
+        observed.directory=""
+        observed.runtimeID=""
+        observed.Unlock()
+        if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+        var err error
+        manager,err=xstats.NewManager(context.Background(),&xstats.Config{})
+        if err!=nil{t.Fatal(err)}
+        BindStatsManager(manager)
+    } else {
+        dir,manager=setupUnfencedMeter(t)
+    }
     gate.Lock()
     run:=gate.runtimeID
     gate.Unlock()
