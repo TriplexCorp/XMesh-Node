@@ -83,6 +83,40 @@ Existing normal `xmesh-xray-sync.sh` intentionally REJECTS any such
 HTTP 200 response rather than applying the quarantined profile as an
 ordinary policy. Its fail-closed guard is also tested in Node CI.
 
+
+## Experimental positive-cap local handoff (NOT a release route)
+
+The draft experiment first_cap_handoff.py now exposes callable functions,
+not installed commands:
+
+- verify_grant checks canonical Ed25519 first-cap bytes using the existing
+  pinned Nexus PolicySigner key, plus the original signed Genesis and
+  previously signed quarantined policy. It denies mismatched Node, user,
+  activation, policy SHA-256, runtime, old WAL, oversized limits,
+  expiry, start/resume permissions and refunds.
+- The user must be held with zero offline budget in the original signed
+  policy. Every granted MAIN/CDN alias must resolve to exactly one VLESS
+  client with the user's original Xray ID and email in the signed profile.
+  The local install scope is derived from that verified information; it
+  cannot be supplied by the positive grant's caller.
+- install_staged_cap acquires the normal root-owned reconciliation lock,
+  reads the fsynced evidence with O_NOFOLLOW, rechecks the owner's enrolled
+  strict-XSP/2 activation, and measures the actual isolated Linux Xray PID
+  before and after admission. An independently release-verified executable
+  SHA-256 pin is **required**. The actual config bytes must hash to the
+  original Nexus-signed profile. Only then does the verified private Unix
+  peer installer receive the original grant and derived scope.
+- The real OpenSSL test suite tests signature forgery, changed account,
+  user/policy/runtime, expiry, aliases, zero-WAL claims, and a mocked
+  root-private locked handoff to the existing local Xray socket.
+
+**Still blocked:** Nexus does not serve the real positive issuer over the
+owner-enrolled XSP/2 path, and the installed Agent has not been wired to
+obtain a signed permit or release-qualified executable pin. This function
+is not exposed as a normal installed command and never opens VLESS itself.
+The test fixtures do not prove two installed Nodes and two real Xray servers
+with genuine Nexus-issued caps. Keep production Quota V2 OFF.
+
 ## Verification
 
 `tests/test_quota_v2_quarantine_handoff.py` exercises **actual OpenSSL
