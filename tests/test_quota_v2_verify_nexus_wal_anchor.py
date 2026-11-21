@@ -7,6 +7,7 @@ The actual Nexus CI uses a real PostgreSQL store before signing receipts.
 Here an independently supplied latest-head tuple is required for verification;
 signing alone must not allow replay, Xray re-admission or any refund.
 """
+import base64
 import copy
 import hashlib
 import os
@@ -18,6 +19,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"experiments/quota-v2-physical-stop"))
+import wal_transport
 import witness_inventory
 import verify_nexus_wal_anchor as verifier
 import sign_observation as signed
@@ -86,6 +88,85 @@ class NexusExternalWalAnchorTests(unittest.TestCase):
             kwargs.get("nexus_pub",self.pub),
             kwargs.get("head",self.head),
             str(self.fi.directory))
+
+    def test_transport_head_binds_fresh_challenge_receipt_and_local_history(self):
+        receipt = self.signed()
+        challenge = "1" * 64
+        def bundle(domain=wal_transport.HEAD_DOMAIN):
+            head = self.signed({
+                "schemaVersion": 1, "kind": "xmesh.quota-v2.external-wal-head",
+                "nodeId": self.node, "challenge": challenge, **self.head,
+                "receiptSha256": hashlib.sha256(receipt).hexdigest(),
+            }, domain=domain)
+            return signed.canonical({
+                name: base64.b64encode(blob).decode("ascii")
+                for name, blob in (
+                    ("receipt", receipt), ("head", head),
+                    ("witness", self.source), ("inventory", self.raw),
+                )
+            })
+
+        def verify(raw, nonce=challenge, expected=receipt):
+            return wal_transport.verify_bundle(
+                raw, nonce, self.node, self.node_pub, self.pub, str(self.fi.directory),
+                expected_receipt=expected,
+            )
+
+        raw = bundle()
+        result = verify(raw)
+        self.assertTrue(result["offhostFullBirthIndexHeadMatched"])
+        self.assertFalse(result["canResume"])
+        with self.assertRaisesRegex(ValueError, "fresh WAL head binding"):
+            verify(raw, "2" * 64)
+        with self.assertRaisesRegex(ValueError, "differs from the current checkpoint"):
+            verify(raw, expected=b"other receipt")
+        with self.assertRaisesRegex(ValueError, "foreign key"):
+            verify(bundle(domain=b"other domain"))
+        (self.fi.directory / "xmesh-meter-inventory-v1.jsonl").unlink()
+        for meter in self.fi.directory.glob("meter-*.jsonl"):
+            meter.unlink()
+        with self.assertRaisesRegex(ValueError, "rolled back"):
+            verify(raw)
+
+    def test_sync_requires_verified_existing_head_and_skips_unchanged_upload(self):
+        def reply(challenge):
+            receipt = self.signed()
+            head = self.signed({
+                "schemaVersion": 1, "kind": "xmesh.quota-v2.external-wal-head",
+                "nodeId": self.node, "challenge": challenge, **self.head,
+                "receiptSha256": hashlib.sha256(receipt).hexdigest(),
+            }, domain=wal_transport.HEAD_DOMAIN)
+            return signed.canonical({
+                name: base64.b64encode(blob).decode("ascii")
+                for name, blob in (
+                    ("receipt", receipt), ("head", head),
+                    ("witness", self.source), ("inventory", self.raw),
+                )
+            })
+
+        def call(post):
+            return wal_transport.sync_checkpoint(
+                "sync", self.node, {}, str(self.fi.directory), self.node_pub, self.pub,
+                lambda *_: self.fail("unexpected witness signing"), post,
+            )
+
+        def post(body):
+            self.assertEqual(body["operation"], "head")
+            return reply(body["challenge"])
+
+        proof = call(post)
+        self.assertTrue(proof["offhostFullBirthIndexHeadMatched"])
+        self.assertFalse(proof["canResume"])
+
+        def unavailable(body):
+            self.assertEqual(body["operation"], "head")
+            raise OSError("fixture lost connection")
+
+        with self.assertRaisesRegex(OSError, "lost connection"):
+            call(unavailable)
+        (self.fi.directory / "xmesh-meter-inventory-v1.jsonl").unlink()
+        with self.assertRaisesRegex(ValueError, "rolled back"):
+            call(post)
 
     def test_current_signed_nexus_offhost_head_verified_but_non_authorizing(self):
         receipt=self.signed()

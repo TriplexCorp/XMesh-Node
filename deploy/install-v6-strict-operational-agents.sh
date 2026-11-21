@@ -22,6 +22,24 @@ AGENT_VERSION_FILE="$ROOT/AGENT_VERSION"
 [[ -f "$AGENT_VERSION_FILE" && ! -L "$AGENT_VERSION_FILE" ]] || { echo "AGENT_VERSION file missing" >&2; exit 1; }
 AGENT_VERSION="$(tr -d '\r\n' < "$AGENT_VERSION_FILE")"
 [[ "$AGENT_VERSION" =~ ^control-v6\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid Agent release version: $AGENT_VERSION" >&2; exit 1; }
+WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
+NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
+[[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
+  echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
+}
+if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
+  if [[ "$AGENT_VERSION" != control-v6.0.25 || "$WAL_STAGE_AGENT" != 1 || ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
+    echo "Agent 6.0.25 WAL rehearsal requires explicit staging and an exact Nexus revision." >&2; exit 2
+  fi
+fi
+if [[ "$WAL_STAGE_AGENT" == 1 ]];then
+  for path in /usr/local/sbin/xmesh-node-control /etc/systemd/system/xmesh-node-control.{service,timer};do
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+      echo "WAL staging requires a fresh test node without an existing control worker." >&2; exit 2
+    }
+  done
+fi
+
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo "strict-PQ product client missing" >&2; exit 1; }
 "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null || {
@@ -46,16 +64,24 @@ for helper in xmesh-policy-guard.py xmesh-policy-guard-base.py xmesh-quota-revoc
   install -o root -g root -m 0700 "$ROOT/deploy/$helper" "/usr/local/libexec/$helper"
 done
 install -o root -g root -m 0700 "$ROOT/deploy/xmesh-xray-sync.sh" /usr/local/sbin/xmesh-xray-sync
+# Install the nonauthorizing WAL operator command beside its reviewed modules.
+# The optional systemd environment file enables staged WAL verification.
+WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
+for family in quota-v2-physical-stop xray-dataplane-fence; do
+  install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
+done
+for helper in quota-v2-physical-stop/{wal_transport,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
+  python3 -m py_compile "$ROOT/experiments/$helper.py"
+  install -o root -g root -m 0700 "$ROOT/experiments/$helper.py" "$WAL_ROOT/$helper.py"
+done
+ln -sfn "$WAL_ROOT/quota-v2-physical-stop/wal_transport.py" /usr/local/sbin/xmesh-quota-wal
+
 if [[ -f "$ROOT/deploy/xmesh-tls-renew-hook.sh" ]]; then
   install -o root -g root -m 0700 "$ROOT/deploy/xmesh-tls-renew-hook.sh" /usr/local/libexec/xmesh-tls-renew-hook
 fi
 
 # Metrics/control implementations live with Nexus. During branch integration a
 # reviewed ref may be supplied explicitly; production defaults to main.
-NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
-[[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
-  echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
-}
 RAW="https://raw.githubusercontent.com/TriplexCorp/XMesh-Nexus/$NEXUS_REF/deploy"
 fetch_install(){
   local remote="$1" target="$2" mode="$3" tmp
@@ -68,11 +94,13 @@ fetch_install(){
   trap - RETURN
 }
 fetch_install node-metrics-agent.sh /usr/local/sbin/xmesh-node-metrics 0700
-fetch_install node-control-agent.sh /usr/local/sbin/xmesh-node-control 0700
 fetch_install xray-stats-collector.py /usr/local/libexec/xmesh-xray-stats-collector.py 0700
 
 grep -Fq '/api/v1/metrics/ingest' /usr/local/sbin/xmesh-node-metrics || { echo "invalid metrics worker" >&2; exit 1; }
-grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  fetch_install node-control-agent.sh /usr/local/sbin/xmesh-node-control 0700
+  grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
+fi
 
 install -d -o root -g root -m 0700 /etc/xmesh-node-metrics /var/lib/xmesh-node-metrics /var/lib/xmesh-node-control /var/lib/xmesh-xray-sync
 cat > /etc/xmesh-node-metrics.env <<EOF
@@ -101,6 +129,10 @@ printf 'local-only; network authorization is strict XSP/2 PQ product transport\n
 chmod 0600 /etc/xmesh-node-metrics/compatibility-key-purpose
 
 STRICT_PATH=/usr/local/libexec/xmesh-strict-pq-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+WAL_SERVICE_ENV=EnvironmentFile=-/etc/xmesh-quota-wal.env
+if [[ "$WAL_STAGE_AGENT" == 1 ]];then
+  WAL_SERVICE_ENV=Environment=XMESH_QUOTA_V2_WAL_RECONCILE=1
+fi
 cat > /etc/systemd/system/xmesh-xray-sync.service <<EOF
 [Unit]
 Description=XMesh v6 strict-PQ managed Xray reconciliation
@@ -110,6 +142,7 @@ ConditionPathExists=/var/lib/xmesh-agent/product/active.json
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/xmesh-node-metrics.env
+$WAL_SERVICE_ENV
 Environment="PATH=$STRICT_PATH"
 ExecStart=/usr/local/sbin/xmesh-xray-sync
 User=root
@@ -187,6 +220,7 @@ Unit=xmesh-node-metrics.service
 WantedBy=timers.target
 EOF
 
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
 cat > /etc/systemd/system/xmesh-node-control.service <<EOF
 [Unit]
 Description=XMesh v6 control over strict-PQ product transport
@@ -226,6 +260,8 @@ Unit=xmesh-node-control.service
 [Install]
 WantedBy=timers.target
 EOF
+
+fi
 
 cat > /etc/systemd/system/xmesh-node-user-meter.service <<'EOF'
 [Unit]
@@ -276,15 +312,28 @@ systemctl daemon-reload
 OPERATIONAL_TIMERS=(
   xmesh-xray-sync.timer
   xmesh-node-metrics.timer
-  xmesh-node-control.timer
   xmesh-node-user-meter.timer
 )
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  OPERATIONAL_TIMERS+=(xmesh-node-control.timer)
+fi
 systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null
 
 # Heartbeat/metrics are independent of whether the very first Xray policy can
 # be applied. Start them now so Nexus can keep observing the enrolled node.
 systemctl start xmesh-node-metrics.service || true
-systemctl start xmesh-node-control.service || true
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  systemctl start xmesh-node-control.service || true
+fi
+
+if [[ "$WAL_STAGE_AGENT" == 1 ]];then
+  # A fresh staging Node has no qualified Xray yet. Arm the reconciler in
+  # quarantine without treating the expected cold-start denial as an install
+  # failure or using the ordinary bootstrap path to start unmetered traffic.
+  systemctl start "${OPERATIONAL_TIMERS[@]}"
+  echo "WAL staging timers active. Xray is quarantined until runtime qualification."
+  exit 0
+fi
 
 # First reconciliation is synchronous. If there is no profile yet it exits
 # cleanly while leaving Xray stopped. On any other failure arm the timers before

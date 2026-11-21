@@ -29,7 +29,7 @@ jobs:
       - name: Enforce isolated production-capable Agent boundary
         run: |
           set -euo pipefail
-          test "$(sed -n 's/^go //p' go.mod)" = "1.23"
+          test "$(sed -n 's/^go //p' go.mod)" = "1.27.4"
           grep -Fq 'go 1.27.3' agent/xspv2/go.mod
           grep -Fq '../../security/xspv2/poc-go' agent/xspv2/go.mod
           grep -Fq 'cutover.ExchangeSignedACKForReceipt' agent/xspv2/runtime/transport_linux.go

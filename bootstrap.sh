@@ -8,7 +8,7 @@ export LC_ALL=C
 
 if [[ $EUID -ne 0 ]]; then
   command -v sudo >/dev/null 2>&1 || { echo "Run as root (sudo is unavailable)." >&2; exit 1; }
-  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF bash "$0" "$@"
+  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF,XMESH_NEXUS_RELEASE_REF,XMESH_QUOTA_V2_WAL_STAGE_AGENT bash "$0" "$@"
 fi
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "Usage: XMESH_NODE_RELEASE_REF=<40-hex-reviewed-sha> bash bootstrap.sh https://panel.example.com NODE_ID [node-port]" >&2
@@ -88,6 +88,20 @@ NODE_RELEASE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
 [[ "$(tr -d '\r\n' < "$INSTALL_DIR/VERSION")" == "6.0.0" ]] || {
   echo "Fresh strict-PQ bootstrap requires XMesh Node v6.0.0." >&2; exit 1;
 }
+AGENT_VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/AGENT_VERSION")"
+WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
+if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
+  if [[ "$AGENT_VERSION" != control-v6.0.25 || "$WAL_STAGE_AGENT" != 1 ||
+        ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
+    echo "Agent 6.0.25 WAL rehearsal requires explicit staging and an exact Nexus revision." >&2
+    exit 2
+  fi
+  for path in /usr/local/sbin/xmesh-node-control /etc/systemd/system/xmesh-node-control.{service,timer};do
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+      echo "WAL staging requires a fresh test node without an existing control worker." >&2; exit 2
+    }
+  done
+fi
 
 echo "XMesh Node reviewed revision: $NODE_RELEASE_SHA"
 echo "Enforcing pre-activation fail-closed state..."
@@ -217,7 +231,16 @@ bash "$INSTALL_DIR/deploy/install-v6-strict-operational-agents.sh" "$PANEL" "$NO
 "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null
 systemctl is-enabled --quiet xmesh-xray-sync.timer
 systemctl is-enabled --quiet xmesh-node-metrics.timer
-systemctl is-enabled --quiet xmesh-node-control.timer
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  systemctl is-enabled --quiet xmesh-node-control.timer
+else
+  if systemctl is-enabled --quiet xmesh-node-control.timer ||
+     systemctl is-active --quiet xmesh-node-control.service;then
+    echo "Independent control worker must stay disabled on a WAL staging Node." >&2
+    exit 1
+  fi
+  echo "Staged WAL qualification services installed; cold Xray remains stopped."
+fi
 
 echo
 echo "XMesh Node v6.0.0 POSTQUANTUM installation complete."
