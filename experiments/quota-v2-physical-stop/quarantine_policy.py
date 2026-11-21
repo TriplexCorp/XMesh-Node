@@ -262,7 +262,7 @@ def _pinned_policy_before_genesis(panel,node,state,state_fd):
             raise ValueError("conflicting original Nexus signing identity")
         return key
     with os.fdopen(fd,"wb") as stream:
-        stream.write((key+"\\n").encode("ascii"))
+        stream.write((key+"\n").encode("ascii"))
         stream.flush()
         os.fsync(stream.fileno())
     os.fsync(state_fd)
