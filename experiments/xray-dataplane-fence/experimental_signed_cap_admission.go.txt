@@ -18,7 +18,6 @@ import (
     "path/filepath"
     "reflect"
     "regexp"
-    "sort"
     "strconv"
     "syscall"
 )
@@ -304,5 +303,31 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
         validUntilMs:payload.ValidUntilMs,lastSeenMs:experimentalCapClockMs(),
         aliases:aliases,
     }
+    return nil
+}
+
+// All authenticated VLESS streams are denied until their exact inbound is
+// covered by an installed, unexpired, process-bound grant. This check shares
+// the same mutex as the byte WAL and every new Register() operation.
+func checkSignedCapBeforeRegisterLocked(email string) error {
+    if !experimentalByteCaps.strict {return nil}
+    cap:=experimentalByteCaps.users[canonicalMeterUser(email)]
+    if cap==nil || cap.runtimeID!=gate.runtimeID {
+        return errors.New("signed Xray cap: user has no measured process-bound grant")
+    }
+    isCDN,ok:=cap.aliases[email]
+    if !ok {return errors.New("signed Xray cap: inbound not covered by grant")}
+    now:=experimentalCapClockMs()
+    if cap.expired || now<=0 || now>=cap.validUntilMs ||
+        (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
+        cap.expired=true
+        return errors.New("signed Xray cap: grant expired or clock rolled back")
+    }
+    if cap.chargedAll>=cap.grantCeiling ||
+        cap.chargedAll>=cap.nodeCeiling ||
+        (isCDN && cap.chargedCDN>=cap.cdnCeiling) {
+        return errors.New("signed Xray cap: no spendable bytes remain")
+    }
+    cap.lastSeenMs=now
     return nil
 }
