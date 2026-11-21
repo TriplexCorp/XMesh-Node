@@ -204,6 +204,26 @@ def _measure_quarantined_runtime():
             any(v is not None for v in network["Ports"].values())):
         raise ValueError("measured Xray genesis requires a network-isolated nonrestarting candidate")
     mounts = inspect.get("Mounts")
+    # Xray's upstream image declares two ANONYMOUS Docker volumes. Accept
+    # only those exact destinations as local-driver generated volumes, never
+    # a bind mount or an arbitrary named host path (e.g. Docker socket).
+    mounts_by_dest = {
+        m.get("Destination"): m for m in mounts
+    } if isinstance(mounts, list) and all(isinstance(m, dict) for m in mounts) else {}
+    required_mounts = {journal.JOURNAL_DEST, "/etc/xray/config.json"}
+    image_volumes = {"/usr/local/etc/xray", "/var/log/xray"}
+    mounts_safe = (
+        isinstance(mounts, list) and 2 <= len(mounts) <= 4 and
+        len(mounts_by_dest) == len(mounts) and
+        required_mounts <= mounts_by_dest.keys() and
+        set(mounts_by_dest) <= required_mounts | image_volumes and
+        all(mounts_by_dest[dest].get("Type") == "bind"
+            for dest in required_mounts) and
+        all(mounts_by_dest[dest].get("Type") == "volume" and
+            mounts_by_dest[dest].get("Driver") == "local" and
+            _hex(mounts_by_dest[dest].get("Name"), 64)
+            for dest in mounts_by_dest.keys() & image_volumes)
+    )
     privileged = host.get("Privileged")
     cap_add = host.get("CapAdd")
     cap_drop = host.get("CapDrop")
@@ -222,12 +242,7 @@ def _measure_quarantined_runtime():
             not isinstance(security, list) or
             not any(option in ("no-new-privileges", "no-new-privileges:true")
                     for option in security if isinstance(option, str)) or
-            not isinstance(mounts, list) or len(mounts) != 2 or
-            {mount.get("Destination") for mount in mounts
-             if isinstance(mount, dict)} !=
-            {journal.JOURNAL_DEST, "/etc/xray/config.json"} or
-            any(not isinstance(mount, dict) or mount.get("Type") != "bind"
-                for mount in mounts)):
+            not mounts_safe):
         # A privileged Docker container, host PID/IPC namespace, added Linux
         # capabilities or Docker socket mount could escape "network none".
         raise ValueError("measured Xray genesis requires a hardened isolated container")
