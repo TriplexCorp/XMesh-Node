@@ -282,6 +282,16 @@ func auditRawCounter(name string, preFenceUnsafe bool, trustedMeterOrigin bool, 
         if err:=commitDurableCounterTaint(gate.journalDir,canonicalMeterUser(email));err!=nil {
             panic(fmt.Sprintf("experimental Xray counter taint cannot be persisted; deny: %v",err))
         }
+        // In the bounded experimental dataplane, an unauthorized raw Add,
+        // Set or stale writer must NEVER advance a billable counter or pass
+        // a byte. Retaining old observed-only mutation for unconstrained
+        // drain tests is deliberate; it never becomes quota authority.
+        if experimentalByteCaps.strict {
+            panic("experimental quota: untrusted or revoked Xray counter mutation denied")
+        }
+    }
+    if experimentalByteCaps.strict && u.lateCounterMutation {
+        panic("experimental quota: previously tainted meter cannot continue spending")
     }
     if trustedMeterOrigin && !u.fenced && !u.lateCounterMutation && !preFenceUnsafe && !exceeds {
         // This is the only allowed data-plane path. Commit the conservative

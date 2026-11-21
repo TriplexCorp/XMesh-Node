@@ -1,0 +1,239 @@
+// CI-ONLY byte-ceiling proof for the exact-pinned instrumented Xray.
+// A cap configured by unit tests is NOT a signed Nexus admission and cannot
+// open any quarantined listener. The real product must require an independently
+// verified reservation/epoch and process-bound startup gate before enabling it.
+package xmeshdrain
+
+import (
+    "errors"
+    "fmt"
+    "path/filepath"
+    "time"
+)
+
+// Every field and counter is protected by gate.Mutex. Shared user counters
+// cover both directions and *all* inbound aliases; CDN aliases additionally
+// consume the CDN bucket. No counter can refill a budget by switching tags.
+const maxSignedByteCeiling = uint64(1<<63-1)
+
+// Override only in sequential CI unit tests. Production time and receipt
+// attestation are intentionally NOT wired to this experimental cap.
+var experimentalCapClockMs = func() int64 { return time.Now().UnixMilli() }
+
+type experimentalByteCap struct {
+    runtimeID string
+    grantCeiling uint64
+    nodeCeiling uint64
+    cdnCeiling uint64
+    chargedAll uint64
+    chargedCDN uint64
+    validUntilMs int64
+    lastSeenMs int64
+    expired bool
+    aliases map[string]bool // exact alias -> CDN marker
+}
+
+// Byte-cap activation is deliberately absent from the shipping protocol;
+// only the isolated Go tests set it. Without that verified admission, no
+// production Xray may infer permission to serve traffic from this map.
+var experimentalByteCaps = struct {
+    strict bool
+    users map[string]*experimentalByteCap
+}{}
+
+// Caller must hold gate.Mutex; exact same lock serializes WAL precharge,
+// stats counter mutation, runtime fencing and all alias/direction writes.
+func checkExperimentalByteCapLocked(email string, delta int64) error {
+    if !experimentalByteCaps.strict {
+        return nil
+    }
+    if delta <= 0 || gate.runtimeID == "" {
+        return errors.New("experimental quota: invalid runtime or charge")
+    }
+    identity := canonicalMeterUser(email)
+    cap := experimentalByteCaps.users[identity]
+    if cap == nil {
+        return errors.New("experimental quota: user has no installed local grant")
+    }
+    cdn, allowedAlias := cap.aliases[email]
+    if !allowedAlias || cap.runtimeID != gate.runtimeID {
+        return errors.New("experimental quota: unassigned alias or changed Xray process")
+    }
+    // A previously valid signed reservation is never perpetual authority.
+    // Once expired or once the local clock moves backward, latch denial even
+    // if a future clock correction would make the old window appear valid.
+    // The actual production protocol must additionally verify signed expiry
+    // and off-host time continuity at (re)admission.
+    now:=experimentalCapClockMs()
+    if cap.expired || now<=0 || cap.validUntilMs<=0 ||
+        now>=cap.validUntilMs || (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
+        cap.expired=true
+        return errors.New("experimental quota: expired or nonmonotonic reservation")
+    }
+    cap.lastSeenMs=now
+    amount := uint64(delta)
+    if amount > maxSignedByteCeiling || cap.chargedAll > maxSignedByteCeiling ||
+        cap.grantCeiling > maxSignedByteCeiling || cap.nodeCeiling > maxSignedByteCeiling ||
+        cap.cdnCeiling > maxSignedByteCeiling {
+        return errors.New("experimental quota: invalid signed-byte range")
+    }
+    // Subtraction form prevents uint64 overflow and refuses exact-ceiling
+    // overspend before WAL append and before network delivery.
+    if cap.chargedAll > cap.grantCeiling ||
+        amount > cap.grantCeiling-cap.chargedAll ||
+        cap.chargedAll > cap.nodeCeiling ||
+        amount > cap.nodeCeiling-cap.chargedAll {
+        return errors.New("experimental quota: shared or Node ceiling exhausted")
+    }
+    if cdn && (cap.chargedCDN > cap.cdnCeiling ||
+        amount > cap.cdnCeiling-cap.chargedCDN) {
+        return errors.New("experimental quota: CDN ceiling exhausted")
+    }
+    if cap.chargedAll > maxSignedByteCeiling-amount ||
+        (cdn && cap.chargedCDN > maxSignedByteCeiling-amount) {
+        return errors.New("experimental quota: cumulative byte overflow")
+    }
+    return nil
+}
+
+// Called only AFTER the exact per-alias WAL intent and first-birth inventory
+// have fsynced successfully, but BEFORE the raw StatsService mutation and
+// network delivery. A crash between precharge and delivery may conservatively
+// charge bytes that were never delivered; never return these as unused bytes.
+func commitExperimentalByteCapLocked(email string, delta int64) {
+    if !experimentalByteCaps.strict { return }
+    cap := experimentalByteCaps.users[canonicalMeterUser(email)]
+    if cap == nil || delta <= 0 || cap.runtimeID != gate.runtimeID {
+        panic("experimental quota: cap disappeared after durable byte intent")
+    }
+    cdn, exists := cap.aliases[email]
+    if !exists {
+        panic("experimental quota: alias changed after durable byte intent")
+    }
+    cap.chargedAll += uint64(delta)
+    if cdn { cap.chargedCDN += uint64(delta) }
+}
+
+// Forensic-only helper: never export these counters as terminal metering or
+// use their difference from the reservation for a refund.
+func diagnosticByteCapLocked(email string) (uint64,uint64,error) {
+    cap := experimentalByteCaps.users[canonicalMeterUser(email)]
+    if !experimentalByteCaps.strict || cap == nil {
+        return 0,0,fmt.Errorf("experimental quota: no scoped cap")
+    }
+    return cap.chargedAll,cap.chargedCDN,nil
+}
+
+// restoreExperimentalCapFromWitness is a CI-ONLY recovery primitive for a
+// control worker which restarted while the SAME instrumented Xray PID stayed
+// alive. The caller supplies an externally pinned inventory-head digest and
+// the current live StatsService counters. The digest MUST have been separately
+// authenticated as a Nexus-side witness; this function does NOT authenticate
+// it, accept a signature, or grant data-plane access in production.
+//
+// Never use a plain directory scan to infer missing WALs as zero usage.
+// A changed Xray runtime, unlisted alias, missing WAL birth inventory, torn
+// file, or local raw meter mismatch leaves the old reserve inaccessible.
+// Caller holds gate.Mutex from validation through installation, so no
+// concurrent counted write can race against the restored starting balance.
+func restoreExperimentalCapFromWitness(
+    billingUser, runtimeID, expectedInventoryHead string,
+    aliases map[string]bool, grant, node, cdn uint64,
+    validUntilMs int64, current func(string,string)(uint64,error),
+) error {
+    gate.Lock()
+    defer gate.Unlock()
+    if !enabled || !experimentalByteCaps.strict || gate.journalDir=="" ||
+        gate.runtimeID=="" || runtimeID!=gate.runtimeID ||
+        current==nil || len(aliases)==0 || len(aliases)>16 {
+        return errors.New("experimental quota recovery: untrusted runtime or missing required evidence")
+    }
+    now:=experimentalCapClockMs()
+    if len(expectedInventoryHead)!=64 || grant>maxSignedByteCeiling ||
+        node>maxSignedByteCeiling || cdn>maxSignedByteCeiling ||
+        now<=0 || validUntilMs<=now {
+        return errors.New("experimental quota recovery: invalid witness or caps")
+    }
+    for _,c:=range expectedInventoryHead {
+        if !(c>='0'&&c<='9'||c>='a'&&c<='f') {
+            return errors.New("experimental quota recovery: invalid witness digest")
+        }
+    }
+    if experimentalByteCaps.users!=nil &&
+        experimentalByteCaps.users[billingUser]!=nil {
+        return errors.New("experimental quota recovery: existing cap cannot be reissued")
+    }
+    for alias:=range aliases {
+        if alias=="" || canonicalMeterUser(alias)!=billingUser ||
+            !signedUserEmail.MatchString(alias) {
+            return errors.New("experimental quota recovery: alias not assigned to billing identity")
+        }
+    }
+    // Authenticate the index HEAD independently before treating its entries
+    // as complete. The local inventory is not independently durable against
+    // deletion; the caller MUST bind this exact head to an off-host witness.
+    inventory,err:=readInventory(gate.journalDir)
+    if err!=nil{return fmt.Errorf("experimental quota recovery: inventory: %w",err)}
+    if !inventory.exists || inventory.tail.Digest!=expectedInventoryHead {
+        return errors.New("experimental quota recovery: missing or stale external WAL witness")
+    }
+    // Check every WAL birth record, including for other users, so corruption
+    // of an unrelated historic journal cannot be overlooked on startup.
+    if err:=verifyMeterJournalDirectory(gate.journalDir);err!=nil {
+        return fmt.Errorf("experimental quota recovery: incomplete WAL history: %w",err)
+    }
+    var all,cdnBytes uint64
+    for filename,birth:=range inventory.steps {
+        if canonicalMeterUser(birth.Email)!=billingUser {continue}
+        isCDN,known:=aliases[birth.Email]
+        if !known || birth.RuntimeID!=runtimeID {
+            return errors.New("experimental quota recovery: foreign or previous-runtime user WAL")
+        }
+        tail,err:=readMeterTail(filepath.Join(gate.journalDir,filename))
+        if err!=nil{return fmt.Errorf("experimental quota recovery: unreadable WAL: %w",err)}
+        amount:=tail.last.NextBytes
+        if amount>maxSignedByteCeiling-all {
+            return errors.New("experimental quota recovery: shared WAL overflow")
+        }
+        all+=amount
+        if isCDN {
+            if amount>maxSignedByteCeiling-cdnBytes {
+                return errors.New("experimental quota recovery: CDN WAL overflow")
+            }
+            cdnBytes+=amount
+        }
+    }
+    // A live Xray process with a missing, extra, or regressed StatsService
+    // counter is not a safe continuation of the WAL. The raw counter and
+    // durable intent must match exactly in both directions for every alias.
+    for alias:=range aliases {
+        for _,direction:=range []string{"uplink","downlink"} {
+            raw,err:=current(alias,direction)
+            if err!=nil{return fmt.Errorf("experimental quota recovery: missing live counter: %w",err)}
+            name:=meterLedgerPath(gate.journalDir,runtimeID,alias,direction)
+            birth:=inventory.steps[filepath.Base(name)]
+            if birth.Filename=="" {
+                if raw!=0 {return errors.New("experimental quota recovery: missing WAL for live counter")}
+                continue
+            }
+            tail,err:=readMeterTail(name)
+            if err!=nil || raw!=tail.last.NextBytes {
+                return errors.New("experimental quota recovery: live Xray counter differs from WAL")
+            }
+        }
+    }
+    if all>grant || all>node || cdnBytes>cdn {
+        return errors.New("experimental quota recovery: previously fsynced bytes exceed signed ceilings")
+    }
+    cloned:=make(map[string]bool,len(aliases))
+    for name,isCDN:=range aliases { cloned[name]=isCDN }
+    if experimentalByteCaps.users==nil {
+        experimentalByteCaps.users=map[string]*experimentalByteCap{}
+    }
+    experimentalByteCaps.users[billingUser]=&experimentalByteCap{
+        runtimeID:runtimeID,grantCeiling:grant,nodeCeiling:node,
+        cdnCeiling:cdn,chargedAll:all,chargedCDN:cdnBytes,
+        validUntilMs:validUntilMs,lastSeenMs:now,aliases:cloned,
+    }
+    return nil
+}
