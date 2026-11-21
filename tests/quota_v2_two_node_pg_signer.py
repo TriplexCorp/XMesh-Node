@@ -190,15 +190,50 @@ def assert_complete(dsn,root):
           "from one serialized PostgreSQL 1000-byte budget, with NO refunds/settlement",
           flush=True)
 
+def replay_after_database_restart(dsn,persist_root):
+    binary=os.environ.get("XMESH_CI_NEXUS_SIGNER","")
+    if not binary or not Path(binary).is_file():
+        raise AssertionError("missing actual Nexus Rust issuer on SQL crash replay")
+    for node in (47,48):
+        with psycopg.connect(dsn) as c:
+            row=c.execute(
+                "SELECT request_challenge,reported_pid,reported_policy_sha256 "
+                "FROM quota_v2_runtime_admission_preflights "
+                "WHERE user_id=%s AND node_id=%s",
+                (USER,node)).fetchone()
+            original=c.execute(
+                "SELECT signed_envelope,signer_public_key,grant_bytes "
+                "FROM quota_v2_signed_first_cap_outbox "
+                "WHERE user_id=%s AND node_id=%s",
+                (USER,node)).fetchone()
+        if row is None or original is None:
+            raise AssertionError("original signed reservation vanished on SQL restart")
+        nonce,pid,policy=row
+        command=[binary,str(node),nonce,str(pid),policy]
+        result=subprocess.run(command,capture_output=True,text=True,
+                              check=True,timeout=15)
+        resumed=json.loads(result.stdout)
+        prior=(persist_root/f"node-{node}"/"positive-cap-u101.json").read_bytes()
+        if (resumed.get("signedEnvelope","").encode()!=original[0]
+                or prior!=original[0]
+                or resumed.get("publicKeyHex")!=original[1]
+                or resumed.get("ceiling")!=original[2]):
+            raise AssertionError("PostgreSQL restart or lost signed reply "
+                                 "renewed bytes, identity or lease expiry")
+        print(f"PASS: Node {node} signer returned identical original Ed25519 "
+              "bytes after PostgreSQL container restart",flush=True)
+
+
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument("action",choices=("init","issue","assert"))
+    parser.add_argument("action",choices=("init","issue","assert","replay"))
     parser.add_argument("--nexus-source",type=Path)
     parser.add_argument("--node",type=int)
     parser.add_argument("--runtime")
     parser.add_argument("--policy-sha")
     parser.add_argument("--xray-pid",type=int)
     parser.add_argument("--reports",type=Path)
+    parser.add_argument("--persist",type=Path)
     args=parser.parse_args()
     dsn=require_disposable()
     if args.action=="init":
@@ -207,6 +242,10 @@ def main():
         init_db(dsn,args.nexus_source)
     elif args.action=="issue":
         issue(dsn,args.node,args.runtime,args.policy_sha,args.xray_pid)
+    elif args.action=="replay":
+        if args.persist is None:
+            raise ValueError("persisted first-process WAL directory required")
+        replay_after_database_restart(dsn,args.persist)
     else:
         assert_complete(dsn,args.reports)
 
