@@ -223,6 +223,35 @@ def replay_after_database_restart(dsn,persist_root):
         print(f"PASS: Node {node} signer returned identical original Ed25519 "
               "bytes after PostgreSQL container restart",flush=True)
 
+    # A stolen/replaced local signer key must NOT sign an alternate
+    # first-genesis cap for the same outstanding SQL lease. Use only
+    # disposable CI raw-key bytes and immediately restore the exact key.
+    private=Path(os.environ["XMESH_CI_CAP_POLICY_KEY"])
+    original_key=private.read_bytes()
+    if len(original_key)!=32:
+        raise AssertionError("unsafe test signing key format")
+    with psycopg.connect(dsn) as c:
+        nonce,pid,policy=c.execute(
+            "SELECT request_challenge,reported_pid,reported_policy_sha256 "
+            "FROM quota_v2_runtime_admission_preflights "
+            "WHERE user_id=%s AND node_id=47",(USER,)).fetchone()
+    try:
+        private.write_bytes(secrets.token_bytes(32))
+        attempted=subprocess.run(
+            [binary,"47",nonce,str(pid),policy],
+            capture_output=True,text=True,timeout=15)
+        if attempted.returncode==0:
+            raise AssertionError("new policy key replaced original signed "
+                                 "lease identity after SQL restart")
+    finally:
+        private.write_bytes(original_key)
+    with psycopg.connect(dsn) as c:
+        saved=c.execute(
+            "SELECT signed_envelope FROM quota_v2_signed_first_cap_outbox "
+            "WHERE user_id=%s AND node_id=47",(USER,)).fetchone()[0]
+    assert saved==(persist_root/"node-47"/"positive-cap-u101.json").read_bytes()
+    print("PASS: signer rotation refused, original signed grant and WAL intact",flush=True)
+
 
 def main():
     parser=argparse.ArgumentParser()
