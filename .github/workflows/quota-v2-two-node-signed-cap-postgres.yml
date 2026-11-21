@@ -69,14 +69,30 @@ jobs:
           go test -race -c -o "$RUNNER_TEMP/xmeshdrain.test" ./app/xmeshdrain
           echo "XMESH_CI_QUOTA_SQL_SIGNER=$GITHUB_WORKSPACE/tests/quota_v2_two_node_pg_signer.py" >> "$GITHUB_ENV"
           echo "XMESH_CI_QUOTA_RESULTS=$RUNNER_TEMP/quota-v2-signed-cap-results" >> "$GITHUB_ENV"
+          echo "XMESH_CI_QUOTA_PERSIST_DIR=$RUNNER_TEMP/quota-v2-fsynced-wal" >> "$GITHUB_ENV"
       - name: Run two INDEPENDENT measured Go Xray processes and real SQL serial grants
         run: |
           set -Eeuo pipefail
-          mkdir -m 0700 -p "$XMESH_CI_QUOTA_RESULTS"
+          mkdir -m 0700 -p "$XMESH_CI_QUOTA_RESULTS" "$XMESH_CI_QUOTA_PERSIST_DIR"
           XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" \
             -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
           XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" \
             -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+      - name: Restart BOTH Xray test processes and reject reuse of prior signed cap
+        run: |
+          set -Eeuo pipefail
+          XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant        run: |
+          set -Eeuo pipefail
+          python3 tests/quota_v2_two_node_pg_signer.py assert \
+            --reports "$XMESH_CI_QUOTA_RESULTS"
+ -test.timeout 2m
+          XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" \
+            -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant        run: |
+          set -Eeuo pipefail
+          python3 tests/quota_v2_two_node_pg_signer.py assert \
+            --reports "$XMESH_CI_QUOTA_RESULTS"
+ -test.timeout 2m
       - name: Assert shared database reservation = both distinct Xray WAL byte totals
         run: |
           set -Eeuo pipefail
