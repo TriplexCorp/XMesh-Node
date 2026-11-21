@@ -78,7 +78,7 @@ def init_db(dsn,nexus):
             conn.execute((nexus/"backend"/"migrations"/name).read_text())
         conn.execute(
             "INSERT INTO quota_v2_accounts(user_id,epoch,limit_bytes) "
-            "VALUES(%s,%s,100)",(USER,EPOCH))
+            "VALUES(%s,%s,1000)",(USER,EPOCH))
     print("PASS: real Nexus reservation and runtime-preflight SQL loaded",flush=True)
 
 def issue(dsn,node,runtime,policy_sha,xray_pid):
@@ -86,7 +86,7 @@ def issue(dsn,node,runtime,policy_sha,xray_pid):
             c not in "0123456789abcdef" for c in runtime+policy_sha):
         raise ValueError("invalid disposable Node process measurement")
     activation=("c" if node==47 else "d")*64
-    target=70 if node==47 else 50
+    target=700 if node==47 else 500
     with psycopg.connect(dsn) as conn:
         conn.execute("SET LOCAL synchronous_commit TO on")
         # Same account row lock, same PostgreSQL reserve function as actual
@@ -119,7 +119,7 @@ def issue(dsn,node,runtime,policy_sha,xray_pid):
             "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (USER,EPOCH,node,METER[node],RID[node],revision,nonce,
              runtime,"f"*64,xray_pid,policy_sha,activation,0)).fetchone()
-        if p[0]!=100 or p[1]!=0 or p[2]>100 or p[3]!=ceiling or p[4]!=0:
+        if p[0]!=1000 or p[1]!=0 or p[2]>1000 or p[3]!=ceiling or p[4]!=0:
             raise ValueError("SQL preflight did not match serial allocation")
         c=conn.execute("SELECT COUNT(*) FROM quota_v2_runtime_admission_preflights "
                        "WHERE node_id=%s AND user_id=%s",
@@ -141,7 +141,7 @@ def issue(dsn,node,runtime,policy_sha,xray_pid):
         "nonce":nonce,"inventoryTailDigest":ZERO,
         "witnessedWalBytes":0,"witnessedCdnBytes":0,
         "sharedCeilingBytes":ceiling,"nodeCeilingBytes":ceiling,
-        "cdnCeilingBytes":min(20,ceiling),
+        "cdnCeilingBytes":min(150,ceiling),
         "aliasScopes":[
             {"email":"xmesh-u101--vless-cdn","class":"cdn"},
             {"email":"xmesh-u101--vless-main","class":"main"}],
@@ -177,13 +177,13 @@ def assert_complete(dsn,root):
             (USER,EPOCH)).fetchone()
     if len(rows)!=2 or [row[0] for row in rows]!=[47,48]:
         raise AssertionError("lost a Node's independent reservation")
-    if sum(row[1] for row in rows)!=100 or any(row[2] for row in rows):
+    if sum(row[1] for row in rows)!=1000 or any(row[2] for row in rows):
         raise AssertionError("global capacity was overissued or falsely settled")
-    if [row[1] for row in rows]!=[70,30]:
-        raise AssertionError("two Node grants did not serialize as 70+30")
+    if [row[1] for row in rows]!=[700,300]:
+        raise AssertionError("two Node grants did not serialize as 700+300")
     if len(preflights)!=2 or any(x[1:]!=(0,False,False,False,0) for x in preflights):
         raise AssertionError("snapshot incorrectly became traffic authority")
-    if account!=(0,0,100):
+    if account!=(0,0,1000):
         raise AssertionError("in-memory Xray spend was mistaken for server settlement")
     for report,row in zip(reports,rows):
         if (report.get("nodeId"),report.get("grantBytes"),report.get("walBytes"),
@@ -193,8 +193,8 @@ def assert_complete(dsn,root):
             raise AssertionError("missing process-bound Xray identity")
     if reports[0]["runtimeId"]==reports[1]["runtimeId"]:
         raise AssertionError("both isolated Xray tests reused one PID identity")
-    print("PASS: two measured Xray processes consumed exactly 70+30 bytes "
-          "from one serialized PostgreSQL 100-byte budget, with NO refunds/settlement",
+    print("PASS: two measured Xray processes consumed exactly 700+300 bytes "
+          "from one serialized PostgreSQL 1000-byte budget, with NO refunds/settlement",
           flush=True)
 
 def main():
