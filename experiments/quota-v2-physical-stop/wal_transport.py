@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "xray-dataplane-fence"))
 
@@ -24,6 +25,7 @@ import witness_inventory as producer
 PRODUCT = "/usr/local/bin/xmesh-agent-xspv2-product"
 PATH = "/api/v1/node/quota-v2/wal"
 HEAD_DOMAIN = b"XMESH_QUOTA_V2_REMOTE_WAL_HEAD_V1\x00"
+GENESIS_DOMAIN = b"XMESH_XRAY_GENESIS_PREPARED_V1\x00"
 INDEX_LIMIT = 384 * 1024
 POLICY_KEY = "/var/lib/xmesh-xray-sync/policy-public-key"
 
@@ -130,6 +132,53 @@ def _bound_journal():
     return runtime, source
 
 
+def prepare_genesis(panel, node_id, candidate, challenge):
+    """Verify a zero-authority preparation using the installed product and pin."""
+    if os.geteuid() != 0 or type(node_id) is not int or node_id <= 0:
+        raise ValueError("Xray genesis requires an installed root-owned node")
+    if not _hex(candidate, 64) or not _hex(challenge, 64) or candidate == challenge:
+        raise ValueError("invalid Xray genesis candidate or challenge")
+    os.umask(0o077)
+    evidence = [PRODUCT, "wal-evidence", "--panel", panel, "--node-id", str(node_id)]
+    with tempfile.TemporaryDirectory(prefix="xmesh-genesis-") as temp:
+        root = Path(temp)
+        public = root / "nexus.pem"
+        _write_public(_panel_pin(), public)
+        identity = observed.strict_json(subprocess.check_output(evidence, timeout=20))
+        activation = identity["activationReceiptSha256"]
+        if identity["nodeId"] != node_id or not _hex(activation, 64):
+            raise ValueError("invalid enrolled identity for Xray genesis")
+        raw = _post(root, {"operation": "prepare_genesis", "nodeId": node_id,
+                           "candidateRuntimeId": candidate, "challenge": challenge})
+        if len(raw) > 4096:
+            raise ValueError("oversized Xray genesis receipt")
+        envelope = observed.strict_json(raw)
+        if (not isinstance(envelope, dict) or set(envelope) != {"algorithm", "payload", "signature"}
+                or envelope["algorithm"] != "Ed25519" or not _hex(envelope["signature"], 128)):
+            raise ValueError("invalid Xray genesis envelope")
+        payload = envelope["payload"]
+        expected = {
+            "schemaVersion": 1, "kind": "xmesh.xray.genesis-prepared",
+            "nodeId": node_id, "activationReceiptSha256": activation,
+            "candidateRuntimeId": candidate, "challenge": challenge,
+            "authorizedBytes": 0, "canStart": False, "canResume": False,
+        }
+        if (not isinstance(payload, dict) or
+                set(payload) != set(expected) | {"preparedAtMs", "validUntilMs"} or
+                any(type(payload[k]) is not type(value) or payload[k] != value
+                    for k, value in expected.items())):
+            raise ValueError("Xray genesis binding or authority mismatch")
+        issued, expires = payload["preparedAtMs"], payload["validUntilMs"]
+        now = time.time_ns() // 1_000_000
+        if (type(issued) is not int or type(expires) is not int or
+                not 0 < issued <= now < expires or expires - issued != 120_000):
+            raise ValueError("Xray genesis receipt is stale or not yet valid")
+        verifier.verify_nexus_signature(GENESIS_DOMAIN, payload, envelope["signature"], public)
+        if observed.strict_json(subprocess.check_output(evidence, timeout=20)) != identity:
+            raise ValueError("enrolled identity changed while verifying Xray genesis")
+        return envelope
+
+
 def run(action, panel, node_id):
     if os.geteuid() != 0:
         raise ValueError("WAL evidence requires the installed root-owned agent")
@@ -202,11 +251,19 @@ def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("head", "store", "sync"))
+    parser.add_argument("operation", choices=("head", "store", "sync", "prepare-genesis"))
     parser.add_argument("--panel", required=True)
     parser.add_argument("--node-id", required=True, type=int)
+    parser.add_argument("--candidate-runtime")
+    parser.add_argument("--challenge")
     args = parser.parse_args()
     try:
-        print(json.dumps(run(args.operation, args.panel, args.node_id), sort_keys=True))
+        if args.operation == "prepare-genesis":
+            result = prepare_genesis(args.panel, args.node_id, args.candidate_runtime, args.challenge)
+        else:
+            if args.candidate_runtime is not None or args.challenge is not None:
+                parser.error("candidate runtime and challenge are only used for genesis preparation")
+            result = run(args.operation, args.panel, args.node_id)
+        print(json.dumps(result, sort_keys=True))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"WAL verification failed: {error}\n")

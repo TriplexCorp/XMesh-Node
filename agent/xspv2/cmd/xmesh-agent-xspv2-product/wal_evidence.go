@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,7 +41,15 @@ func walEvidence(panel string, nodeID int64, payloadPath string) error {
 	if bundle.NodeID != nodeID || bundle.Purpose != "node_request" || len(bundle.EdPublic) != ed25519.PublicKeySize {
 		return errors.New("unexpected WAL witness key identity")
 	}
-	result := map[string]any{"nodeId": bundle.NodeID, "publicKey": hex.EncodeToString(bundle.EdPublic)}
+	receipt, err := strictFile(activationReceipt, 0o600)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(receipt)
+	result := map[string]any{
+		"nodeId": bundle.NodeID, "publicKey": hex.EncodeToString(bundle.EdPublic),
+		"activationReceiptSha256": hex.EncodeToString(digest[:]),
+	}
 	if payloadPath != "" {
 		payload, err := strictFile(payloadPath, 0o600)
 		if err != nil {
