@@ -246,6 +246,16 @@ def install_staged_cap(panel, node_id, state, socket_path, grant_raw, executable
         # A valid Nexus-signed cap alone is NOT enough to bypass the durable
         # installed Agent lease echo. Require this SAME user, epochs, exact
         # reservation and revision from the original signed confirmed stage.
+        prepared_document = confirmed_lease._identity_file(
+            state_fd,
+            f"genesis-reservation-prepared-u{scope['userId']}.json",
+            confirmed_lease.MAX_REPLY,
+        )
+        prepared = confirmed_lease.verify_lease_response(
+            wal_transport.observed.canonical(prepared_document),
+            node_id, scope["userId"], "prepare", evidence,
+            pinned, original["activationReceiptSha256"],
+        )
         lease_document = confirmed_lease._identity_file(
             state_fd,
             f"genesis-reservation-confirmed-u{scope['userId']}.json",
@@ -254,7 +264,7 @@ def install_staged_cap(panel, node_id, state, socket_path, grant_raw, executable
         reply_bytes = wal_transport.observed.canonical(lease_document)
         committed = confirmed_lease.verify_lease_response(
             reply_bytes, node_id, scope["userId"], "confirm", evidence,
-            pinned, original["activationReceiptSha256"],
+            pinned, original["activationReceiptSha256"], previous=prepared,
         )
         reservation = committed["payload"]["reservation"]
         if (reservation["epoch"] != scope["accountEpoch"]
