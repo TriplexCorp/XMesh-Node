@@ -72,6 +72,36 @@ func capValues(t *testing.T) (uint64,uint64) {
     return all,cdn
 }
 
+func TestV2ExperimentalQuotaFsyncFailureCannotChargeUncommittedBytes(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,50,50,20,map[string]bool{capMain:false,capCDN:true})
+    counter:=newCapCounter(t,manager,capMain,"downlink")
+    original:=experimentalMeterFileSync
+    defer func(){experimentalMeterFileSync=original}()
+    experimentalMeterFileSync=func(*os.File)error{
+        return errors.New("injected fsync failure before network delivery")
+    }
+    if err:=BeginMeterWrite(capMain,"downlink");err!=nil{t.Fatal(err)}
+    var thrown interface{}
+    func(){
+        defer func(){thrown=recover()}()
+        counter.(interface{ExperimentalAddMetered(int64)int64}).ExperimentalAddMetered(17)
+    }()
+    EndMeterWrite(capMain,"downlink")
+    if thrown==nil || !strings.Contains(fmt.Sprint(thrown),"cannot fsync") {
+        t.Fatalf("fsync failure did not fence metered charge: %v",thrown)
+    }
+    if counter.Value()!=0 {t.Fatal("byte counter advanced before fsync")}
+    all,cdn:=capValues(t)
+    if all!=0 || cdn!=0 {
+        t.Fatal("local shared reservation was charged from a failed fsync")
+    }
+    // A partially written WAL is a crash-uncertain precharge, not a
+    // refundable confirmed meter. The separate WAL startup suite detects
+    // corruption/unfinished intentions; no new grant is issued here.
+    _=dir
+}
+
 func TestV2ExperimentalQuotaUserAndNodeAndCDNBeforeDurableWAL(t *testing.T) {
     dir,manager:=setupUnfencedMeter(t)
     installTestQuota(t,100,90,20,map[string]bool{capMain:false,capCDN:true})
