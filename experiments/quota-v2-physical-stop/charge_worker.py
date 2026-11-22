@@ -165,7 +165,7 @@ def _durable_request(fd, key, node, user, reservation, filename, remaining):
     PostgreSQL first-sequence key. Always replay the original bytes, even if
     the live Xray has appended more fsynced WAL in the meantime.
     """
-    if not remaining or not remaining.endswith(b"\\n"):
+    if not remaining or not remaining.endswith(b"\n"):
         raise ValueError("no complete charge WAL suffix")
     first = wal_transport.observed.strict_json(remaining.splitlines()[0])
     sequence = first.get("sequence")
@@ -191,7 +191,7 @@ def _durable_request(fd, key, node, user, reservation, filename, remaining):
             or saved["firstSequence"] != sequence):
         raise ValueError("foreign immutable WAL charge retry")
     raw = wal_transport._b64(saved["journal"], BATCH_BYTES)
-    if (not remaining.startswith(raw) or not raw.endswith(b"\\n")
+    if (not remaining.startswith(raw) or not raw.endswith(b"\n")
             or len(raw) > BATCH_BYTES):
         raise ValueError("original WAL charge request differs from current hash chain")
     return raw
