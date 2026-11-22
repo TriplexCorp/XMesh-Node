@@ -200,12 +200,25 @@ class FirstCapHandoffTests(unittest.TestCase):
                 self.assertEqual(
                     renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
                 self.assertEqual(log.call_count, 1)
-            # A genuinely signed but already expired zero-authority receipt
-            # must also refuse a retry. The old WAL remains with its epoch.
-            expired = dict(prepared, validUntilMs=self.now)
-            marker.write_bytes(reply(expired))
-            with self.assertRaisesRegex(ValueError, "expired or has invalid clock"):
+            # A LOST signed, ZERO-SPEND response stays an immutable
+            # historical identity even after its 120-second planning window.
+            # It must never become an installable positive spending grant.
+            marker.write_bytes(exact)
+            later_ns = (self.now + 180_000) * 1_000_000
+            with mock.patch.object(renewal_worker.time, "time_ns", return_value=later_ns):
+                self.assertEqual(
+                    renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
                 renewal_worker._prepare_successor(*args)
+            self.assertEqual(post.call_count, 3)
+            self.assertEqual(json.loads(marker.read_bytes()), json.loads(exact))
+            # Signed but malformed lifetimes (zero, negative or overlong)
+            # still fail closed; only a valid *historical* receipt replays.
+            for lifetime in (0, -1, 120_001):
+                altered = dict(prepared, validUntilMs=self.now + lifetime)
+                marker.write_bytes(reply(altered))
+                with self.subTest(lifetime=lifetime):
+                    with self.assertRaisesRegex(ValueError, "invalid clock"):
+                        renewal_worker._prepare_successor(*args)
             install.assert_not_called()
 
     def verify(self, claims=None):
