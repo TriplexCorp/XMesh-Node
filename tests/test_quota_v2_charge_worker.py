@@ -96,6 +96,33 @@ class ChargeWorkerTests(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def test_lost_commit_response_replays_original_bytes_after_wal_grows(self):
+        if os.geteuid() != 0:
+            self.skipTest("root-owned immutable charge request")
+        with tempfile.TemporaryDirectory(prefix="xmesh-charge-lost-commit-") as root:
+            os.chmod(root, 0o700)
+            fd, lock = quarantine._locked_private_state(root)
+            try:
+                file = "meter-" + "b"*64 + ".jsonl"
+                key = hashlib.sha256(file.encode()).hexdigest()
+                reservation = "00000000-0000-0000-0000-000000000001"
+                original = b'{"sequence":1}\\n'
+                added = b'{"sequence":2}\\n'
+                first = worker._durable_request(fd, key, 7, 42, reservation, file, original)
+                self.assertEqual(first, original)
+                self.assertEqual(worker._durable_request(
+                    fd, key, 7, 42, reservation, file, original + added), original)
+                with self.assertRaises(ValueError):
+                    worker._durable_request(fd, key, 8, 42, reservation, file, original)
+                with self.assertRaises(ValueError):
+                    worker._durable_request(fd, key, 7, 42,
+                        "00000000-0000-0000-0000-000000000002", file, original)
+                self.assertEqual(worker._durable_request(
+                    fd, key, 7, 42, reservation, file, original + added), original)
+            finally:
+                os.close(lock)
+                os.close(fd)
+
     def test_immutable_receipt_namespace_disallows_overwrite(self):
         if os.geteuid() != 0:
             self.skipTest("root-owned WAL ACK durability")
