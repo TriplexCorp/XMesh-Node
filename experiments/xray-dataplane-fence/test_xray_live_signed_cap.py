@@ -274,7 +274,32 @@ def run(xray, root, target, processes, scenario):
                 assert not probe_echo(conn, 1), "new connection reopened an old signed epoch"
         reject(sock_path, server.pid, runtime, genesis, grant, scope)
         assert server.poll() is None and client.poll() is None
-        print("PASS: real mixed MAIN/CDN VLESS old epoch fenced on measured PID; WAL unchanged; 0 refund/resume authority")
+        # A stolen or crash-torn historical byte WAL must invalidate the
+        # independent audit even when the original Xray control response
+        # and its nonfinal checkpoint are unchanged and well formed.
+        victim = next(root.glob("meter-*.jsonl"))
+        original = victim.read_bytes()
+        victim.unlink()
+        try:
+            try:
+                journal_integrity.verify_poststop_journal(checkpoint, str(root), mount)
+            except (FileNotFoundError, ValueError):
+                pass
+            else:
+                raise AssertionError("deleted old MAIN/CDN WAL passed birth-index audit")
+        finally:
+            victim.write_bytes(original)
+            victim.chmod(0o600)
+        assert journal_integrity.verify_poststop_journal(
+            checkpoint, str(root), mount) == journal_sha
+        victim.write_bytes(original[:-1])
+        try:
+            journal_integrity.verify_poststop_journal(checkpoint, str(root), mount)
+        except (FileNotFoundError, ValueError):
+            pass
+        else:
+            raise AssertionError("torn historical Xray WAL passed independent audit")
+        print("PASS: real mixed MAIN/CDN VLESS old epoch fenced, WAL verified, deleted/torn journal refused, 0 refund/resume authority")
         return
 
     if scenario == "expiry":
