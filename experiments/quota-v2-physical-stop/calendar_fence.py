@@ -96,16 +96,51 @@ def _checked_saved(record, old, successor, runtime):
             or observed.get("email") != scope["email"]
             or observed.get("fenced") is not True
             or observed.get("drained") is not True
-            or observed.get("active") != 0
+            or type(observed.get("active")) is not int or observed["active"] != 0
             or observed.get("finalMeterVerified") is not False
             or observed.get("refundable") is not False
             or not isinstance(checkpoint, dict)
             or checkpoint.get("runtimeId") != runtime
+            or checkpoint.get("schemaVersion") != 3
             or checkpoint.get("finalMeterVerified") is not False
-            or checkpoint.get("refundableBytes") != 0
+            or type(checkpoint.get("refundableBytes")) is not int
+            or checkpoint["refundableBytes"] != 0
             or checkpoint.get("drained") is not True
             or any(checkpoint.get(key) != value for key, value in scope.items())):
         raise ValueError("calendar fence is missing Xray's nonfinal durable checkpoint")
+    # The source-pinned Xray already validates the complete signed alias
+    # roster. Revalidate the IPC/stored response independently so a partial
+    # observation is never mistaken for the old metered account. This
+    # observational total is NONFINAL and cannot authorize a quota refund.
+    aliases = old.get("aliasScopes")
+    rows = checkpoint.get("inboundMeters")
+    if (not isinstance(aliases, list) or not 1 <= len(aliases) <= 16
+            or not isinstance(rows, list) or len(rows) != len(aliases)):
+        raise ValueError("calendar fence lost a signed MAIN/CDN meter alias")
+    total_up = total_down = 0
+    previous = ""
+    for signed, row in zip(aliases, rows):
+        if (not isinstance(signed, dict) or set(signed) != {"email", "class"}
+                or signed["class"] not in ("main", "cdn")
+                or not isinstance(row, dict)
+                or set(row) != {"email", "uplinkBytes", "downlinkBytes"}
+                or not isinstance(signed["email"], str)
+                or row["email"] != signed["email"]
+                or row["email"] <= previous
+                or not row["email"].startswith(f"xmesh-u{old['userId']}--")
+                or any(type(row.get(key)) is not int or
+                       not 0 <= row[key] <= (1 << 63) - 1
+                       for key in ("uplinkBytes", "downlinkBytes"))):
+            raise ValueError("calendar fence inbound meter scope changed")
+        total_up += row["uplinkBytes"]
+        total_down += row["downlinkBytes"]
+        previous = row["email"]
+    if (total_up + total_down > (1 << 63) - 1
+            or type(checkpoint.get("uplinkBytes")) is not int
+            or type(checkpoint.get("downlinkBytes")) is not int
+            or checkpoint["uplinkBytes"] != total_up
+            or checkpoint["downlinkBytes"] != total_down):
+        raise ValueError("calendar fence meter totals differ from signed roster")
     return record
 
 
