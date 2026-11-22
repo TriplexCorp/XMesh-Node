@@ -25,6 +25,7 @@ import calendar_fence
 import quarantine_policy as quarantine
 import renewal_worker
 import successor_positive
+import charge_worker
 
 
 class FirstCapHandoffTests(unittest.TestCase):
@@ -128,6 +129,44 @@ class FirstCapHandoffTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 cap.verify_renewal(self.signed_grant(dict(claims, **{field: value})),
                                    prior, self.pub, nonce)
+
+    def test_old_and_new_xray_wal_streams_never_share_reservation_identity(self):
+        user, node = 100, self.node
+        old = dict(self.claims)
+        old_grant = dict(old)
+        new_grant = dict(old, runtimeId="e" * 64,
+                         reservationId="66666666-6666-4666-8666-666666666666",
+                         meterEpoch="55555555-5555-4555-8555-555555555555")
+        fresh = {"freshRuntimeId": new_grant["runtimeId"]}
+        positive = {
+            "response": {"signedEnvelope": self.guard.canonical(
+                {"payload": new_grant}).decode()}
+        }
+        old_birth = {"runtimeId": old["runtimeId"],
+                     "email": self.aliases[0]["email"]}
+        new_birth = dict(old_birth, runtimeId=new_grant["runtimeId"])
+        with (mock.patch.object(charge_worker.renewal_worker,
+                                "_verified_reply", return_value=old_grant),
+              mock.patch.object(successor_positive, "_read_evidence",
+                                return_value=(old, {}, {}, fresh, "", ())),
+              mock.patch.object(charge_worker.lease, "_identity_file",
+                                return_value=positive),
+              mock.patch.object(successor_positive,
+                                "_verified_saved_receipt",
+                                return_value=positive) as verified):
+            charge_old = charge_worker._grant_for_birth(
+                0, node, user, self.pub, old_birth)
+            self.assertEqual(charge_old["reservationId"], old["reservationId"])
+            verified.assert_not_called()
+            charge_new = charge_worker._grant_for_birth(
+                0, node, user, self.pub, new_birth)
+            self.assertEqual(charge_new["reservationId"], new_grant["reservationId"])
+            self.assertNotEqual(charge_new["meterEpoch"], old["meterEpoch"])
+            verified.assert_called_once()
+            foreign_birth = dict(new_birth, runtimeId="f" * 64)
+            with self.assertRaisesRegex(ValueError, "neither immutable"):
+                charge_worker._grant_for_birth(
+                    0, node, user, self.pub, foreign_birth)
 
     def test_calendar_positive_must_pair_two_real_signatures_and_new_process(self):
         old = dict(self.claims, validUntilMs=self.now - 1)
