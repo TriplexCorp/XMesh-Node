@@ -158,10 +158,12 @@ def _panel_pin():
         os.close(fd)
 
 
-def _bound_journal():
+def _bound_journal(container_name="xmesh-managed-xray"):
+    if container_name not in ("xmesh-managed-xray", "xmesh-successor-quarantine"):
+        raise ValueError("unknown measured Xray candidate")
     raw = subprocess.check_output([
         "docker", "inspect", "--type", "container", "--format", "{{json .}}",
-        "xmesh-managed-xray",
+        container_name,
     ], timeout=15)
     if not 0 < len(raw) <= 128 * 1024:
         raise ValueError("managed Xray inspection unavailable")
@@ -226,18 +228,18 @@ def prepare_genesis(panel, node_id, candidate, challenge):
         return envelope
 
 
-def _measure_quarantined_runtime(pins=None):
+def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray"):
     """Measure an actual kernel PID in an isolated Docker candidate; NO authority.
 
     A caller-provided candidate digest is never proof of an Xray process.
     This observation is only for zero-authority preparation. It does not
     prove final WAL bytes or grant a lease.
     """
-    inspect, _ = _bound_journal()
+    inspect, _ = _bound_journal(container_name)
     host = inspect.get("HostConfig")
     state = inspect.get("State")
     network = inspect.get("NetworkSettings")
-    if (inspect.get("Name") != "/xmesh-managed-xray" or
+    if (inspect.get("Name") != "/" + container_name or
             not isinstance(host, dict) or not isinstance(state, dict) or
             not isinstance(network, dict) or state.get("Running") is not True or
             host.get("NetworkMode") != "none" or
@@ -298,15 +300,21 @@ def _measure_quarantined_runtime(pins=None):
     if (type(pid) is not int or pid <= 0 or
             not _hex(cid, 64) or
             not isinstance(started, str) or "T" not in started or
-            runtime_identity.inspect_managed_xray() != (cid, started, pid)):
+            (runtime_identity.inspect_managed_xray() if
+             container_name == "xmesh-managed-xray" else
+             runtime_identity.inspect_managed_xray(container_name))
+                != (cid, started, pid)):
         raise ValueError("managed genesis process identity is not independently confirmed")
     identity = runtime_identity.trusted_runtime_identity(pid)
     if pins is not None:
         if mounts_by_dest["/etc/xray/config.json"].get("RW") is not False:
             raise ValueError("pinned Xray configuration requires a read-only bind")
         runtime_identity.verify_quarantined_files(pid, *pins)
+        current = (runtime_identity.inspect_managed_xray() if
+                   container_name == "xmesh-managed-xray" else
+                   runtime_identity.inspect_managed_xray(container_name))
         if (runtime_identity.trusted_runtime_identity(pid) != identity or
-                runtime_identity.inspect_managed_xray() != (cid, started, pid)):
+                current != (cid, started, pid)):
             raise ValueError("managed Xray changed during executable or configuration verification")
     return (cid, started, pid, identity)
 
