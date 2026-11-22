@@ -331,6 +331,38 @@ func TestV2SignedFirstCapsIsolateUsersInALiveRuntime(t *testing.T) {
     }
 }
 
+func TestV2SignedCapFsyncAtDeadlineKeepsDebtWithoutDelivery(t *testing.T) {
+    dir,manager,permit,ctx,pub,priv:=signedCapTestFixture(t)
+    now:=permit.IssuedAtMs
+    originalClock:=experimentalCapClockMs
+    experimentalCapClockMs=func()int64{return now}
+    t.Cleanup(func(){experimentalCapClockMs=originalClock})
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,permit,priv),pub,ctx);err!=nil {
+        t.Fatal(err)
+    }
+    counter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,counter,capMain,"uplink",1) {t.Fatal("pre-deadline write failed")}
+
+    originalSync:=experimentalMeterFileSync
+    experimentalMeterFileSync=func(file *os.File)error{
+        err:=originalSync(file)
+        now=permit.ValidUntilMs
+        return err
+    }
+    t.Cleanup(func(){experimentalMeterFileSync=originalSync})
+    if capAttempt(t,counter,capMain,"uplink",2) || counter.Value()!=1 {
+        t.Fatal("a buffer whose WAL fsync crossed the deadline was delivered")
+    }
+    tail,err:=readMeterTail(meterLedgerPath(dir,permit.RuntimeID,capMain,"uplink"))
+    if err!=nil || tail.last.NextBytes!=3 {
+        t.Fatalf("pre-delivery charge was lost: %v %v",tail,err)
+    }
+    now=permit.ValidUntilMs-1
+    if capAttempt(t,counter,capMain,"uplink",1) {
+        t.Fatal("clock rollback reopened an expired reservation")
+    }
+}
+
 func TestV2SignedCapConcurrentReplayExactlyOnceNoDebtReset(t *testing.T){
     dir,manager,p,ctx,pub,priv:=signedCapTestFixture(t)
     raw:=signedCapTestEnvelope(t,p,priv)

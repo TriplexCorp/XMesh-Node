@@ -262,7 +262,9 @@ func commitMeterIntentBeforeMutation(email,direction string,delta,current int64)
     }
     // Charge this exact shared/Node/CDN grant AFTER durable WAL precharge.
     // On a crash here the WAL remains conservative evidence; never refund.
-    commitExperimentalByteCapLocked(email,delta)
+    if err:=commitExperimentalByteCapLocked(email,delta);err!=nil {
+        return xmeshquota.Denied{Reason:err}
+    }
     return nil
 }
 

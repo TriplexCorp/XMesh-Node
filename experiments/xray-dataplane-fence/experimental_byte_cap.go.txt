@@ -66,13 +66,7 @@ func checkExperimentalByteCapLocked(email string, delta int64) error {
     // if a future clock correction would make the old window appear valid.
     // The actual production protocol must additionally verify signed expiry
     // and off-host time continuity at (re)admission.
-    now:=experimentalCapClockMs()
-    if cap.expired || now<=0 || cap.validUntilMs<=0 ||
-        now>=cap.validUntilMs || (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
-        cap.expired=true
-        return errors.New("experimental quota: expired or nonmonotonic reservation")
-    }
-    cap.lastSeenMs=now
+    if err:=checkExperimentalCapTimeLocked(cap);err!=nil {return err}
     amount := uint64(delta)
     if amount > maxSignedByteCeiling || cap.chargedAll > maxSignedByteCeiling ||
         cap.grantCeiling > maxSignedByteCeiling || cap.nodeCeiling > maxSignedByteCeiling ||
@@ -102,8 +96,8 @@ func checkExperimentalByteCapLocked(email string, delta int64) error {
 // have fsynced successfully, but BEFORE the raw StatsService mutation and
 // network delivery. A crash between precharge and delivery may conservatively
 // charge bytes that were never delivered; never return these as unused bytes.
-func commitExperimentalByteCapLocked(email string, delta int64) {
-    if !experimentalByteCaps.strict { return }
+func commitExperimentalByteCapLocked(email string, delta int64) error {
+    if !experimentalByteCaps.strict { return nil }
     cap := experimentalByteCaps.users[canonicalMeterUser(email)]
     if cap == nil || delta <= 0 || cap.runtimeID != gate.runtimeID {
         panic("experimental quota: cap disappeared after durable byte intent")
@@ -114,6 +108,20 @@ func commitExperimentalByteCapLocked(email string, delta int64) {
     }
     cap.chargedAll += uint64(delta)
     if cdn { cap.chargedCDN += uint64(delta) }
+    // Fsync may finish at or after a calendar boundary. The prior scope
+    // keeps the already persisted debt, but the buffer cannot be sent.
+    return checkExperimentalCapTimeLocked(cap)
+}
+
+func checkExperimentalCapTimeLocked(cap *experimentalByteCap) error {
+    now:=experimentalCapClockMs()
+    if cap.expired || now<=0 || cap.validUntilMs<=0 ||
+        now>=cap.validUntilMs || (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
+        cap.expired=true
+        return errors.New("experimental quota: expired or nonmonotonic reservation")
+    }
+    cap.lastSeenMs=now
+    return nil
 }
 
 // Forensic-only helper: never export these counters as terminal metering or
