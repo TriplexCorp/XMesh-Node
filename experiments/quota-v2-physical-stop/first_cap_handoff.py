@@ -444,6 +444,22 @@ def fetch_and_install_renewal(panel, node_id, user_id, state, socket_path,
                 or prior["policySha256"] != staged["policySha256"]
                 or prior["activationReceiptSha256"] != activation):
             raise ValueError("previous spending permit differs from the original Xray scope")
+        # The nonce is durable BEFORE contacting Nexus. If its response is
+        # lost after COMMIT, the next Agent poll must retry this exact
+        # request and cannot accidentally claim a second revision.
+        request_name = f"genesis-renewal-request-u{user_id}-r{previous_revision}.json"
+        request_intent = {
+            "nodeId": node_id, "userId": user_id,
+            "previousRevision": previous_revision,
+            "requestChallenge": request_challenge,
+        }
+        try:
+            prior_intent = confirmed_lease._identity_file(fd, request_name, 4096)
+        except FileNotFoundError:
+            quarantine._durable_store(fd, request_intent, request_name)
+        else:
+            if prior_intent != request_intent:
+                raise ValueError("renewal retry replaced a fsynced request nonce")
         raw = quarantine._post_quarantined_desired({
             "nodeId": node_id, "userId": user_id, "requestChallenge": request_challenge,
             "measurement": {"containerId": measured[0], "hostPid": measured[2],
