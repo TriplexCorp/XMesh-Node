@@ -6,6 +6,9 @@ on:
       - 'experiments/xray-dataplane-fence/experimental_byte_cap_test.go.txt'
       - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission.go.txt'
       - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_cap_socket.go.txt'
+      - 'experiments/xray-dataplane-fence/test_xray_live_signed_cap.py'
+      - 'experiments/quota-v2-physical-stop/cap_install.py'
       - 'experiments/xray-dataplane-fence/durable_meter_intent.go.txt'
       - 'experiments/xray-dataplane-fence/apply-experiment.py'
       - '.github/workflows/quota-v2-byte-ceilings.yml'
@@ -53,3 +56,11 @@ jobs:
           set -euo pipefail
           cd "$XMESH_PINNED_XRAY_SOURCE"
           go test -count=1 -timeout=12m ./app/xmeshdrain
+      - name: Renew a signed permit twice on one live VLESS connection
+        env:
+          XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: '1'
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/xmesh-xray-signed-cap"
+          (cd "$XMESH_PINNED_XRAY_SOURCE" && go build -trimpath -o "$binary" ./main)
+          python3 experiments/xray-dataplane-fence/test_xray_live_signed_cap.py "$binary"
