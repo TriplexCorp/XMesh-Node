@@ -390,8 +390,11 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
             }
         }
         for _,alias:=range cap.signedGrant.AliasScopes {
-            if canonicalMeterUser(alias.Email)!=identity {
-                return empty,errors.New("dormant calendar checkpoint saw foreign signed alias")
+            isCDN,present:=cap.aliases[alias.Email]
+            if canonicalMeterUser(alias.Email)!=identity ||
+                !present || isCDN!=(alias.Class=="cdn") ||
+                (alias.Class!="main" && alias.Class!="cdn") {
+                return empty,errors.New("dormant calendar checkpoint saw foreign or uninstalled signed alias")
             }
             seenEmails=append(seenEmails,alias.Email)
         }
