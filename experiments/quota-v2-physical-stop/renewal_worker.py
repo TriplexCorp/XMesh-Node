@@ -293,8 +293,13 @@ def _verify_successor_reply(response, old, node, user, challenge, pinned, now):
             or type(payload["issuedAtMs"]) is not int
             or type(payload["validUntilMs"]) is not int
             or not old["validUntilMs"] <= payload["issuedAtMs"] <= now
-            or not now < payload["validUntilMs"]
+            or payload["validUntilMs"] <= payload["issuedAtMs"]
             or payload["validUntilMs"] - payload["issuedAtMs"] > 120_000):
+        # This is a signed ZERO-SPEND planning receipt, not an install
+        # deadline for a positive cap. Its exact immutable bytes must
+        # remain replayable after an XSP response is lost for >120 seconds.
+        # A future positive permit MUST have a separately fresh deadline.
+
         raise ValueError("successor preparation expired or has invalid clock")
     return payload
 
