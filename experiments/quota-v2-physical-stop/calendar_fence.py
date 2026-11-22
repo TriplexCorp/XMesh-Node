@@ -112,12 +112,73 @@ def _independent_journal_digest(old_checkpoint, measured):
     return digest
 
 
+def _offhost_birth_registry_proof(panel, node, checkpoint):
+    """Require the existing Nexus-signed off-host WAL registry readback.
+
+    `charge-sync` verifies the Ed25519 Node witness, immutable full-byte
+    Nexus storage and independently queried latest signed remote head.
+    A same-node digest alone cannot detect previously deleted WAL births.
+    This is a NONAUTHORITATIVE forensic prefix, not a signed user cap.
+    """
+    result = wal_transport.run("charge-sync", panel, node)
+    if result is None:
+        # A first-ever completely idle Xray has no birth registry to send.
+        # A missing remote registry is NEVER sufficient for a user whose
+        # actual old checkpoint contains any byte-bearing WAL.
+        if (type(checkpoint.get("uplinkBytes")) is not int
+                or type(checkpoint.get("downlinkBytes")) is not int
+                or checkpoint["uplinkBytes"] != 0
+                or checkpoint["downlinkBytes"] != 0):
+            raise ValueError("old Xray has bytes but no committed off-host WAL index")
+        return {
+            "offhostBirthIndexVerified": False,
+            "firstRemoteSnapshotWasOnlyBootstrap": False,
+            "preBootstrapHistoryCompletenessVerified": False,
+            "allXrayWritersCompletedVerified": False,
+            "finalMeterVerified": False,
+            "refundableBytes": 0,
+            "canResume": False,
+        }
+    if (not isinstance(result, dict)
+            or set(result) != {
+                "nexusOffhostSignatureVerified",
+                "offhostFullBirthIndexHeadMatched",
+                "nodeLocalIndexExtendsNexusHead",
+                "firstRemoteSnapshotWasOnlyBootstrap",
+                "preBootstrapHistoryCompletenessVerified",
+                "allXrayWritersCompletedVerified",
+                "canResume", "carryforwardApplied",
+                "finalMeterVerified", "refundableBytes"}
+            or result["nexusOffhostSignatureVerified"] is not True
+            or result["offhostFullBirthIndexHeadMatched"] is not True
+            or result["nodeLocalIndexExtendsNexusHead"] is not True
+            or type(result["firstRemoteSnapshotWasOnlyBootstrap"]) is not bool
+            or result["preBootstrapHistoryCompletenessVerified"] is not False
+            or result["allXrayWritersCompletedVerified"] is not False
+            or result["canResume"] is not False
+            or result["carryforwardApplied"] is not False
+            or result["finalMeterVerified"] is not False
+            or type(result["refundableBytes"]) is not int
+            or result["refundableBytes"] != 0):
+        raise ValueError("Nexus did not independently confirm a nonspending WAL birth head")
+    return {
+        "offhostBirthIndexVerified": True,
+        "firstRemoteSnapshotWasOnlyBootstrap": result[
+            "firstRemoteSnapshotWasOnlyBootstrap"],
+        "preBootstrapHistoryCompletenessVerified": False,
+        "allXrayWritersCompletedVerified": False,
+        "finalMeterVerified": False,
+        "refundableBytes": 0,
+        "canResume": False,
+    }
+
+
 def _checked_saved(record, old, successor, runtime):
     if (not isinstance(record, dict)
             or set(record) != {
                 "nodeId", "userId", "predecessorId", "runtimeId",
                 "successorSha256", "scope", "observedFence",
-                "independentJournalSha256"}
+                "independentJournalSha256", "offhostBirthRegistry"}
             or record["nodeId"] != old["nodeId"]
             or record["userId"] != old["userId"]
             or record["predecessorId"] != old["reservationId"]
@@ -126,6 +187,26 @@ def _checked_saved(record, old, successor, runtime):
             or record["scope"] != _fence_scope(old, old["reservationId"])
             or not isinstance(record["independentJournalSha256"], str)
             or caps.HEX64.fullmatch(record["independentJournalSha256"]) is None):
+        raise ValueError("calendar fence record does not match original signed scope")
+    remote = record["offhostBirthRegistry"]
+    expected_remote = {
+        "offhostBirthIndexVerified", "firstRemoteSnapshotWasOnlyBootstrap",
+        "preBootstrapHistoryCompletenessVerified",
+        "allXrayWritersCompletedVerified", "finalMeterVerified",
+        "refundableBytes", "canResume",
+    }
+    if (not isinstance(remote, dict) or set(remote) != expected_remote
+            or type(remote["offhostBirthIndexVerified"]) is not bool
+            or type(remote["firstRemoteSnapshotWasOnlyBootstrap"]) is not bool
+            or remote["preBootstrapHistoryCompletenessVerified"] is not False
+            or remote["allXrayWritersCompletedVerified"] is not False
+            or remote["finalMeterVerified"] is not False
+            or type(remote["refundableBytes"]) is not int
+            or remote["refundableBytes"] != 0
+            or remote["canResume"] is not False
+            or (remote["offhostBirthIndexVerified"] is False
+                and remote["firstRemoteSnapshotWasOnlyBootstrap"] is True)):
+        raise ValueError("calendar fence has no valid nonauthorizing off-host WAL proof")
         raise ValueError("calendar fence record does not match original signed scope")
     observed = record["observedFence"]
     scope = record["scope"]
@@ -245,7 +326,17 @@ def fence_successor(panel, node, user, state, socket_path, executable_pin):
             checkpoint, observed_before)
         if observed_before != wal_transport._measure_quarantined_runtime(pins):
             raise ValueError("Xray process changed during independent WAL audit")
+        remote = _offhost_birth_registry_proof(panel, node, checkpoint)
+        # Source Xray may have advanced during the remote checkpoint. Only
+        # the unchanged ORIGINAL old user's fsynced WAL can become a
+        # committed nonfinal local calendar marker.
+        if _independent_journal_digest(checkpoint, observed_before) != journal_digest:
+            raise ValueError("old Xray WAL changed during remote registry publication")
+        if (observed_before != wal_transport._measure_quarantined_runtime(pins)
+                or enrolled != quarantine._enrolled_activation(panel, node)):
+            raise ValueError("Xray process or Node activation changed after remote WAL proof")
         record["independentJournalSha256"] = journal_digest
+        record["offhostBirthRegistry"] = remote
         _checked_saved(record, old, digest, old["runtimeId"])
         quarantine._durable_store(fd, record, name)
         return True
