@@ -71,6 +71,53 @@ class ChargeWorkerTests(unittest.TestCase):
                         signed(changed), "f"*64, "/dev/null",
                         request, birth, first, last)
 
+    def test_real_nexus_ed25519_wal_charge_receipt(self):
+        import subprocess
+        with tempfile.TemporaryDirectory(prefix="xmesh-wal-charge-ed25519-") as root:
+            key = Path(root) / "signer.pem"
+            public = Path(root) / "public.pem"
+            message = Path(root) / "domain-message"
+            signature = Path(root) / "signature"
+            subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519",
+                            "-out", str(key)], check=True, capture_output=True)
+            subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout",
+                            "-out", str(public)], check=True, capture_output=True)
+            raw = b'{"sequence":1}\n'
+            filename = "meter-" + "b"*64 + ".jsonl"
+            reservation = "00000000-0000-0000-0000-000000000001"
+            payload = {
+                "schemaVersion": 1, "kind": "xmesh.quota-v2.wal-intent-charge",
+                "nodeId": 7, "userId": 42, "reservationId": reservation,
+                "runtimeId": "d"*64, "filename": filename,
+                "firstSequence": 1, "lastSequence": 1, "lastDigest": "e"*64,
+                "journalSha256": hashlib.sha256(raw).hexdigest(),
+                "streamBytes": 17, "conservativeWalBytes": 17,
+                "conservativeCdnWalBytes": 0, "canResume": False,
+                "finalMeterVerified": False, "refundableBytes": 0,
+            }
+            message.write_bytes(worker.DOMAIN + wal_transport.observed.canonical(payload))
+            subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin",
+                            "-inkey", str(key), "-in", str(message),
+                            "-out", str(signature)], check=True, capture_output=True)
+            exact = wal_transport.observed.canonical({
+                "algorithm": "Ed25519", "payload": payload,
+                "signature": signature.read_bytes().hex()}) + b"\n"
+            req = {"nodeId": 7, "userId": 42, "reservationId": reservation,
+                   "filename": filename, "raw": raw}
+            self.assertEqual(worker._validate_receipt(
+                exact, "0"*64, public, req, {"runtimeId": "d"*64},
+                {"sequence": 1},
+                {"sequence": 1, "digest": "e"*64, "nextBytes": 17}), payload)
+            altered = dict(payload, conservativeWalBytes=18)
+            forged = wal_transport.observed.canonical({
+                "algorithm": "Ed25519", "payload": altered,
+                "signature": signature.read_bytes().hex()}) + b"\n"
+            with self.assertRaises(ValueError):
+                worker._validate_receipt(
+                    forged, "0"*64, public, req, {"runtimeId": "d"*64},
+                    {"sequence": 1},
+                    {"sequence": 1, "digest": "e"*64, "nextBytes": 17})
+
     def test_private_wal_read_refuses_mismatch_and_symlink(self):
         if os.geteuid() != 0:
             self.skipTest("root-owned WAL inode verification")
