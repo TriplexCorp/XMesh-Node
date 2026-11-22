@@ -67,7 +67,7 @@ func TestQuotaV2FreshMeterFailsClosedForAliasMismatchAndHistoricState(t *testing
         func(p *zeroMeterRequest){p.UserID++},
         func(p *zeroMeterRequest){p.Nonce="0"},
         func(p *zeroMeterRequest){p.NodeID++},
-        func(p *zeroMeterRequest){p.Aliases=p.Aliases[:1]},
+        func(p *zeroMeterRequest){p.Aliases=nil},
         func(p *zeroMeterRequest){p.Aliases[0].Class="unmetered"},
         func(p *zeroMeterRequest){p.Aliases[0].Email="xmesh-u102--cdn"},
         func(p *zeroMeterRequest){p.MeterEpoch=p.ReservationID},
