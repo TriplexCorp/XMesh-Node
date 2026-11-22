@@ -20,6 +20,7 @@ import stat
 import meter_inventory_audit
 
 JOURNAL_DEST = "/run/xmesh-xray-audit"
+RUNTIME_DEST = "/run/xmesh-quota-runtime"
 MAX_FILE = 4096
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -72,19 +73,55 @@ def _validate_directory(path):
     return fd
 
 
-def _verify_mount(docker, path):
+def _journal_binding(docker):
     if not isinstance(docker, dict):
         raise ValueError("independent Docker inspection unavailable")
     mounts = docker.get("Mounts")
     if not isinstance(mounts, list):
         raise ValueError("managed Xray journal mount list unavailable")
     found = [m for m in mounts if isinstance(m, dict)
-             and m.get("Destination") == JOURNAL_DEST]
-    if len(found) != 1 or (found[0].get("Type") != "bind" or
-                           found[0].get("Source") != path or
-                           found[0].get("RW") is not True):
+             and m.get("Destination") in (JOURNAL_DEST, RUNTIME_DEST)]
+    if (len(found) != 1 or found[0].get("Type") != "bind"
+            or found[0].get("RW") is not True
+            or not isinstance(found[0].get("Source"), str)):
         raise ValueError("signed checkpoint does not bind actual managed Xray journal")
-    return found[0]
+    mount = found[0]
+    source = mount["Source"]
+    if mount["Destination"] == RUNTIME_DEST:
+        ledger = RUNTIME_DEST + "/ledger"
+        config = docker.get("Config")
+        env = config.get("Env") if isinstance(config, dict) else None
+        if (not isinstance(env, list) or not all(isinstance(v, str) for v in env)
+                or [v for v in env if v.startswith("XMESH_EXPERIMENTAL_OBSERVED_DIR=")]
+                != ["XMESH_EXPERIMENTAL_OBSERVED_DIR=" + ledger]):
+            raise ValueError("runtime mount differs from Xray's configured ledger")
+        if any(isinstance(m, dict) and isinstance(m.get("Destination"), str)
+               and m["Destination"].startswith(RUNTIME_DEST + "/") for m in mounts):
+            raise ValueError("another Xray mount shadows the runtime directory")
+        parent = _validate_directory(source)
+        try:
+            for name in os.listdir(parent):
+                if name == "ledger":
+                    continue
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (name not in ("drain.sock", "cap-binding.json")
+                        or (name == "drain.sock" and not stat.S_ISSOCK(info.st_mode))
+                        or (name == "cap-binding.json" and not stat.S_ISREG(info.st_mode))
+                        or info.st_uid != os.geteuid() or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600):
+                    raise ValueError("private runtime directory contains unexpected historical state")
+        finally:
+            os.close(parent)
+        source = os.path.join(source, "ledger")
+        os.close(_validate_directory(source))
+    return mount, source
+
+
+def _verify_mount(docker, path):
+    mount, source = _journal_binding(docker)
+    if source != path:
+        raise ValueError("signed checkpoint does not bind actual managed Xray journal")
+    return mount
 
 
 def _read(dfd, filename):

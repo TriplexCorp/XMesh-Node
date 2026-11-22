@@ -59,6 +59,24 @@ func TestQuotaV2SuccessorNewUserKeepsSignedPeerWAL(t *testing.T) {
         Aliases:[]signedCapAlias{{Email:"xmesh-u102--vless-main",Class:"main"}},
     }
     if _,err:=verifyPristineSuccessorMeter(req);err!=nil{t.Fatal(err)}
+    inventory,err:=readInventory(dir)
+    if err!=nil{t.Fatal(err)}
+    peer.Kind=signedCapRenewalKind
+    peer.ReservationRevision++
+    peer.Nonce=strings.Repeat("d",64)
+    peer.InventoryTailDigest=inventory.tail.Digest
+    peer.WitnessedWalBytes=17
+    expected.ReservationRevision=peer.ReservationRevision
+    expected.FirstGenesisIndependentlyProved=false
+    renewal:=signedCapTestEnvelope(t,peer,private)
+    if err:=renewSignedCap(renewal,pub,expected);err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err!=nil{t.Fatal(err)}
+    path:=filepath.Join(dir,"positive-cap-u101-r4.json")
+    if err:=os.WriteFile(path,[]byte("altered"),0600);err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil{t.Fatal("accepted altered peer grant")}
+    if err:=os.Remove(path);err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil{t.Fatal("accepted missing peer grant")}
+    if err:=os.WriteFile(path,renewal,0600);err!=nil{t.Fatal(err)}
     if counter.Value()!=17 {t.Fatal("peer counter changed during successor proof")}
     if err:=os.Remove(meterLedgerPath(dir,peer.RuntimeID,capMain,"uplink"));err!=nil{t.Fatal(err)}
     if _,err:=verifyPristineSuccessorMeter(req);err==nil{t.Fatal("missing peer WAL was accepted")}

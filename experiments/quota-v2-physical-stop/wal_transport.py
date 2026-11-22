@@ -180,14 +180,7 @@ def _bound_journal(container_name="xmesh-managed-xray"):
     runtime = json.loads(raw, object_pairs_hook=observed.unique_pairs)
     if not isinstance(runtime, dict):
         raise ValueError("managed Xray inspection must be one container object")
-    mounts = runtime.get("Mounts")
-    if not isinstance(mounts, list):
-        raise ValueError("managed Xray mount information unavailable")
-    mounts = [m for m in mounts if isinstance(m, dict) and m.get("Destination") == journal.JOURNAL_DEST]
-    if len(mounts) != 1 or not isinstance(mounts[0].get("Source"), str):
-        raise ValueError("managed Xray has no configured private WAL bind")
-    source = mounts[0]["Source"]
-    journal._verify_mount(runtime, source)
+    _, source = journal._journal_binding(runtime)
     return runtime, source
 
 
@@ -270,7 +263,8 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
     mounts_by_dest = {
         m.get("Destination"): m for m in mounts
     } if isinstance(mounts, list) and all(isinstance(m, dict) for m in mounts) else {}
-    required_mounts = {journal.JOURNAL_DEST, "/etc/xray/config.json"}
+    journal_dest = journal.RUNTIME_DEST if journal.RUNTIME_DEST in mounts_by_dest else journal.JOURNAL_DEST
+    required_mounts = {journal_dest, "/etc/xray/config.json"}
     image_volumes = {"/usr/local/etc/xray", "/var/log/xray"}
     mounts_safe = (
         isinstance(mounts, list) and 2 <= len(mounts) <= 4 and

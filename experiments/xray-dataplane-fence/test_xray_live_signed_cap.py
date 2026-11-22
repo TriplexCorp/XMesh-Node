@@ -114,11 +114,13 @@ def run(xray, root, target, processes, scenario):
                                    "policyPublicKey": public[-32:].hex()}))
     binding.chmod(0o600)
     alias, ports, api_port = configs(root, target, user)
+    ledger = root / "ledger"
+    ledger.mkdir(mode=0o700)
     sock_path = root / "control.sock"
     env = dict(os.environ, XMESH_EXPERIMENTAL_DRAIN="1",
                XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING=str(binding),
                XMESH_EXPERIMENTAL_SCOPED_INBOUNDS="vless-cdn,vless-main",
-               XMESH_EXPERIMENTAL_OBSERVED_DIR=str(root),
+               XMESH_EXPERIMENTAL_OBSERVED_DIR=str(ledger),
                XMESH_EXPERIMENTAL_DRAIN_SOCKET=str(sock_path))
     def launch(role, launch_env):
         with (root / f"{role}.log").open("a") as log:
@@ -156,7 +158,7 @@ def run(xray, root, target, processes, scenario):
     assert zero_receipt["isolatedNewWalRoot"] is True
     assert zero_receipt["authorizedBytes"] == 0
     assert zero_receipt["canSpend"] is False and zero_receipt["canResume"] is False
-    assert not list(root.glob("meter-*.jsonl"))
+    assert not list(ledger.glob("meter-*.jsonl"))
     def open_stream(name):
         return connect_socks(ports[name], target, "127.0.0.1")
 
@@ -241,7 +243,7 @@ def run(xray, root, target, processes, scenario):
     forged["signature"] = ("0" if sig[0] != "0" else "1") + sig[1:]
     reject(sock_path, server.pid, runtime, genesis, canonical(forged) + b"\n", scope)
     install_in_xray(sock_path, server.pid, runtime, genesis, grant, scope)
-    assert (root / f"positive-cap-u{user}.json").read_bytes() == grant
+    assert (ledger / f"positive-cap-u{user}.json").read_bytes() == grant
     try:
         observe_zero_meter_in_xray(
             sock_path, server.pid, runtime, first_zero_scope)
@@ -262,7 +264,7 @@ def run(xray, root, target, processes, scenario):
             echo_bytes(main, 16384)
             echo_bytes(cdn, 16384)
             raw = {p.name: p.read_bytes()
-                   for p in root.glob("meter-*.jsonl")}
+                   for p in ledger.glob("meter-*.jsonl")}
             assert len(raw) == 4, "new runtime did not create independent MAIN/CDN WAL"
             for name in raw:
                 assert name.startswith("meter-")
@@ -271,7 +273,7 @@ def run(xray, root, target, processes, scenario):
             assert query_direction_counters(xray, api_port, alias["cdn"]) == {
                 "uplink": 16384, "downlink": 16384}
         install_in_xray(sock_path, server.pid, runtime, genesis, grant, scope)
-        assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == raw
+        assert {p.name: p.read_bytes() for p in ledger.glob("meter-*.jsonl")} == raw
         # The same signed grant is an idempotent install acknowledgment,
         # never a new or replenished 8 MiB/2 MiB allowance.
         assert server.poll() is None and client.poll() is None
@@ -285,7 +287,7 @@ def run(xray, root, target, processes, scenario):
         with open_stream("main") as main, open_stream("cdn") as cdn:
             echo_bytes(main, 16384)
             echo_bytes(cdn, 16384)
-            old = {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")}
+            old = {p.name: p.read_bytes() for p in ledger.glob("meter-*.jsonl")}
             assert len(old) == 4
             old_scope = {
                 "email": alias["cdn"], "nodeId": node, "userId": user,
@@ -311,11 +313,11 @@ def run(xray, root, target, processes, scenario):
             # byte-level verifier; the installed Agent validates a real
             # independently inspected Docker binding before trusting it.
             mount = {"Mounts": [{
-                "Source": str(root), "Destination": journal_integrity.JOURNAL_DEST,
+                "Source": str(ledger), "Destination": journal_integrity.JOURNAL_DEST,
                 "Type": "bind", "RW": True,
             }]}
             journal_sha = journal_integrity.verify_poststop_journal(
-                checkpoint, str(root), mount)
+                checkpoint, str(ledger), mount)
             assert len(journal_sha) == 64
             assert {(row["email"], row["uplinkBytes"], row["downlinkBytes"])
                     for row in checkpoint["inboundMeters"]} == {
@@ -327,8 +329,8 @@ def run(xray, root, target, processes, scenario):
         assert fence_calendar_in_xray(
             sock_path, server.pid, runtime, old_scope) == fence
         assert journal_integrity.verify_poststop_journal(
-            checkpoint, str(root), mount) == journal_sha
-        assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == old
+            checkpoint, str(ledger), mount) == journal_sha
+        assert {p.name: p.read_bytes() for p in ledger.glob("meter-*.jsonl")} == old
         for kind in ("main", "cdn"):
             with open_stream(kind) as conn:
                 assert not probe_echo(conn, 1), "new connection reopened an old signed epoch"
@@ -337,12 +339,12 @@ def run(xray, root, target, processes, scenario):
         # A stolen or crash-torn historical byte WAL must invalidate the
         # independent audit even when the original Xray control response
         # and its nonfinal checkpoint are unchanged and well formed.
-        victim = next(root.glob("meter-*.jsonl"))
+        victim = next(ledger.glob("meter-*.jsonl"))
         original = victim.read_bytes()
         victim.unlink()
         try:
             try:
-                journal_integrity.verify_poststop_journal(checkpoint, str(root), mount)
+                journal_integrity.verify_poststop_journal(checkpoint, str(ledger), mount)
             except (FileNotFoundError, ValueError):
                 pass
             else:
@@ -351,10 +353,10 @@ def run(xray, root, target, processes, scenario):
             victim.write_bytes(original)
             victim.chmod(0o600)
         assert journal_integrity.verify_poststop_journal(
-            checkpoint, str(root), mount) == journal_sha
+            checkpoint, str(ledger), mount) == journal_sha
         victim.write_bytes(original[:-1])
         try:
-            journal_integrity.verify_poststop_journal(checkpoint, str(root), mount)
+            journal_integrity.verify_poststop_journal(checkpoint, str(ledger), mount)
         except (FileNotFoundError, ValueError):
             pass
         else:
@@ -366,7 +368,7 @@ def run(xray, root, target, processes, scenario):
         with open_stream("main") as sock:
             echo_bytes(sock, 16384)
             assert time.time_ns() // 1_000_000 < claims["validUntilMs"]
-            wal = {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")}
+            wal = {p.name: p.read_bytes() for p in ledger.glob("meter-*.jsonl")}
             assert len(wal) == 2
             assert all(json.loads(raw.splitlines()[-1])["nextBytes"] == 16384 for raw in wal.values())
             remaining = claims["validUntilMs"] - time.time_ns() // 1_000_000
@@ -379,7 +381,7 @@ def run(xray, root, target, processes, scenario):
         reject(sock_path, server.pid, runtime, genesis, grant, scope)
         with open_stream("main") as sock:
             assert not probe_echo(sock, 1), "new VLESS stream reused an expired grant"
-        assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == wal
+        assert {p.name: p.read_bytes() for p in ledger.glob("meter-*.jsonl")} == wal
         assert server.poll() is None and client.poll() is None
         print("PASS: live idle VLESS closed at signed expiry, preserved fsynced WAL and refused replay")
         return
@@ -392,7 +394,7 @@ def run(xray, root, target, processes, scenario):
             server.kill()
             assert server.wait(timeout=10) == -9
             assert not probe_echo(sock, 1), "stopped Xray still served its existing stream"
-        old_wal = {path.name: path.read_bytes() for path in root.glob("meter-*.jsonl")}
+        old_wal = {path.name: path.read_bytes() for path in ledger.glob("meter-*.jsonl")}
         assert len(old_wal) == 2
         assert all(json.loads(raw.splitlines()[-1])["nextBytes"] == 16384 for raw in old_wal.values())
         replacement = launch("server", env)
@@ -402,7 +404,7 @@ def run(xray, root, target, processes, scenario):
         reject(sock_path, replacement.pid, new_runtime, genesis, grant, scope)
         with open_stream("main") as sock:
             assert not probe_echo(sock, 1), "replacement served with unresolved old WAL"
-        assert {path.name: path.read_bytes() for path in root.glob("meter-*.jsonl")} == old_wal
+        assert {path.name: path.read_bytes() for path in ledger.glob("meter-*.jsonl")} == old_wal
         print("PASS: SIGKILL after 32768 accounted bytes preserved the WAL and denied reuse by new Xray")
         return
 
@@ -426,7 +428,7 @@ def run(xray, root, target, processes, scenario):
                 }
                 for direction in ("uplink", "downlink"):
                     identity = f"{runtime}\0{alias['main']}\0{direction}".encode()
-                    path = root / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
+                    path = ledger / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
                     assert json.loads(path.read_bytes().splitlines()[-1])["nextBytes"] == echoed
                 print(f"PASS: {count} simultaneous VLESS streams confirmed by fsynced Xray WAL", flush=True)
         assert server.poll() is None and client.poll() is None
@@ -434,7 +436,7 @@ def run(xray, root, target, processes, scenario):
 
     def renew(main_echoed, ceiling, revision, *, cdn_ceiling=2 * MIB,
               witnessed_wal=None, witnessed_cdn=None):
-        index = (root / "xmesh-meter-inventory-v1.jsonl").read_bytes()
+        index = (ledger / "xmesh-meter-inventory-v1.jsonl").read_bytes()
         tail = json.loads(index.splitlines()[-1])["digest"]
         timestamp = time.time_ns() // 1_000_000
         next_scope = dict(scope, nonce=digest(), revision=revision)
@@ -450,7 +452,7 @@ def run(xray, root, target, processes, scenario):
         ))
         receipt = install_in_xray(sock_path, server.pid, runtime, b"", renewed, next_scope)
         assert install_in_xray(sock_path, server.pid, runtime, b"", renewed, next_scope) == receipt
-        assert (root / f"positive-cap-u{user}-r{revision}.json").read_bytes() == renewed
+        assert (ledger / f"positive-cap-u{user}-r{revision}.json").read_bytes() == renewed
         return renewed, next_scope
 
     older_renewal = None
@@ -468,7 +470,7 @@ def run(xray, root, target, processes, scenario):
         assert direction == dict(uplink=echoed, downlink=echoed), direction
         for way in ("uplink", "downlink"):
             meter_identity = f"{runtime}\0{alias[name]}\0{way}".encode()
-            wal = root / f"meter-{hashlib.sha256(meter_identity).hexdigest()}.jsonl"
+            wal = ledger / f"meter-{hashlib.sha256(meter_identity).hexdigest()}.jsonl"
             assert json.loads(wal.read_bytes().splitlines()[-1])["nextBytes"] == echoed
     # The original 2MiB CDN grant is exhausted. A THIRD Ed25519-signed
     # revision, backed by a separately tested PostgreSQL top-up, explicitly
@@ -483,7 +485,7 @@ def run(xray, root, target, processes, scenario):
     assert updated == dict(uplink=2 * MIB, downlink=2 * MIB), updated
     for direction in ("uplink", "downlink"):
         identity = f"{runtime}\0{alias['cdn']}\0{direction}".encode()
-        wal = root / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
+        wal = ledger / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
         assert json.loads(wal.read_bytes().splitlines()[-1])["nextBytes"] == 2 * MIB
 
     # The shared MAIN allowance still has 2 MiB free. One independent
@@ -499,7 +501,7 @@ def run(xray, root, target, processes, scenario):
     assert updated == dict(uplink=3 * MIB, downlink=3 * MIB), updated
     for direction in ("uplink", "downlink"):
         identity = f"{runtime}\0{alias['cdn']}\0{direction}".encode()
-        wal = root / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
+        wal = ledger / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
         assert json.loads(wal.read_bytes().splitlines()[-1])["nextBytes"] == 3 * MIB
 
     for name in ("main", "cdn"):

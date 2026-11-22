@@ -5,12 +5,15 @@
 package xmeshdrain
 
 import (
+    "crypto/sha256"
     "encoding/json"
     "errors"
     "io"
     "net/http"
     "os"
+    "path/filepath"
     "strconv"
+    "syscall"
     "strings"
 
     "github.com/xtls/xray-core/features/stats"
@@ -118,7 +121,17 @@ func verifyPristineSuccessorMeter(req zeroMeterRequest) (zeroMeterResult,error) 
     for name:=range inventory.steps {allowed[name]=true}
     for _,peer:=range experimentalByteCaps.users {
         if peer.runtimeID==runtime && peer.signedGrant.ReservationID!="" {
-            allowed["positive-cap-u"+strconv.FormatInt(peer.signedGrant.UserID,10)+".json"]=true
+            for name,digest:=range peer.installedGrantFiles {
+                file,st,err:=openMeterFile(filepath.Join(observed.directory,name),syscall.O_RDONLY|syscall.O_NONBLOCK)
+                if err!=nil{return empty,err}
+                raw,readErr:=io.ReadAll(io.LimitReader(file,8193))
+                closeErr:=file.Close()
+                if readErr!=nil || closeErr!=nil || st.Size!=int64(len(raw)) ||
+                    len(raw)>8192 || sha256.Sum256(raw)!=digest {
+                    return empty,errors.New("successor peer signed grant file changed")
+                }
+                allowed[name]=true
+            }
         }
     }
     entries,err:=os.ReadDir(observed.directory)

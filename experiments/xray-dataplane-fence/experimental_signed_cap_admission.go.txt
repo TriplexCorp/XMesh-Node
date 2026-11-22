@@ -308,6 +308,7 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
         nodeCeiling:payload.NodeCeilingBytes,cdnCeiling:payload.CdnCeilingBytes,
         validUntilMs:payload.ValidUntilMs,lastSeenMs:installedAt,
         aliases:aliases, signedGrant:payload, signedGrantDigest:sha256.Sum256(raw),
+        installedGrantFiles:map[string][32]byte{name:sha256.Sum256(raw)},
     }
     experimentalByteCaps.users[identity]=cap
     armSignedCapExpiryLocked(identity,cap,time.Now().Add(time.Duration(payload.ValidUntilMs-installedAt)*time.Millisecond))
@@ -472,6 +473,7 @@ func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapCont
 	cap.lastSeenMs = installedAt
 	cap.signedGrant = payload
 	cap.signedGrantDigest = digest
+	cap.installedGrantFiles[name] = digest
 	return nil
 }
 

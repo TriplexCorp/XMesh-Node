@@ -137,6 +137,39 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             with self.subTest(config=changed), self.assertRaises(ValueError):
                 successor_meter._verify_fresh_container_env(changed)
 
+    def test_runtime_bind_keeps_ipc_out_of_wal_and_cannot_hide_old_debt(self):
+        import journal_integrity as journal
+        with tempfile.TemporaryDirectory() as source:
+            ledger = Path(source, "ledger")
+            ledger.mkdir(mode=0o700)
+            binding = Path(source, "cap-binding.json")
+            binding.write_bytes(b"{}")
+            binding.chmod(0o600)
+            mount = {"Source": source, "Destination": journal.RUNTIME_DEST,
+                     "Type": "bind", "RW": True}
+            setting = "XMESH_EXPERIMENTAL_OBSERVED_DIR=" + journal.RUNTIME_DEST + "/ledger"
+            docker = {"Mounts": [mount], "Config": {"Env": [setting]}}
+            self.assertEqual(journal._verify_mount(docker, str(ledger)), mount)
+            with self.assertRaises(ValueError):
+                journal._verify_mount(docker, source)
+            for env in ([], [setting, setting], [setting + "/other"]):
+                with self.subTest(env=env), self.assertRaises(ValueError):
+                    journal._journal_binding(dict(docker, Config={"Env": env}))
+            for dest in (journal.JOURNAL_DEST, journal.RUNTIME_DEST + "/ledger"):
+                with self.subTest(dest=dest), self.assertRaises(ValueError):
+                    journal._journal_binding(dict(docker, Mounts=[mount, dict(mount, Destination=dest)]))
+            legacy = Path(source, "meter-old-runtime.jsonl")
+            legacy.write_bytes(b"old debt")
+            with self.assertRaisesRegex(ValueError, "historical state"):
+                journal._verify_mount(docker, str(ledger))
+            self.assertEqual(legacy.read_bytes(), b"old debt")
+            legacy.unlink()
+            ledger.rmdir()
+            with tempfile.TemporaryDirectory() as other:
+                ledger.symlink_to(other, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    journal._verify_mount(docker, str(ledger))
+
     def test_new_wal_root_is_private_distinct_and_empty(self):
         with tempfile.TemporaryDirectory(prefix="xmesh-meter-old-") as old:
             with tempfile.TemporaryDirectory(prefix="xmesh-meter-fresh-") as fresh:

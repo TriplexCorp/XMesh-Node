@@ -40,11 +40,19 @@ def _verify_fresh_container_env(docker):
     env = config.get("Env") if isinstance(config, dict) else None
     if not isinstance(env, list) or not all(isinstance(x, str) for x in env):
         raise ValueError("untrusted successor Xray process environment")
+    runtime_layout = any(m.get("Destination") == journal_integrity.RUNTIME_DEST
+                         for m in docker.get("Mounts", []) if isinstance(m, dict))
     required = {
         "GITHUB_ACTIONS": "true",
         "XMESH_EXPERIMENTAL_DRAIN": "1",
-        "XMESH_EXPERIMENTAL_OBSERVED_DIR": journal_integrity.JOURNAL_DEST,
+        "XMESH_EXPERIMENTAL_OBSERVED_DIR": (journal_integrity.RUNTIME_DEST + "/ledger"
+                                           if runtime_layout else journal_integrity.JOURNAL_DEST),
     }
+    if runtime_layout:
+        required.update({
+            "XMESH_EXPERIMENTAL_DRAIN_SOCKET": journal_integrity.RUNTIME_DEST + "/drain.sock",
+            "XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING": journal_integrity.RUNTIME_DEST + "/cap-binding.json",
+        })
     for name, value in required.items():
         found = [entry.split("=", 1)[1] for entry in env
                  if entry.startswith(name + "=")]
@@ -83,7 +91,7 @@ def _clean_mount(old_dir, candidate_dir, runtime_id=None):
             # Xray authenticates the peer permits and candidate state over
             # its measured control socket. Filenames supply no authority.
             if any(name not in permitted and re.fullmatch(
-                    r"positive-cap-u[1-9][0-9]{0,18}\.json", name) is None for name in names):
+                    r"positive-cap-u[1-9][0-9]{0,18}(?:-r[1-9][0-9]{0,18})?\.json", name) is None for name in names):
                 raise ValueError("successor WAL root contains unknown state")
         # Xray must already hold its own private, source-pinned instance lock.
         # We do not assume this by just seeing a lock-shaped filename; the
