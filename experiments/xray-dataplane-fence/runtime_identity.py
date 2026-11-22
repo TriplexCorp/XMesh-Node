@@ -130,24 +130,29 @@ def verify_quarantined_files(host_pid, executable_sha256, config_sha256):
                 raise ValueError("managed Xray executable or configuration pin mismatch")
 
 
-def inspect_managed_xray():
+def inspect_managed_xray(container_name="xmesh-managed-xray"):
     """Independently obtain the currently RUNNING container's host PID.
 
     Never accept a PID, start time, container ID or image name from the
     checkpoint. Docker is authoritative only for process discovery here; it
     is NOT a kernel byte-drain/physical-stop attestation.
     """
+    # Only the long-lived quarantined Xray and the second, completely
+    # isolated successor quarantine may be independently measured.
+    # This is a fixed allowlist, never a caller-selected Docker target.
+    if container_name not in ("xmesh-managed-xray", "xmesh-successor-quarantine"):
+        raise ValueError("untrusted Xray runtime container selection")
     try:
         result = subprocess.run(
             ["docker", "inspect", "--format", "{{json .}}",
-             "xmesh-managed-xray"],
+             container_name],
             capture_output=True, text=True, timeout=5, check=True)
         if not isinstance(result.stdout, str) or not 0 < len(result.stdout) < 1_000_000:
             raise ValueError("invalid Docker inspect output size")
         data = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise ValueError("trusted Docker managed Xray inspect unavailable") from exc
-    if not isinstance(data, dict) or data.get("Name") != "/xmesh-managed-xray":
+    if not isinstance(data, dict) or data.get("Name") != "/" + container_name:
         raise ValueError("unexpected managed Xray container name")
     cid = data.get("Id")
     state = data.get("State")
