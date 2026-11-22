@@ -97,7 +97,7 @@ def reject(sock_path, pid, runtime, genesis, grant, scope):
         raise AssertionError("Xray installed an unauthorized or repeated grant")
 
 
-def run(xray, root, target, processes, *, restart):
+def run(xray, root, target, processes, scenario):
     node, user = 4719, 8317
     digest = lambda: os.urandom(32).hex()
     activation = digest()
@@ -189,7 +189,9 @@ def run(xray, root, target, processes, *, restart):
         "nonce": scope["nonce"], "aliasScopes": scope["aliases"], "inventoryTailDigest": "0" * 64,
         "witnessedWalBytes": 0, "witnessedCdnBytes": 0,
         "sharedCeilingBytes": 8 * MIB, "nodeCeilingBytes": 8 * MIB, "cdnCeilingBytes": 2 * MIB,
-        "issuedAtMs": now, "installBeforeMs": now + 90_000, "validUntilMs": now + 180_000,
+        "issuedAtMs": now,
+        "installBeforeMs": now + (5_000 if scenario == "expiry" else 90_000),
+        "validUntilMs": now + (8_000 if scenario == "expiry" else 180_000),
         "canSpend": True, "canStart": False, "canResume": False, "finalMeterVerified": False,
         "refundableBytes": 0,
     }
@@ -212,7 +214,30 @@ def run(xray, root, target, processes, *, restart):
     install_in_xray(sock_path, server.pid, runtime, genesis, grant, scope)
     assert (root / f"positive-cap-u{user}.json").read_bytes() == grant
 
-    if restart:
+    if scenario == "expiry":
+        with open_stream("main") as sock:
+            echo_bytes(sock, 16384)
+            assert time.time_ns() // 1_000_000 < claims["validUntilMs"]
+            wal = {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")}
+            assert len(wal) == 2
+            assert all(json.loads(raw.splitlines()[-1])["nextBytes"] == 16384 for raw in wal.values())
+            while (remaining := claims["validUntilMs"] - time.time_ns() // 1_000_000) > 0:
+                time.sleep(min(remaining / 1000, 0.1))
+            sock.settimeout(4)
+            try:
+                sock.sendall(b"x")
+                assert sock.recv(1) == b"", "expired VLESS stream did not close"
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        reject(sock_path, server.pid, runtime, genesis, grant, scope)
+        with open_stream("main") as sock:
+            assert not probe_echo(sock, 1), "new VLESS stream reused an expired grant"
+        assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == wal
+        assert server.poll() is None and client.poll() is None
+        print("PASS: live VLESS closed on post-expiry write, preserved fsynced WAL and refused replay")
+        return
+
+    if scenario == "restart":
         with open_stream("main") as sock:
             echo_bytes(sock, 16384)
             stats = query_direction_counters(xray, api_port, alias["main"])
@@ -328,13 +353,13 @@ def wait_for_peer(path, process):
     raise AssertionError("replacement Xray did not expose its measured control socket")
 
 
-def scenario(restart):
+def scenario(event):
     with tempfile.TemporaryDirectory(prefix="xmesh-cap-") as tmp, EchoServer(("127.0.0.1", 0), EchoHandler) as echo:
         root = Path(tmp)
         threading.Thread(target=echo.serve_forever, daemon=True).start()
         processes = []
         try:
-            run(sys.argv[1], root, echo.server_address[1], processes, restart=restart)
+            run(sys.argv[1], root, echo.server_address[1], processes, event)
         except BaseException as exc:
             if isinstance(exc, subprocess.CalledProcessError):
                 print(f"command stderr: {exc.stderr}", file=sys.stderr)
@@ -352,5 +377,6 @@ def scenario(restart):
 if __name__ == "__main__":
     assert os.environ.get("GITHUB_ACTIONS") == "true"
     assert os.environ.get("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
-    scenario(restart=False)
-    scenario(restart=True)
+    scenario("renewal")
+    scenario("restart")
+    scenario("expiry")
