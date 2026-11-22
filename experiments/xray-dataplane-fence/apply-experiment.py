@@ -130,6 +130,40 @@ def run(root: Path):
         quota_errors / "limit_error.go",
     )
 
+    shutil.copyfile(NODE_ROOT / "experiments/xray-dataplane-fence/experimental_ingress.go.txt",
+                    shared / "experimental_ingress.go")
+    inbound_file = root / "app/proxyman/inbound/always.go"
+    inbound_source = replace_once(inbound_file.read_text(), '"github.com/xtls/xray-core/app/proxyman"',
+                                  '"github.com/xtls/xray-core/app/proxyman"\n    "github.com/xtls/xray-core/app/xmeshdrain"')
+    inbound_source = replace_once(inbound_source, "if pl == nil {", """
+    private, err := xmeshdrain.MeterListener(tag)
+    if err != nil { return nil, err }
+    if private != "" {
+        msg, ok := proxyConfig.(proto.Message)
+        if !ok || proto.MessageName(msg) != "xray.proxy.vless.inbound.Config" || pl == nil || !net.HasNetwork(nl, net.Network_UNIX) {
+            return nil, errors.New("incompatible private VLESS transport")
+        }
+        // Native VLESS authentication, scoped tag, dispatcher and meter.
+        // Public transport security terminates on the stable Xray frontend.
+        h.workers = append(h.workers, &dsWorker{
+            address: net.DomainAddress(private), proxy: p, tag: tag,
+            dispatcher: h.mux, sniffingRequest: sniffingRequest, ctx: ctx,
+            uplinkCounter: uplinkCounter, downlinkCounter: downlinkCounter,
+        })
+    }
+    if pl == nil {""")
+    inbound_file.write_text(inbound_source)
+    outbound_file = root / "proxy/vless/outbound/outbound.go"
+    outbound_source = replace_once(outbound_file.read_text(), '"github.com/xtls/xray-core/app/reverse"',
+                                   '"github.com/xtls/xray-core/app/reverse"\n    "github.com/xtls/xray-core/app/xmeshdrain"')
+    outbound_source = replace_once(outbound_source, "if h.testpre > 0 && h.reverse == nil {", """
+    if rec.Destination.Address.String() == "xmesh-meter.invalid" {
+        var err error
+        conn, err = xmeshdrain.DialIngressMeter(ctx, rec.User)
+        if err != nil { return err }
+    } else if h.testpre > 0 && h.reverse == nil {""")
+    outbound_file.write_text(outbound_source)
+
     dispatcher_file = root / "app/dispatcher/default.go"
     source = dispatcher_file.read_text(encoding="utf-8")
     source = replace_once(
@@ -745,7 +779,7 @@ type Writer interface {""",
     )
 
     subprocess.run(
-        ["gofmt", "-w", str(shared / "xmeshdrain.go"),
+        ["gofmt", "-w", str(inbound_file), str(outbound_file), str(shared / "experimental_ingress.go"), str(shared / "xmeshdrain.go"),
          str(shared / "experimental_cap_socket.go"),
          str(shared / "experimental_zero_meter_preflight.go"),
          str(shared / "experimental_zero_meter_preflight_test.go"),

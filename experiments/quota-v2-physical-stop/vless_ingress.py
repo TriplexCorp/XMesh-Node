@@ -1,0 +1,142 @@
+"""Private per-user routes for the isolated installed-Agent ingress."""
+import os
+import re
+import secrets
+import socket
+import struct
+import uuid
+
+import wal_transport
+
+
+def target(pid, runtime):
+    if type(pid) is not int or pid < 1 or not re.fullmatch("[0-9a-f]{64}", runtime):
+        raise ValueError("invalid ingress runtime identity")
+    return f"/proc/{pid}/root/dev/shm/xmesh-{runtime}"
+
+
+def publish(fd, payload, measured, predecessor=None):
+    """Called under the Agent state lock after signed install and WAL evidence."""
+    if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
+        return
+    user = payload["userId"]
+    if type(user) is not int or user <= 0 or payload["runtimeId"] != measured[3]:
+        raise ValueError("foreign ingress grant")
+    pid, runtime = measured[2:]
+    destination = target(pid, runtime)
+    link = f"ingress-u{user}"
+    try:
+        current = os.readlink(link, dir_fd=fd)
+    except FileNotFoundError:
+        current = None
+    if current not in (predecessor, destination):
+        raise ValueError("ingress route differs from signed predecessor")
+    if wal_transport.runtime_identity.trusted_runtime_identity(pid) != runtime:
+        raise ValueError("ingress peer no longer owns this grant")
+    for alias in payload["aliasScopes"]:
+        tag = "vless-" + alias["class"]
+        if tag not in ("vless-main", "vless-cdn") or alias["email"] != f"xmesh-u{user}--{tag}":
+            raise ValueError("invalid ingress class")
+        with socket.socket(socket.AF_UNIX) as probe:
+            probe.settimeout(3)
+            probe.connect(os.path.join(destination, tag))
+            peer = probe.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            if struct.unpack("3i", peer)[:2] != (pid, os.geteuid()):
+                raise ValueError("private VLESS socket has a different owner")
+    if wal_transport.runtime_identity.trusted_runtime_identity(pid) != runtime:
+        raise ValueError("Xray changed before ingress publication")
+    if current != destination:
+        pending = ".ingress-" + secrets.token_hex(12)
+        os.symlink(destination, pending, dir_fd=fd)
+        try:
+            os.replace(pending, link, src_dir_fd=fd, dst_dir_fd=fd)
+        finally:
+            try:
+                os.unlink(pending, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+    os.fsync(fd)
+
+
+def frontend(profile):
+    """Build the loopback staging frontend from the measured VLESS roster."""
+    inbounds, rules = [], []
+    outbounds = [{"tag": "deny", "protocol": "blackhole"}]
+    for inbound in profile["inbounds"]:
+        tag = inbound["tag"]
+        if (tag not in ("vless-main", "vless-cdn") or inbound["protocol"] != "vless"
+                or inbound.get("listen") != "127.0.0.1" or inbound.get("settings", {}).get("fallbacks")):
+            raise ValueError("unsupported staging ingress")
+        seen = set()
+        for client in inbound["settings"]["clients"]:
+            email = client["email"]
+            identifier = str(uuid.UUID(client["id"]))
+            if (not re.fullmatch(r"xmesh-u[1-9][0-9]{0,18}--" + tag, email)
+                    or identifier in seen or client.get("flow") or client.get("reverse")
+                    or any(o["tag"] == email for o in outbounds)):
+                raise ValueError("ambiguous VLESS ingress identity or unsupported flow")
+            seen.add(identifier)
+            rules.append({"type": "field", "inboundTag": [tag], "user": [email], "outboundTag": email})
+            outbounds.append({"tag": email, "protocol": "vless", "settings": {"vnext": [{
+                "address": "xmesh-meter.invalid", "port": 1,
+                "users": [{"id": identifier, "email": email, "encryption": "none"}],
+            }]}})
+        inbounds.append(inbound)
+    if not inbounds or not rules:
+        raise ValueError("missing VLESS roster")
+    return {"inbounds": inbounds, "routing": {"rules": rules}, "outbounds": outbounds}
+
+
+def serve(panel, node, state, binary):
+    """Run a persistent loopback frontend from authenticated staging evidence."""
+    import fcntl
+    import hashlib
+    import stat
+    import genesis_reservation as lease
+    import quarantine_policy as quarantine
+
+    if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
+        raise ValueError("private ingress is not enabled for this fixture")
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        enrollment = quarantine._enrolled_activation(panel, node)
+        original = lease._identity_file(fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)
+        reply = original["reply"]
+        policy = reply["policy"]
+        pinned = wal_transport._panel_pin()
+        quarantine._guard().check_signature(policy, reply["policySignature"], pinned)
+        profile = reply["config"]
+        config_sha = hashlib.sha256(wal_transport.observed.canonical(profile)).hexdigest()
+        if (policy["nodeId"] != node or policy["configSha256"] != config_sha
+                or policy["quotaV2Genesis"]["firstActivationReceiptSha256"] != enrollment["activationReceiptSha256"]):
+            raise ValueError("ingress roster differs from enrolled signed policy")
+        intent = lease._identity_file(fd, quarantine.INTENT_FILE, 4096)
+        exe = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW)
+        info = os.fstat(exe)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022
+                or not 0 < info.st_size <= 256 << 20 or intent["nodeId"] != node):
+            raise ValueError("unsafe ingress executable")
+        with os.fdopen(os.dup(exe), "rb") as binary_file:
+            if hashlib.file_digest(binary_file, "sha256").hexdigest() != intent["executableSha256"]:
+                raise ValueError("ingress executable differs from reviewed Xray")
+        config = os.memfd_create("xmesh-ingress", os.MFD_ALLOW_SEALING)
+        with os.fdopen(os.dup(config), "wb") as stream:
+            stream.write(wal_transport.observed.canonical(frontend(profile)))
+        fcntl.fcntl(config, fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SEAL)
+        os.set_inheritable(config, True)
+    finally:
+        os.close(lock)
+        os.close(fd)
+    os.execve(exe, [binary, "run", "-format", "json", "-config", f"/proc/self/fd/{config}"],
+              {"GITHUB_ACTIONS": "true", "XMESH_QUOTA_INGRESS_STATE": state})
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--panel", required=True)
+    parser.add_argument("--node", type=int, required=True)
+    parser.add_argument("--state", default="/var/lib/xmesh-xray-sync")
+    parser.add_argument("--binary", default="/var/lib/xmesh-measured-lab/xray-client")
+    serve(**vars(parser.parse_args()))

@@ -134,6 +134,15 @@ def _candidate(fd, names, node, user, pinned, now):
                         successor_positive._verified_saved_receipt(
                             lease._identity_file(fd, positive_name, 32768),
                             original, prepared, evidence, node, user, pinned)
+                        if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
+                            import vless_ingress
+                            try:
+                                published = os.readlink(f"ingress-u{user}", dir_fd=fd)
+                            except FileNotFoundError:
+                                published = None
+                            if published != vless_ingress.target(measured[2], measured[3]):
+                                return user, -2, successor_positive._challenge(
+                                    original["reservationId"], measured[3])
                 return None
         return user, 0, _successor_nonce(original)
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
@@ -485,6 +494,17 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
         if user in failed_users:
             continue
         try:
+            if (revision in (-1, -2) and fresh_socket is None
+                    and os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"
+                    and os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1"):
+                from successor_meter import SUCCESSOR
+                mount, ledger = wal_transport._bound_journal(SUCCESSOR)
+                if not any(m.get("Destination") == wal_transport.journal.RUNTIME_DEST
+                           for m in mount["Mounts"]):
+                    raise ValueError("private successor control socket requires a measured runtime mount")
+                fresh_socket = os.path.join(os.path.dirname(ledger), "drain.sock")
+                fresh_executable = executable
+                fresh_config = intent["configSha256"]
             if revision == -2:
                 if os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") != "1" or not (
                         fresh_socket and fresh_executable and fresh_config):

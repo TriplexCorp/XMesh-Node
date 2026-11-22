@@ -20,6 +20,7 @@ import quarantine_policy as quarantine
 import renewal_worker
 import successor_meter
 import wal_transport
+import vless_ingress
 
 GENESIS_DOMAIN = b"XMESH_XRAY_GENESIS_PREPARED_V1\x00"
 
@@ -210,11 +211,16 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             raise ValueError("new executable/config pins differ from immutable marker")
         name = _filename(user, old["reservationId"])
         if name in os.listdir(fd):
-            # Recheck installed receipt against saved signed grant; a
-            # filename alone is not evidence of successful new admission.
             saved = lease._identity_file(fd, name, 32768)
-            _verified_saved_receipt(
-                saved, old, prepared, fresh, node, user, pinned)
+            _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned)
+            if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
+                before = wal_transport._measure_quarantined_runtime((executable_pin, config_pin))
+                after = wal_transport._measure_quarantined_runtime(
+                    (executable_pin, config_pin), container_name=successor_meter.SUCCESSOR)
+                if before[3] != old["runtimeId"] or after != measured:
+                    raise ValueError("saved ingress route targets a replaced Xray")
+                grant = wal_transport.observed.strict_json(saved["response"]["signedEnvelope"].encode())
+                vless_ingress.publish(fd, grant["payload"], after, vless_ingress.target(before[2], before[3]))
             return False
         pending_name = f"calendar-delivery-u{user}-{old['reservationId']}.json"
         response = (lease._identity_file(fd, pending_name, 32768)
@@ -308,6 +314,8 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             "xrayReceipt": receipt, "response": response,
         }
         quarantine._durable_store(fd, record, _filename(user,old["reservationId"]))
+        vless_ingress.publish(fd, wal_transport.observed.strict_json(grant)["payload"],
+                              candidate, vless_ingress.target(original[2], original[3]))
         return True
     finally:
         os.close(lock)

@@ -1,0 +1,108 @@
+// Disposable stable VLESS ingress. Only the authenticated frontend chooses a
+// meter. Each generation's own VLESS validator and byte gate run a second time.
+package xmeshdrain
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"syscall"
+
+	"github.com/xtls/xray-core/common/protocol"
+	"github.com/xtls/xray-core/common/session"
+)
+
+const ingressGroup = "/dev/shm/xmesh-"
+
+var meterTarget = regexp.MustCompile("^/proc/([1-9][0-9]*)/root/dev/shm/xmesh-([a-f0-9]{64})$")
+
+func MeterListener(tag string) (string, error) {
+	if os.Getenv("XMESH_QUOTA_PRIVATE_VLESS") != "1" || (tag != "vless-main" && tag != "vless-cdn") {
+		return "", nil
+	}
+	if _, tracked := trackedInboundTags[tag]; !enabled || capControl == nil || !tracked {
+		return "", errors.New("private VLESS requires signed metering on this inbound")
+	}
+	id, err := currentRuntimeIdentity()
+	if err != nil {
+		return "", err
+	}
+	dir := ingressGroup + id
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+	if err := privateIngressDirectory(dir); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, tag) + ",0600", nil
+}
+
+func privateIngressDirectory(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0700 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		return errors.New("untrusted private VLESS directory")
+	}
+	return nil
+}
+
+// No DNS resolution, TCP retry or default outbound for an absent meter.
+func DialIngressMeter(ctx context.Context, user *protocol.MemoryUser) (net.Conn, error) {
+	dir := os.Getenv("XMESH_QUOTA_INGRESS_STATE")
+	if os.Getenv("GITHUB_ACTIONS") != "true" || !filepath.IsAbs(dir) {
+		return nil, errors.New("private ingress disabled")
+	}
+	if err := privateIngressDirectory(dir); err != nil {
+		return nil, err
+	}
+	ib := session.InboundFromContext(ctx)
+	if ib == nil || ib.User == nil || user == nil || ib.User.Email != user.Email || !ib.User.Account.Equals(user.Account) {
+		return nil, errors.New("private route differs from authenticated VLESS identity")
+	}
+	alias := signedUserEmail.FindStringSubmatch(user.Email)
+	if alias == nil || alias[2] != ib.Tag || (ib.Tag != "vless-main" && ib.Tag != "vless-cdn") {
+		return nil, errors.New("private route outside signed inbound scope")
+	}
+	link := filepath.Join(dir, "ingress-u"+alias[1])
+	target, err := os.Readlink(link)
+	if err != nil {
+		return nil, err
+	}
+	match := meterTarget.FindStringSubmatch(target)
+	if match == nil {
+		return nil, errors.New("invalid measured route")
+	}
+	pid, err := strconv.Atoi(match[1])
+	if err != nil {
+		return nil, err
+	}
+	var dial net.Dialer
+	conn, err := dial.DialContext(ctx, "unix", filepath.Join(link, ib.Tag))
+	if err != nil {
+		return nil, err
+	}
+	raw, err := conn.(*net.UnixConn).SyscallConn()
+	var peer *syscall.Ucred
+	if err == nil {
+		var peerErr error
+		err = raw.Control(func(fd uintptr) {
+			peer, peerErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+		})
+		if err == nil {
+			err = peerErr
+		}
+	}
+	after, linkErr := os.Readlink(link)
+	if err != nil || linkErr != nil || after != target || peer == nil || int(peer.Pid) != pid || peer.Uid != uint32(os.Geteuid()) {
+		conn.Close()
+		return nil, fmt.Errorf("private VLESS peer changed for user %s", alias[1])
+	}
+	return conn, nil
+}

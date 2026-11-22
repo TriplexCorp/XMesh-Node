@@ -77,7 +77,7 @@ WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
 for family in quota-v2-physical-stop xray-dataplane-fence; do
   install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
 done
-for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,genesis_reservation,first_cap_handoff,cap_install,renewal_worker,calendar_fence,successor_meter,successor_positive,charge_worker,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
+for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,genesis_reservation,first_cap_handoff,cap_install,renewal_worker,calendar_fence,successor_meter,successor_positive,vless_ingress,charge_worker,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
   python3 -m py_compile "$ROOT/experiments/$helper.py"
   install -o root -g root -m 0700 "$ROOT/experiments/$helper.py" "$WAL_ROOT/$helper.py"
 done
@@ -323,6 +323,23 @@ EOF
 # helper exists on disk. Its WAL charge receipts are pre-debit intents, not
 # evidence of remote Xray integrity or final delivered bytes.
 if [[ "$WAL_AUTO_RENEW" == 1 ]];then
+cat > /etc/systemd/system/xmesh-quota-v2-ingress.service <<EOF
+[Unit]
+Description=XMesh isolated per-user VLESS ingress
+After=docker.service
+ConditionPathExists=/etc/xmesh-quota-ingress-staging
+[Service]
+Type=simple
+Environment=XMESH_QUOTA_V2_INGRESS_STAGING=1
+ExecStart=/usr/bin/python3 $WAL_ROOT/quota-v2-physical-stop/vless_ingress.py --panel $PANEL --node $NODE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+EOF
 cat > /etc/systemd/system/xmesh-quota-v2-renewal.service <<EOF
 [Unit]
 Description=XMesh staged strict-PQ signed Xray WAL charge and cap renewal

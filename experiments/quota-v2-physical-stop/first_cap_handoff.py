@@ -352,6 +352,8 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
     receipt = install_staged_cap(panel,node_id,state,socket_path,grant,executable_pin)
     state_fd,lock = quarantine._locked_private_state(state)
     try:
+        import vless_ingress
+        vless_ingress.publish(state_fd, wal_transport.observed.strict_json(grant)["payload"], before)
         quarantine._durable_store(state_fd,response,
                                   f"genesis-positive-cap-u{user_id}.json")
     finally:
