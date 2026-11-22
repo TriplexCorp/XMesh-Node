@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
+from unittest import mock
 
 from test_xray_live_signed_cap import canonical, sign
 from test_xray_patched_fence import await_socket, query_direction_counters
@@ -248,7 +249,7 @@ def run(binary, root, echo_port, processes):
 
     fd = os.open(ingress_state, os.O_RDONLY|os.O_DIRECTORY)
     try:
-        with __import__("unittest").mock.patch.dict(os.environ, {
+        with mock.patch.dict(os.environ, {
             "XMESH_QUOTA_V2_INGRESS_STAGING": "1",
         }):
             vless_ingress.publish(
@@ -289,11 +290,6 @@ def run(binary, root, echo_port, processes):
             str(backend[1]["socket"]), first.pid,
             active[1][1], fence_scope)
         assert fence["fenced"] is True and fence["drained"] is True
-        a_old_wal = {
-            p.name: p.read_bytes()
-            for p in backend[1]["ledger"].glob("meter-*.jsonl")
-            if f"xmesh-u{USER_A}" in p.name
-        }
         # The signed byte-WAL files are runtime-hashed names. Capture
         # all old user meter bytes via the inventory's authenticated aliases.
         inventory = backend[1]["ledger"]/"xmesh-meter-inventory-v1.jsonl"
@@ -353,7 +349,6 @@ def main():
         thread = threading.Thread(target=echo.serve_forever,daemon=True)
         thread.start()
         processes = []
-        runtime_ids = []
         try:
             run(sys.argv[1],root,echo.server_address[1],processes)
         except BaseException:
@@ -367,14 +362,6 @@ def main():
                     p.kill()
                 p.wait(timeout=10)
             echo.shutdown()
-            # In the disposable standalone runner /dev/shm is shared with
-            # the host. Delete only namespace directories created by our
-            # captured backend PIDs, never another process's files.
-            for p in processes:
-                try:
-                    pass
-                except OSError:
-                    pass
 
 
 if __name__=="__main__":
