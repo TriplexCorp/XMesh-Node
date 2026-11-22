@@ -163,8 +163,9 @@ def main():
                 assert runtime_identity.inspect_managed_xray(successor) == fresh[:3]
                 _, old_journal = wal_transport._bound_journal()
                 _, separate_journal = wal_transport._bound_journal(successor)
-                assert os.stat(old_journal)[:2] != os.stat(separate_journal)[:2] or (
-                    os.stat(old_journal).st_ino != os.stat(separate_journal).st_ino)
+                old_stat, fresh_stat = os.stat(old_journal), os.stat(separate_journal)
+                assert (old_stat.st_dev, old_stat.st_ino) != (
+                    fresh_stat.st_dev, fresh_stat.st_ino)
                 assert old_journal != separate_journal
                 assert not any(name.startswith("meter-") or
                                name.startswith("xmesh-meter-inventory-")
