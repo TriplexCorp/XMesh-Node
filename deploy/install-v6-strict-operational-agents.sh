@@ -23,6 +23,13 @@ AGENT_VERSION_FILE="$ROOT/AGENT_VERSION"
 AGENT_VERSION="$(tr -d '\r\n' < "$AGENT_VERSION_FILE")"
 [[ "$AGENT_VERSION" =~ ^control-v6\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid Agent release version: $AGENT_VERSION" >&2; exit 1; }
 WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
+WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
+if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]]; then
+  echo "Invalid staged automatic renewal flag" >&2; exit 2
+fi
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.27 ) ]]; then
+  echo "Automatic quota renewal requires the exact opt-in WAL staging Agent." >&2; exit 2
+fi
 NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
 [[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
   echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
@@ -70,7 +77,7 @@ WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
 for family in quota-v2-physical-stop xray-dataplane-fence; do
   install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
 done
-for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,genesis_reservation,first_cap_handoff,cap_install,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
+for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,genesis_reservation,first_cap_handoff,cap_install,renewal_worker,charge_worker,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
   python3 -m py_compile "$ROOT/experiments/$helper.py"
   install -o root -g root -m 0700 "$ROOT/experiments/$helper.py" "$WAL_ROOT/$helper.py"
 done
@@ -311,6 +318,57 @@ Unit=xmesh-node-user-meter.service
 WantedBy=timers.target
 EOF
 
+# Automatic quota renewal is a separately gated STAGING worker. Never
+# install it on ordinary v6 nodes or activate it merely because a quota
+# helper exists on disk. Its WAL charge receipts are pre-debit intents, not
+# evidence of remote Xray integrity or final delivered bytes.
+if [[ "$WAL_AUTO_RENEW" == 1 ]];then
+cat > /etc/systemd/system/xmesh-quota-v2-renewal.service <<EOF
+[Unit]
+Description=XMesh staged strict-PQ signed Xray WAL charge and cap renewal
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+ConditionPathExists=/var/lib/xmesh-agent/product/active.json
+ConditionPathExistsGlob=/var/lib/xmesh-xray-sync/genesis-positive-cap-u*.json
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/xmesh-node-metrics.env
+Environment=XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY=1
+Environment=XMESH_QUOTA_V2_AUTO_RENEW_STAGING=1
+Environment="PATH=$STRICT_PATH"
+ExecStart=/usr/bin/python3 $WAL_ROOT/quota-v2-physical-stop/renewal_worker.py --panel $PANEL --node-id $NODE
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=350s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/run /var/lib/xmesh-xray-sync /var/lib/xmesh-measured-lab/wal
+EOF
+cat > /etc/systemd/system/xmesh-quota-v2-renewal.timer <<'EOF'
+[Unit]
+Description=Reconcile staged signed Xray WAL charges and quota renewals
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=20s
+AccuracySec=3s
+Persistent=true
+Unit=xmesh-quota-v2-renewal.service
+[Install]
+WantedBy=timers.target
+EOF
+else
+  systemctl disable --now xmesh-quota-v2-renewal.timer xmesh-quota-v2-renewal.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/xmesh-quota-v2-renewal.service /etc/systemd/system/xmesh-quota-v2-renewal.timer
+fi
+
 systemctl daemon-reload
 
 # Re-check the exact durable receipt immediately before first operational I/O.
@@ -326,6 +384,9 @@ OPERATIONAL_TIMERS=(
 )
 if [[ "$WAL_STAGE_AGENT" == 0 ]];then
   OPERATIONAL_TIMERS+=(xmesh-node-control.timer)
+fi
+if [[ "$WAL_AUTO_RENEW" == 1 ]];then
+  OPERATIONAL_TIMERS+=(xmesh-quota-v2-renewal.timer)
 fi
 systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null
 
