@@ -301,6 +301,14 @@ class FirstCapHandoffTests(unittest.TestCase):
                               return_value=runtime_measurement),
             mock.patch.object(cap.cap_install, "fence_calendar_in_xray",
                               side_effect=fenced),
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=({
+                                  "Id": runtime_measurement[0],
+                                  "State": {"StartedAt": runtime_measurement[1],
+                                            "Running": True, "Pid": runtime_measurement[2]},
+                              }, "/trusted/old-wal")),
+            mock.patch.object(calendar_fence.journal_integrity,
+                              "verify_poststop_journal", return_value="7" * 64) as wal_audit,
             mock.patch.object(cap.cap_install, "install_in_xray") as positive,
         ):
             self.assertEqual(renewal_worker.pending_renewals(
@@ -316,6 +324,8 @@ class FirstCapHandoffTests(unittest.TestCase):
                 "https://isolated.test", self.node, 100, str(state),
                 path, "e" * 64))
             self.assertTrue(marker.is_file())
+            self.assertEqual(wal_audit.call_count, 1)
+            self.assertEqual(wal_audit.call_args.args[1], "/trusted/old-wal")
             self.assertEqual(
                 renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
             self.assertFalse(calendar_fence.fence_successor(
@@ -330,6 +340,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             positive.assert_not_called()
             stored = cap.wal_transport.observed.strict_json(marker.read_bytes())
             record_original = cap.wal_transport.observed.strict_json(marker.read_bytes())
+            self.assertEqual(record_original["independentJournalSha256"], "7" * 64)
             self.assertFalse(stored["observedFence"]["finalMeterVerified"])
             self.assertFalse(stored["observedFence"]["refundable"])
             # Never treat tampered local Xray observation as successful
@@ -365,6 +376,38 @@ class FirstCapHandoffTests(unittest.TestCase):
                         "https://isolated.test", self.node, 100, str(state),
                         path, "e" * 64)
             positive.assert_not_called()
+
+    def test_calendar_journal_audit_refuses_foreign_xray_or_missing_birth(self):
+        measured = ("f" * 64, "2026-11-21T00:00:00Z", 4321, self.runtime)
+        checkpoint = {"schemaVersion": 3}
+        docker = {"Id": measured[0], "State": {
+            "StartedAt": measured[1], "Running": True, "Pid": measured[2]}}
+        with (
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=({**docker, "Id": "e" * 64}, "/trusted/wal")),
+            mock.patch.object(calendar_fence.journal_integrity,
+                              "verify_poststop_journal") as audit,
+        ):
+            with self.assertRaisesRegex(ValueError, "different Xray process"):
+                calendar_fence._independent_journal_digest(checkpoint, measured)
+            audit.assert_not_called()
+        with (
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=(docker, "/trusted/wal")),
+            mock.patch.object(calendar_fence.journal_integrity,
+                              "verify_poststop_journal",
+                              side_effect=ValueError("missing WAL birth")),
+        ):
+            with self.assertRaisesRegex(ValueError, "missing WAL birth"):
+                calendar_fence._independent_journal_digest(checkpoint, measured)
+        with (
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=(docker, "/trusted/wal")),
+            mock.patch.object(calendar_fence.journal_integrity,
+                              "verify_poststop_journal", return_value="7" * 64),
+        ):
+            self.assertEqual(calendar_fence._independent_journal_digest(
+                checkpoint, measured), "7" * 64)
 
     def verify(self, claims=None):
         return cap.verify_grant(
