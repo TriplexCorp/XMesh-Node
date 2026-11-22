@@ -323,3 +323,42 @@ accepts only the exact last-sequence receipt, and refuses a forged
 old-user counter; the existing charge-worker tests verify the actual
 Nexus signature/sequence contract. The end-to-end two-Node PostgreSQL
 and live-Xray CI workflows still must run to certify the combined chain.
+
+## Isolated successor Xray process discovery — proof-only
+
+The existing process/PID verifier has been extended with an **exact two-name
+allowlist**: `xmesh-managed-xray` for the original quarantined incarnation,
+and `xmesh-successor-quarantine` for a second independently started
+quarantined process. The same independent Docker inspection, Linux pidfd
+runtime fingerprint, privilege/capabilities/namespace restrictions, Docker
+network=`none`, bounded mount inventory, root-owned WAL directory and
+executable/config hash checks remain mandatory for **both** names. No
+arbitrary Docker container name can be supplied to weaken those checks.
+
+The root-only disposable Docker test now starts a real original Xray and
+a separately named second Xray in parallel. It requires different
+container IDs, start times, host PIDs, kernel runtime fingerprints and
+private WAL mount inodes; no preexisting Xray meter journal may be present
+in the second process. It then stops the second process and requires
+fresh measurement to fail, while the original remains independently
+measured and in its original namespace. Unit tests also reject network,
+namespace, capability and read-only-root violations on the successor.
+
+This is an **independent process feasibility test**, not proof of fresh
+zero MAIN/CDN StatsService counters and **not** a new positive cap.
+The old instrumented Xray WAL filename still depends on runtime ID,
+alias and direction; simply changing `meterEpoch` in an unchanged Xray
+would reuse the same filename. The Nexus draft migration
+`0160_quota_v2_successor_fresh_meter_staging.sql` therefore stores
+a separate zero-authority candidate Xray identity and blocks both
+legacy first-cap and renewal outboxes from spending its unfunded
+candidate reservation. No Node runtime currently submits an
+independently verified zero-counter preflight to that table.
+
+Multiuser calendar handoff may share a freshly started Xray as long
+as every user's old WAL remains separately owned, all users' observed
+new aliases are independently zero, and the same candidate process
+identity is consistent. The new SQL staging check requires all users
+claiming the same container to agree on the kernel/process metadata.
+None of this authorizes data-plane admission until a future positive
+signing and SQL conservation flow passes end-to-end tests.
