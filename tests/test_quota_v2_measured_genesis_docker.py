@@ -161,6 +161,15 @@ def main():
                 assert fresh[2] != pid and fresh[3] != fingerprint
                 assert fresh[3] == runtime_identity.trusted_runtime_identity(fresh[2])
                 assert runtime_identity.inspect_managed_xray(successor) == fresh[:3]
+                # A new Docker process ID alone is not enough. Re-measure
+                # the live kernel executable and the ACTUAL config mounted
+                # into this independent process before accepting its proof.
+                with open(f"/proc/{fresh[2]}/exe", "rb") as binary:
+                    executable_sha = hashlib.file_digest(binary, "sha256").hexdigest()
+                config_sha = hashlib.sha256(config.read_bytes()).hexdigest()
+                assert wal_transport._measure_quarantined_runtime(
+                    pins=(executable_sha, config_sha),
+                    container_name=successor) == fresh
                 _, old_journal = wal_transport._bound_journal()
                 _, separate_journal = wal_transport._bound_journal(successor)
                 old_stat, fresh_stat = os.stat(old_journal), os.stat(separate_journal)
