@@ -318,7 +318,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertEqual(seen[0][3]["meterEpoch"], old["meterEpoch"])
             self.assertNotEqual(seen[0][3]["revocationId"], prepared["reservationId"])
             positive.assert_not_called()
-            stored = self.guard.strict_json(marker.read_bytes())
+            stored = cap.wal_transport.observed.strict_json(marker.read_bytes())
             self.assertFalse(stored["observedFence"]["finalMeterVerified"])
             self.assertFalse(stored["observedFence"]["refundable"])
             # Never treat tampered local Xray observation as successful
