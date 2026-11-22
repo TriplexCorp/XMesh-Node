@@ -145,5 +145,29 @@ class DurableRenewalNonce(unittest.TestCase):
                     self.state, 7, "b" * 64, now=4)
 
 
+    def test_one_corrupt_user_does_not_starve_other_signed_renewals(self):
+        for user in range(1, 18):
+            (Path(self.state) / f"genesis-positive-cap-u{user}.json").touch()
+
+        def candidate(fd, names, node, user, pinned, now):
+            if user == 4:
+                raise ValueError("signed data corrupted: never disclose payload")
+            return (user, 1, "a" * 64)
+
+        with mock.patch.object(renewal_worker, "_candidate", side_effect=candidate):
+            with mock.patch("builtins.print") as log:
+                jobs = renewal_worker.pending_renewals(
+                    self.state, 7, "b" * 64, now=1)
+                self.assertEqual([item[0] for item in jobs],
+                                 [1, 2, 3] + list(range(5, 17)))
+                self.assertEqual(log.call_count, 1)
+                self.assertNotIn("never disclose payload", str(log.call_args))
+            # The next round visits the previously unvisited user 17,
+            # even though user 4's signed original is still invalid.
+            second = renewal_worker.pending_renewals(
+                self.state, 7, "b" * 64, now=2)
+            self.assertEqual(second[0][0], 17)
+
+
 if __name__ == "__main__":
     unittest.main()
