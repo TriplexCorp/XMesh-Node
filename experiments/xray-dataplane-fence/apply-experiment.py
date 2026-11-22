@@ -140,8 +140,11 @@ def run(root: Path):
     if err != nil { return nil, err }
     if private != "" {
         msg, ok := proxyConfig.(proto.Message)
-        if !ok || proto.MessageName(msg) != "xray.proxy.vless.inbound.Config" || pl == nil || !net.HasNetwork(nl, net.Network_UNIX) {
-            return nil, errors.New("incompatible private VLESS transport")
+        configName := ""
+        if ok { configName = string(proto.MessageName(msg)) }
+        if !ok || configName != "xray.proxy.vless.inbound.Config" || pl != nil || !net.HasNetwork(nl, net.Network_UNIX) {
+            return nil, errors.New("incompatible private VLESS transport",
+                ": config=",configName,", ports=",pl!=nil,", unix=",net.HasNetwork(nl, net.Network_UNIX))
         }
         // Native VLESS authentication, scoped tag, dispatcher and meter.
         // Public transport security terminates on the stable Xray frontend.
