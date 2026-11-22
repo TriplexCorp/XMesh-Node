@@ -5,6 +5,7 @@ No production panel, release, public listener, or simulated positive issuer.
 The signed bytes are test fixtures, never authority to enable Quota V2.
 """
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -292,6 +293,33 @@ class FirstCapHandoffTests(unittest.TestCase):
                 },
             }
 
+        remote_attempts = []
+        remote_answer = {
+            "nexusOffhostSignatureVerified": True,
+            "offhostFullBirthIndexHeadMatched": True,
+            "nodeLocalIndexExtendsNexusHead": True,
+            "firstRemoteSnapshotWasOnlyBootstrap": False,
+            "preBootstrapHistoryCompletenessVerified": False,
+            "allXrayWritersCompletedVerified": False,
+            "canResume": False, "carryforwardApplied": False,
+            "finalMeterVerified": False, "refundableBytes": 0,
+        }
+
+        def remote_sync_unlocked(action, panel, node):
+            # Separate lock acquisition MUST succeed while the outbound
+            # full-index XSP/2 request is running. This prevents a slow
+            # Nexus answer from blocking other users' state transitions.
+            fd = os.open(state / "lock", os.O_WRONLY | os.O_CLOEXEC)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+            remote_attempts.append((action, panel, node))
+            if len(remote_attempts) == 1:
+                raise TimeoutError("Nexus committed the WAL head but reply was lost")
+            return remote_answer
+
         path = "/private/isolated-xray.sock"
         with (
             mock.patch.object(cap.wal_transport, "_panel_pin", return_value=self.pub),
@@ -310,16 +338,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             mock.patch.object(calendar_fence.journal_integrity,
                               "verify_poststop_journal", return_value="7" * 64) as wal_audit,
             mock.patch.object(calendar_fence.wal_transport, "run",
-                              return_value={
-                                  "nexusOffhostSignatureVerified": True,
-                                  "offhostFullBirthIndexHeadMatched": True,
-                                  "nodeLocalIndexExtendsNexusHead": True,
-                                  "firstRemoteSnapshotWasOnlyBootstrap": False,
-                                  "preBootstrapHistoryCompletenessVerified": False,
-                                  "allXrayWritersCompletedVerified": False,
-                                  "canResume": False, "carryforwardApplied": False,
-                                  "finalMeterVerified": False, "refundableBytes": 0,
-                              }) as remote_sync,
+                              side_effect=remote_sync_unlocked) as remote_sync,
             mock.patch.object(cap.cap_install, "install_in_xray") as positive,
         ):
             self.assertEqual(renewal_worker.pending_renewals(
@@ -331,21 +350,33 @@ class FirstCapHandoffTests(unittest.TestCase):
                     path, "e" * 64)
             marker = state / calendar_fence._fence_name(100, old["reservationId"])
             self.assertFalse(marker.exists())
+            with self.assertRaisesRegex(TimeoutError, "reply was lost"):
+                calendar_fence.fence_successor(
+                    "https://isolated.test", self.node, 100, str(state),
+                    path, "e" * 64)
+            self.assertFalse(marker.exists())
+            # Nexus already committed the same immutable birth prefix.
+            # The same Xray stop intent is replayed without any new lease.
+            self.assertEqual(
+                renewal_worker.pending_renewals(str(state), self.node, self.pub),
+                [(100, 0, prepared["nonce"])])
             self.assertTrue(calendar_fence.fence_successor(
                 "https://isolated.test", self.node, 100, str(state),
                 path, "e" * 64))
             self.assertTrue(marker.is_file())
-            self.assertEqual(wal_audit.call_count, 2)
+            self.assertEqual(wal_audit.call_count, 3)
             self.assertEqual(wal_audit.call_args.args[1], "/trusted/old-wal")
-            remote_sync.assert_called_once_with(
-                "charge-sync", "https://isolated.test", self.node)
+            self.assertEqual(remote_sync.call_count, 2)
+            self.assertEqual(remote_attempts, [
+                ("charge-sync", "https://isolated.test", self.node)] * 2)
             self.assertEqual(
                 renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
             self.assertFalse(calendar_fence.fence_successor(
                 "https://isolated.test", self.node, 100, str(state),
                 path, "e" * 64))
-            self.assertEqual(len(seen), 2)
+            self.assertEqual(len(seen), 3)
             self.assertEqual(seen[0], seen[1])
+            self.assertEqual(seen[1], seen[2])
             self.assertEqual(seen[0][1:3], (4321, self.runtime))
             self.assertEqual(seen[0][3]["reservationId"], old["reservationId"])
             self.assertEqual(seen[0][3]["meterEpoch"], old["meterEpoch"])
