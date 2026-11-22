@@ -362,3 +362,60 @@ identity is consistent. The new SQL staging check requires all users
 claiming the same container to agree on the kernel/process metadata.
 None of this authorizes data-plane admission until a future positive
 signing and SQL conservation flow passes end-to-end tests.
+
+## Fresh successor measured zero-meter preflight (read-only)
+
+The patched disposable Xray now provides `POST /v1/zero-meter` on its
+existing private Unix socket. It is enabled only with the source-pinned
+experimental signed-cap startup binding and requires the same-UID
+`SO_PEERCRED` control peer. The request is bounded, canonical JSON
+containing a Node/user, predecessor-derived nonce, candidate meter and
+reservation UUIDs, and the COMPLETE signed MAIN/CDN alias roster.
+
+With both `observed` and `gate` locks held, the new Xray verifies its
+current kernel runtime ID, all User StatsService counters equal to **zero**
+(including pre-registered idle aliases), no active sessions, no installed
+signed caps, no old gate user state or byte intents, an empty private WAL
+namespace except its own lifetime lock, and the complete birth registry.
+A process already carrying bytes, even for a different user, cannot claim
+pristine first-meter status. The result echoes the exact request alias
+roster and candidate IDs, plus the observed runtime, SHA-256 of the empty
+WAL inventory and explicit `authorizedBytes=0`,
+`canSpend=false`, `canStart=false`, `canResume=false`,
+`finalMeterVerified=false`, `refundableBytes=0`. It never modifies
+the byte-cap map or admits VLESS.
+
+The staged Agent's `successor_meter.py` first verifies the existing
+Nexus-signed ZERO-SPEND successor, the OLD fully charged WAL close
+marker, and a **different** Docker process/container/pidfd and private
+WAL-root device+inode. The Agent then calls the read-only Unix endpoint
+and requires the exact same candidate, runtime and signed roster; it
+rechecks the new process and empty WAL root afterward. The immutable
+`calendar-meter-u<user>-<predecessor-uuid>.json` marker contains only
+zero-spend evidence and pinned executable/config SHA-256.
+
+The automatic renewal worker can optionally run this second stage with
+`XMESH_QUOTA_V2_FRESH_METER_STAGING=1` and the three explicit
+`--successor-socket`, `--successor-executable-sha256` and
+`--successor-config-sha256` arguments, **after** the old user's
+signed WAL-close marker exists. The default installed service does NOT
+enable this stage and never automatically creates an extra Xray.
+The signed preparation and meter marker are rechecked under the
+existing state lock; a damaged record fails closed. No configured
+stage can issue a positive successor permit.
+
+Source-pinned Go regressions test forged/foreign peers, noncanonical
+JSON, incorrect aliases, nonzero StatsService, any installed cap, stale
+WAL and pure zero-authority response fields. The existing live
+MAIN/CDN VLESS acceptance fixture now probes a genuinely pristine Xray
+before its FIRST signed grant, and verifies that the same process refuses
+another zero-meter observation once provisioned. Node Python tests
+exercise changed runtime, altered cap-authority flags, changed aliases,
+and shared/unsafe/nonempty WAL directories.
+
+**Release blockers:** this is a private process observation, not an
+authenticated off-host attestable measurement. No new
+`quota_v2_reservations` row, funded Nexus successor grant, confirmed
+positive Unix installation or post-period real-VLESS re-admission exists.
+The stage is deliberately disconnected from production quota enabling;
+hosted CI must PASS before it can be considered verified.
