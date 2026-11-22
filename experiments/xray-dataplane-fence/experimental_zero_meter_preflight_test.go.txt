@@ -8,6 +8,7 @@ import (
     "net/http/httptest"
     "os"
     "path/filepath"
+    "reflect"
     "strings"
     "testing"
 )
@@ -45,13 +46,15 @@ func TestQuotaV2FreshMeterReturnsOnlyNonAuthorizingEmptyObservation(t *testing.T
         result.ReservationID!=req.ReservationID ||
         result.InventorySHA256!=emptySha256 ||
         result.RuntimeID!=gate.runtimeID ||
+        len(result.Aliases)!=len(req.Aliases) ||
+        !reflect.DeepEqual(result.Aliases,req.Aliases) ||
         !result.ZeroInitialRawCounters || !result.IsolatedNewWalRoot ||
         result.AuthorizedBytes!=0 || result.CanSpend || result.CanStart ||
         result.CanResume || result.FinalMeterVerified || result.RefundableBytes!=0 {
         t.Fatalf("empty successor incorrectly acquired authority: %+v",result)
     }
     repeat,err:=verifyPristineSuccessorMeter(req)
-    if err!=nil || repeat!=result {
+    if err!=nil || !reflect.DeepEqual(repeat,result) {
         t.Fatalf("read-only zero meter preflight not stable: %v",err)
     }
     gate.Lock()
