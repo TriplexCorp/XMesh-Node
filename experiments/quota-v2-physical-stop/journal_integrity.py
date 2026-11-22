@@ -253,7 +253,12 @@ def _verify_conservative_meter_wal(dfd, checkpoint):
     account="xmesh-u"+str(checkpoint["userId"])
     names = sorted(os.listdir(dfd))
     meters=[name for name in names if name.startswith("meter-")]
-    if len(meters)>512:
+    # The committed birth registry, not a smaller arbitrary 512-file scan,
+    # defines the maximum number of separately authenticated WAL streams.
+    # With MAIN+CDN and both directions, 500 users can legitimately
+    # produce 2000 files in one running Xray. Still fail closed above the
+    # independently checked, fsynced 4096-entry registry bound.
+    if len(meters)>meter_inventory_audit.MAX_ENTRIES:
         raise ValueError("unbounded Xray byte WAL inventory")
     # Independent fsynced file inventory catches deletion of even the
     # entire old-process WAL, which directory-only metering cannot see.
