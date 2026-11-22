@@ -454,6 +454,20 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
     import charge_worker
     failed_users = set()
     charge_worker.run(panel, node, state, failed_users)
+    # In opt-in staging, keep the successor journal separate and submit
+    # ONLY its own signed birth/charge intents. The existing server WAL
+    # witness is a node-wide append-only chain; if this second runtime
+    # has not been cryptographically anchored as an extension, refuse its
+    # charges rather than relabeling its bytes to the original reservation.
+    if (os.environ.get("XMESH_QUOTA_V2_AUTO_SUCCESSOR_POSITIVE") == "1"
+            and os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1"):
+        try:
+            charge_worker.run(
+                panel, node, state, failed_users,
+                container_name="xmesh-successor-quarantine")
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
+            print(f"Quota V2 successor WAL ledger not independently anchored: "
+                  f"{type(error).__name__}", flush=True)
     installed = activate_initial_cap(panel, node, state, socket_path)
     pinned = wal_transport._panel_pin()
     jobs = pending_renewals(state, node, pinned)
