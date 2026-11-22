@@ -282,8 +282,13 @@ class FirstCapHandoffTests(unittest.TestCase):
                 "drained": True, "finalMeterVerified": False,
                 "refundable": False,
                 "observedCheckpoint": {
-                    **scope, "runtimeId": runtime, "drained": True,
-                    "finalMeterVerified": False, "refundableBytes": 0,
+                    **scope, "schemaVersion": 3, "runtimeId": runtime,
+                    "drained": True, "finalMeterVerified": False,
+                    "refundableBytes": 0, "uplinkBytes": 0,
+                    "downlinkBytes": 0, "inboundMeters": [
+                        {"email": alias["email"], "uplinkBytes": 0,
+                         "downlinkBytes": 0} for alias in self.aliases
+                    ],
                 },
             }
 
@@ -324,6 +329,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertNotEqual(seen[0][3]["revocationId"], prepared["reservationId"])
             positive.assert_not_called()
             stored = cap.wal_transport.observed.strict_json(marker.read_bytes())
+            record_original = cap.wal_transport.observed.strict_json(marker.read_bytes())
             self.assertFalse(stored["observedFence"]["finalMeterVerified"])
             self.assertFalse(stored["observedFence"]["refundable"])
             # Never treat tampered local Xray observation as successful
@@ -334,6 +340,30 @@ class FirstCapHandoffTests(unittest.TestCase):
                 calendar_fence.fence_successor(
                     "https://isolated.test", self.node, 100, str(state),
                     path, "e" * 64)
+            # A forged or partial Xray checkpoint is not acceptable as
+            # authority to progress into the next epoch, even with the
+            # real zero-authority Nexus successor preparation present.
+            marker.write_bytes(self.guard.canonical(record_original))
+            for altered in (
+                {"inboundMeters": [
+                    {"email": self.aliases[1]["email"],
+                     "uplinkBytes": 0, "downlinkBytes": 0}]},
+                {"inboundMeters": [
+                    {"email": alias["email"], "uplinkBytes": 0,
+                     "downlinkBytes": 0} for alias in self.aliases],
+                 "uplinkBytes": 1},
+                {"inboundMeters": [
+                    {"email": alias["email"], "uplinkBytes": True,
+                     "downlinkBytes": 0} for alias in self.aliases]},
+            ):
+                tampered = cap.wal_transport.observed.strict_json(
+                    self.guard.canonical(record_original))
+                tampered["observedFence"]["observedCheckpoint"].update(altered)
+                marker.write_bytes(self.guard.canonical(tampered))
+                with self.assertRaisesRegex(ValueError, "meter"):
+                    calendar_fence.fence_successor(
+                        "https://isolated.test", self.node, 100, str(state),
+                        path, "e" * 64)
             positive.assert_not_called()
 
     def verify(self, claims=None):
