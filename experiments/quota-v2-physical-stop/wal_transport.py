@@ -235,7 +235,9 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
     This observation is only for zero-authority preparation. It does not
     prove final WAL bytes or grant a lease.
     """
-    inspect, _ = _bound_journal(container_name)
+    inspect, _ = (_bound_journal() if
+                  container_name == "xmesh-managed-xray" else
+                  _bound_journal(container_name))
     host = inspect.get("HostConfig")
     state = inspect.get("State")
     network = inspect.get("NetworkSettings")
