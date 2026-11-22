@@ -155,7 +155,7 @@ def _locked_private_state(directory):
 
 def _durable_store(state_fd, data, target="genesis-quarantine-envelope.json"):
     if target not in ("genesis-quarantine-envelope.json", PREVIEW_FILE, INTENT_FILE) and not re.fullmatch(
-            r"(?:genesis-(?:(?:reservation-(?:prepared|confirmed)|positive-cap)-u[1-9][0-9]{0,18}|renewal(?:-request)?-u[1-9][0-9]{0,18}-r[1-9][0-9]{0,18})|wal-charge-[a-f0-9]{64}-s[1-9][0-9]{0,18})\.json", target):
+            r"(?:genesis-(?:(?:reservation-(?:prepared|confirmed)|positive-cap)-u[1-9][0-9]{0,18}|renewal(?:-request)?-u[1-9][0-9]{0,18}-r[1-9][0-9]{0,18})|wal-charge(?:-request)?-[a-f0-9]{64}-s[1-9][0-9]{0,18})\.json", target):
         raise ValueError("unregistered immutable Genesis evidence name")
     raw=json.dumps(data,sort_keys=True,separators=(",",":"),
                    ensure_ascii=False,allow_nan=False).encode("utf-8")
