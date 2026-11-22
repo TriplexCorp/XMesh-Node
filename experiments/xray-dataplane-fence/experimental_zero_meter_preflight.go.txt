@@ -12,6 +12,8 @@ import (
     "os"
     "strconv"
     "strings"
+
+    "github.com/xtls/xray-core/features/stats"
 )
 
 const zeroMeterPath = "/v1/zero-meter"
@@ -88,7 +90,7 @@ func verifyPristineSuccessorMeter(req zeroMeterRequest) (zeroMeterResult,error) 
         return empty,errors.New("successor meter contains prior or unverified state")
     }
     var unexpected bool
-    observed.manager.VisitCounters(func(name string, counter interface{Value() int64}) bool {
+    observed.manager.VisitCounters(func(name string, counter stats.Counter) bool {
         if strings.HasPrefix(name,"user>>>") {
             unexpected=true
             return false
