@@ -266,8 +266,8 @@ def run(xray, root, target, processes, *, restart):
         direction = query_direction_counters(xray, api_port, alias[name])
         assert direction == dict(uplink=echoed, downlink=echoed), direction
         for way in ("uplink", "downlink"):
-            key = f"{runtime}\0{alias[name]}\0{way}".encode()
-            wal = root / f"meter-{hashlib.sha256(key).hexdigest()}.jsonl"
+            meter_identity = f"{runtime}\0{alias[name]}\0{way}".encode()
+            wal = root / f"meter-{hashlib.sha256(meter_identity).hexdigest()}.jsonl"
             assert json.loads(wal.read_bytes().splitlines()[-1])["nextBytes"] == echoed
     for name in ("main", "cdn"):
         with open_stream(name) as sock:
