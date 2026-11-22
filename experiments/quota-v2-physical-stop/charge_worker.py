@@ -221,8 +221,12 @@ def _next_charge_batch(fd, node, streams):
 
 
 def _grant_for_birth(fd, node, user, pinned, birth):
-    # Renewals retain the original reservation. Charging uses the proof tied
-    # to the birth, not the user's currently installed revision or runtime.
+    """Charge against the cap signed for EXACTLY this birth's runtime.
+
+    A calendar successor has a different WAL filename/runtime/reservation.
+    Older first-genesis receipts are retained forever; never silently
+    reinterpret them as proof of the new independent meter.
+    """
     runtime = birth["runtimeId"]
     try:
         grant = renewal_worker._verified_reply(
@@ -232,6 +236,20 @@ def _grant_for_birth(fd, node, user, pinned, birth):
         # receipt. Never fall back when an existing archived proof is corrupt.
         grant = renewal_worker._verified_reply(
             fd, f"genesis-positive-cap-u{user}.json", pinned)
+    if grant["runtimeId"] != runtime:
+        import successor_positive
+        import genesis_reservation as original_lease
+        old, prepared, _, fresh, _, _ = successor_positive._read_evidence(
+            fd, node, user, pinned)
+        if fresh["freshRuntimeId"] != runtime:
+            raise ValueError("WAL runtime belongs to neither immutable signed cap")
+        signed = original_lease._identity_file(
+            fd, successor_positive._filename(user, old["reservationId"]), 32768)
+        successor_positive._verified_saved_receipt(
+            signed, old, prepared, fresh, node, user, pinned)
+        envelope = wal_transport.observed.strict_json(
+            signed["response"]["signedEnvelope"].encode("utf-8"))
+        grant = envelope["payload"]
     if (grant["kind"] != "xmesh.quota-v2.xray-cap-admission"
             or grant["nodeId"] != node or grant["userId"] != user
             or grant["runtimeId"] != runtime
@@ -294,7 +312,8 @@ def _charge_stream(fd, state_fd, state_names, node, pinned, public, filename, bi
     return submitted
 
 
-def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None):
+def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
+        container_name="xmesh-managed-xray"):
     if (os.geteuid() != 0 or
             os.environ.get("XMESH_QUOTA_V2_AUTO_RENEW_STAGING") != "1" or
             os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
@@ -303,8 +322,18 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None):
         raise ValueError("WAL charging requires an explicit staged root Agent")
     # The off-host birth index precedes spending authorization. Keep its
     # existing independently verified signed XSP/2 checkpoint mechanism.
-    wal_transport.run("charge-sync", panel, node)
-    docker, local = wal_transport._bound_journal()
+    if container_name not in ("xmesh-managed-xray","xmesh-successor-quarantine"):
+        raise ValueError("untrusted Xray charge journal selection")
+    if container_name == "xmesh-managed-xray":
+        wal_transport.run("charge-sync", panel, node)
+        docker, local = wal_transport._bound_journal()
+    else:
+        # Staged ONLY. The existing external off-host birth index may
+        # reject a second per-Node runtime because it must extend the
+        # old hash chain. Never bypass that remote head or charge a fresh
+        # stream without a signed, immutable born-file ownership proof.
+        wal_transport.run("charge-sync", panel, node, container_name)
+        docker, local = wal_transport._bound_journal(container_name)
     journal._verify_mount(docker, local)
     fd = journal._validate_directory(local)
     try:
