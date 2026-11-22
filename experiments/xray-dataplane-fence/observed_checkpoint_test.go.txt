@@ -687,3 +687,51 @@ func TestDormantCalendarFenceWithoutRealSignedCapRefusesObservation(t *testing.T
         t.Fatal("unsigned dormant user gained a calendar checkpoint")
     }
 }
+
+
+func TestSignedMainOnlyCalendarFenceIncludesUnusedCDNInNonfinalSnapshot(t *testing.T) {
+    _,manager,p,expected,pub,priv:=signedCapTestFixture(t)
+    grant:=signedCapTestEnvelope(t,p,priv)
+    if err:=installSignedFirstGenesisCap(grant,pub,expected);err!=nil {
+        t.Fatalf("failed to install signed first permit: %v",err)
+    }
+    register:=func(direction string) stats.Counter {
+        name:=rawMeterName(capMain,direction)
+        if counter:=manager.GetCounter(name);counter!=nil {return counter}
+        counter,err:=manager.RegisterCounter(name)
+        if err!=nil{t.Fatal(err)}
+        return counter
+    }
+    up,down:=register("uplink"),register("downlink")
+    userContext:=ctx(94419)
+    if err:=Register(userContext,capMain,func(){});err!=nil{t.Fatal(err)}
+    addFixtureBytes(t,up,capMain,"uplink",7)
+    addFixtureBytes(t,down,capMain,"downlink",9)
+    Finish(userContext)
+    RouteFinish(userContext)
+    scope:=checkpointScope{
+        Email:capMain,NodeID:p.NodeID,UserID:p.UserID,
+        Epoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,Revision:p.ReservationRevision,
+        RevocationID:testRevocation,
+    }
+    if _,err:=fenceScoped(context.Background(),scope);err!=nil{
+        t.Fatalf("could not fence MAIN-only transport: %v",err)
+    }
+    record,err:=persistObservedCheckpoint(scope)
+    if err!=nil{t.Fatalf("signed full-roster WAL observation failed: %v",err)}
+    if record.UplinkBytes!=7 || record.DownlinkBytes!=9 ||
+        len(record.InboundMeters)!=2 ||
+        record.InboundMeters[0].Email!=capCDN ||
+        record.InboundMeters[0].UplinkBytes!=0 ||
+        record.InboundMeters[0].DownlinkBytes!=0 ||
+        record.InboundMeters[1].Email!=capMain ||
+        record.InboundMeters[1].UplinkBytes!=7 ||
+        record.InboundMeters[1].DownlinkBytes!=9 ||
+        record.FinalMeterVerified || record.RefundableBytes!=0 {
+        t.Fatalf("signed dormant CDN alias lost or old usage regranted: %+v",record)
+    }
+    if err:=Register(ctx(94420),capMain,func(){});err==nil{
+        t.Fatal("old MAIN stream reopened after immutable calendar fence")
+    }
+}
