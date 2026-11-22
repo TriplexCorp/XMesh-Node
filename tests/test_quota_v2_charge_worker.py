@@ -106,8 +106,8 @@ class ChargeWorkerTests(unittest.TestCase):
                 file = "meter-" + "b"*64 + ".jsonl"
                 key = hashlib.sha256(file.encode()).hexdigest()
                 reservation = "00000000-0000-0000-0000-000000000001"
-                original = b'{"sequence":1}\\n'
-                added = b'{"sequence":2}\\n'
+                original = b'{"sequence":1}\n'
+                added = b'{"sequence":2}\n'
                 first = worker._durable_request(fd, key, 7, 42, reservation, file, original)
                 self.assertEqual(first, original)
                 self.assertEqual(worker._durable_request(
