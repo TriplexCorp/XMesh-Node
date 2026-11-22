@@ -404,6 +404,15 @@ class FirstCapHandoffTests(unittest.TestCase):
             mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
                               return_value=(docker, "/trusted/wal")),
             mock.patch.object(calendar_fence.journal_integrity,
+                              "verify_poststop_journal",
+                              side_effect=TypeError("bad per-user meter row")),
+        ):
+            with self.assertRaisesRegex(ValueError, "malformed old-Xray"):
+                calendar_fence._independent_journal_digest(checkpoint, measured)
+        with (
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=(docker, "/trusted/wal")),
+            mock.patch.object(calendar_fence.journal_integrity,
                               "verify_poststop_journal", return_value="7" * 64),
         ):
             self.assertEqual(calendar_fence._independent_journal_digest(
