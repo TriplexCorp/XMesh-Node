@@ -231,3 +231,34 @@ mismatched total, booleans in byte counters, unexpected same-user
 StatsService alias or altered local checkpoint fails closed. This
 additional structural verification is a defense against malformed local
 IPC/retained evidence and does not prove terminal byte accounting.
+
+## Independent fsynced old-Xray WAL audit before calendar-fence commit
+
+The installed staging Agent no longer accepts the private Unix socket's
+`drained=true` response as sufficient to persist an old-epoch handoff.
+After the same verified old PID has fenced its user, Agent additionally
+re-discovers the managed Xray's real Docker bind mount and reads the
+root-private journal through `journal_integrity.verify_poststop_journal`.
+This independently verifies the committed fence, canonical observed
+checkpoint, complete fsynced birth registry and every indexed meter WAL,
+including conservation of actual MAIN/CDN counter rows and rejection of
+missing, torn, alien-runtime or mutated files. The resulting SHA-256 is
+stored as `independentJournalSha256` alongside the **nonfinal** Xray
+checkpoint. The old PID, Docker container and start identity must match
+on both sides of this audit. A missing WAL birth, altered counter,
+foreign process or changed journal means **no completed Agent marker**.
+
+The real-VLESS disposable regression now cross-checks the old journal
+before and after an idempotent fence response, and Agent unit tests
+exercise foreign process and missing-WAL failure branches. The verified
+source-pinned Xray birth registry permits 4096 journal entries: the older
+512-file independent-auditor threshold was inconsistent with its real
+multi-user MAIN/CDN capacity, so it now uses the registry's bound.
+
+**This is still not an authoritative final byte count.** A compromised
+Node root can tamper with local evidence, and a digest verified only
+on the same VPS is not an independently retained off-host witness.
+This new SHA-256 **cannot** authorize a new SQL reservation, carryforward,
+refund, Xray restart or positive successor grant. Existing migration 0135
+requires separately preserved full WAL birth-index bytes; that condition
+and a genuinely fresh successor WAL stream must be proven before release.
