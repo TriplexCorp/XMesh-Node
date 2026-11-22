@@ -49,7 +49,7 @@ def _verified_reply(fd, name, pinned):
     return payload
 
 
-def _candidate(fd, names, node, user, pinned, now):
+def latest_signed_cap(fd, names, node, user, pinned):
     base = _verified_reply(fd, f"genesis-positive-cap-u{user}.json", pinned)
     if (base["kind"] != "xmesh.quota-v2.xray-cap-admission"
             or base["nodeId"] != node or base["userId"] != user
@@ -79,6 +79,11 @@ def _candidate(fd, names, node, user, pinned, now):
                 or current["issuedAtMs"] < original["issuedAtMs"]):
             raise ValueError("durable signed renewal chain changed authority")
         original = current
+    return original
+
+
+def _candidate(fd, names, node, user, pinned, now):
+    original = latest_signed_cap(fd, names, node, user, pinned)
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
         return None
     revision = original["reservationRevision"]
