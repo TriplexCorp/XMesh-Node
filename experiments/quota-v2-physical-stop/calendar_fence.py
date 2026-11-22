@@ -125,6 +125,7 @@ def _checked_saved(record, old, successor, runtime):
                 or not isinstance(row, dict)
                 or set(row) != {"email", "uplinkBytes", "downlinkBytes"}
                 or not isinstance(signed["email"], str)
+                or not isinstance(row.get("email"), str)
                 or row["email"] != signed["email"]
                 or row["email"] <= previous
                 or not row["email"].startswith(f"xmesh-u{old['userId']}--")
