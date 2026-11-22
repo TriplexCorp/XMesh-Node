@@ -207,7 +207,6 @@ def _checked_saved(record, old, successor, runtime):
             or (remote["offhostBirthIndexVerified"] is False
                 and remote["firstRemoteSnapshotWasOnlyBootstrap"] is True)):
         raise ValueError("calendar fence has no valid nonauthorizing off-host WAL proof")
-        raise ValueError("calendar fence record does not match original signed scope")
     observed = record["observedFence"]
     scope = record["scope"]
     checkpoint = observed.get("observedCheckpoint") if isinstance(observed, dict) else None
@@ -227,6 +226,12 @@ def _checked_saved(record, old, successor, runtime):
             or checkpoint.get("drained") is not True
             or any(checkpoint.get(key) != value for key, value in scope.items())):
         raise ValueError("calendar fence is missing Xray's nonfinal durable checkpoint")
+    if (remote["offhostBirthIndexVerified"] is False
+            and (type(checkpoint.get("uplinkBytes")) is not int
+                 or type(checkpoint.get("downlinkBytes")) is not int
+                 or checkpoint["uplinkBytes"] != 0
+                 or checkpoint["downlinkBytes"] != 0)):
+        raise ValueError("calendar fence has spent bytes without independently witnessed remote WAL")
     # The source-pinned Xray already validates the complete signed alias
     # roster. Revalidate the IPC/stored response independently so a partial
     # observation is never mistaken for the old metered account. This
