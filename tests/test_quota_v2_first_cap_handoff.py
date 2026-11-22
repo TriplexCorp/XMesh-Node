@@ -309,6 +309,17 @@ class FirstCapHandoffTests(unittest.TestCase):
                               }, "/trusted/old-wal")),
             mock.patch.object(calendar_fence.journal_integrity,
                               "verify_poststop_journal", return_value="7" * 64) as wal_audit,
+            mock.patch.object(calendar_fence.wal_transport, "run",
+                              return_value={
+                                  "nexusOffhostSignatureVerified": True,
+                                  "offhostFullBirthIndexHeadMatched": True,
+                                  "nodeLocalIndexExtendsNexusHead": True,
+                                  "firstRemoteSnapshotWasOnlyBootstrap": False,
+                                  "preBootstrapHistoryCompletenessVerified": False,
+                                  "allXrayWritersCompletedVerified": False,
+                                  "canResume": False, "carryforwardApplied": False,
+                                  "finalMeterVerified": False, "refundableBytes": 0,
+                              }) as remote_sync,
             mock.patch.object(cap.cap_install, "install_in_xray") as positive,
         ):
             self.assertEqual(renewal_worker.pending_renewals(
@@ -324,8 +335,10 @@ class FirstCapHandoffTests(unittest.TestCase):
                 "https://isolated.test", self.node, 100, str(state),
                 path, "e" * 64))
             self.assertTrue(marker.is_file())
-            self.assertEqual(wal_audit.call_count, 1)
+            self.assertEqual(wal_audit.call_count, 2)
             self.assertEqual(wal_audit.call_args.args[1], "/trusted/old-wal")
+            remote_sync.assert_called_once_with(
+                "charge-sync", "https://isolated.test", self.node)
             self.assertEqual(
                 renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
             self.assertFalse(calendar_fence.fence_successor(
@@ -341,6 +354,8 @@ class FirstCapHandoffTests(unittest.TestCase):
             stored = cap.wal_transport.observed.strict_json(marker.read_bytes())
             record_original = cap.wal_transport.observed.strict_json(marker.read_bytes())
             self.assertEqual(record_original["independentJournalSha256"], "7" * 64)
+            self.assertTrue(record_original["offhostBirthRegistry"][
+                "offhostBirthIndexVerified"])
             self.assertFalse(stored["observedFence"]["finalMeterVerified"])
             self.assertFalse(stored["observedFence"]["refundable"])
             # Never treat tampered local Xray observation as successful
@@ -417,6 +432,47 @@ class FirstCapHandoffTests(unittest.TestCase):
         ):
             self.assertEqual(calendar_fence._independent_journal_digest(
                 checkpoint, measured), "7" * 64)
+
+    def test_calendar_remote_wal_requires_confirmed_nonspending_nexus_head(self):
+        payload = {"uplinkBytes": 7, "downlinkBytes": 9}
+        with mock.patch.object(calendar_fence.wal_transport, "run",
+                               return_value=None):
+            with self.assertRaisesRegex(ValueError, "bytes but no committed off-host"):
+                calendar_fence._offhost_birth_registry_proof(
+                    "https://isolated.test", self.node, payload)
+        with mock.patch.object(calendar_fence.wal_transport, "run",
+                               return_value=None):
+            idle = calendar_fence._offhost_birth_registry_proof(
+                "https://isolated.test", self.node,
+                {"uplinkBytes": 0, "downlinkBytes": 0})
+            self.assertFalse(idle["offhostBirthIndexVerified"])
+            self.assertFalse(idle["canResume"])
+        valid = {
+            "nexusOffhostSignatureVerified": True,
+            "offhostFullBirthIndexHeadMatched": True,
+            "nodeLocalIndexExtendsNexusHead": True,
+            "firstRemoteSnapshotWasOnlyBootstrap": True,
+            "preBootstrapHistoryCompletenessVerified": False,
+            "allXrayWritersCompletedVerified": False,
+            "canResume": False, "carryforwardApplied": False,
+            "finalMeterVerified": False, "refundableBytes": 0,
+        }
+        with mock.patch.object(calendar_fence.wal_transport, "run",
+                               return_value=valid):
+            proof = calendar_fence._offhost_birth_registry_proof(
+                "https://isolated.test", self.node, payload)
+            self.assertTrue(proof["offhostBirthIndexVerified"])
+            self.assertTrue(proof["firstRemoteSnapshotWasOnlyBootstrap"])
+            self.assertFalse(proof["preBootstrapHistoryCompletenessVerified"])
+        for change in ({"canResume": True}, {"refundableBytes": 1},
+                       {"offhostFullBirthIndexHeadMatched": False},
+                       {"firstRemoteSnapshotWasOnlyBootstrap": 1}):
+            with self.subTest(change=change), mock.patch.object(
+                calendar_fence.wal_transport, "run",
+                return_value=dict(valid, **change)):
+                with self.assertRaises(ValueError):
+                    calendar_fence._offhost_birth_registry_proof(
+                        "https://isolated.test", self.node, payload)
 
     def verify(self, claims=None):
         return cap.verify_grant(
