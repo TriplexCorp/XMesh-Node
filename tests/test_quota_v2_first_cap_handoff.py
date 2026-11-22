@@ -542,7 +542,7 @@ class FirstCapHandoffTests(unittest.TestCase):
              "downlinkBytes": 0},
         ]}
         raw = self.guard.canonical({
-            "sequence": 1, "digest": "b" * 64}) + b"\\n"
+            "sequence": 1, "digest": "b" * 64}) + b"\n"
         with (
             mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
                               return_value=(docker, str(directory))),
