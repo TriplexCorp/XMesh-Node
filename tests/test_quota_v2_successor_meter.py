@@ -58,6 +58,7 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
         }
         self.receipt.update({
             "kind": "xmesh.quota-v2.fresh-meter-observed",
+            "aliases": copy.deepcopy(self.scope["aliases"]),
             "runtimeId": self.runtime[3],
             "inventorySha256": successor_meter.EMPTY_SHA,
             "zeroInitialRawCounters": True, "isolatedNewWalRoot": True,
@@ -98,6 +99,7 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             ("zeroInitialRawCounters", False),
             ("authorizedBytes", 1), ("inventorySha256", "f" * 64),
             ("schemaVersion", True), ("nodeId", True),
+            ("aliases", [self.scope["aliases"][0]]),
             ("refundableBytes", 1), ("finalMeterVerified", True),
         ):
             with self.subTest(receipt=key):
