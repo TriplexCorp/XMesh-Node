@@ -216,6 +216,9 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             _verified_saved_receipt(
                 saved, old, prepared, fresh, node, user, pinned)
             return False
+        pending_name = f"calendar-delivery-u{user}-{old['reservationId']}.json"
+        response = (lease._identity_file(fd, pending_name, 32768)
+                    if pending_name in os.listdir(fd) else None)
         challenge = _challenge(old["reservationId"], measured[3])
         activation = quarantine._enrolled_activation(panel, node)
         if old["activationReceiptSha256"] != activation["activationReceiptSha256"]:
@@ -257,9 +260,10 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
     # The transport's authenticated XSP/2 request can take time. The
     # previous WAL remains forever on its original reservation. A lost
     # response retries this SAME challenge and exact outbox.
-    response = wal_transport.observed.strict_json(
-        quarantine._post_quarantined_desired(
-            body, state, quarantine.CAP_DELIVERY_PATH))
+    if response is None:
+        response = wal_transport.observed.strict_json(
+            quarantine._post_quarantined_desired(
+                body, state, quarantine.CAP_DELIVERY_PATH))
     grant, genesis, scope = _verify_positive_reply(
         response, old, prepared, fresh, node, user, pinned,
         time.time_ns() // 1_000_000)
@@ -281,6 +285,15 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
         _, old_root = wal_transport._bound_journal()
         _, new_root = wal_transport._bound_journal(successor_meter.SUCCESSOR)
         successor_meter._clean_mount(old_root, new_root, candidate[3])
+        # Persist the exact verified pair before IPC. A crash here can retry
+        # on this measured process without asking Nexus for another reserve.
+        quarantine._durable_store(fd, response, pending_name)
+        if name in os.listdir(fd):
+            saved = lease._identity_file(fd, name, 32768)
+            _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned)
+            if saved["response"] != response:
+                raise ValueError("concurrent successor delivery differs from committed grant")
+            return False
         receipt = cap_install.install_in_xray(
             socket_path, candidate[2], candidate[3], genesis, grant, scope)
         if wal_transport._measure_quarantined_runtime(

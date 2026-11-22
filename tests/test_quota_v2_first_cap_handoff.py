@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import tempfile
 import unittest
 from unittest import mock
 
@@ -216,6 +217,25 @@ class FirstCapHandoffTests(unittest.TestCase):
                 "freshGenesisEnvelope":birth.decode(),
             }
         response=reply()
+        name = f"calendar-delivery-u100-{old['reservationId']}.json"
+        with tempfile.TemporaryDirectory() as state:
+            fd = os.open(state, os.O_DIRECTORY)
+            try:
+                quarantine._durable_store(fd, response, name)
+            finally:
+                os.close(fd)
+            fd = os.open(state, os.O_DIRECTORY)
+            try:
+                pending = successor_positive.lease._identity_file(fd, name, 32768)
+                self.assertEqual(pending, response)
+                with self.assertRaisesRegex(ValueError, "cannot overwrite"):
+                    quarantine._durable_store(fd, reply(dict(p, nonce="b"*64)), name)
+                with self.assertRaises(ValueError):
+                    successor_positive._verify_positive_reply(
+                        pending, old, prepared, fresh, self.node, 100, self.pub,
+                        p["installBeforeMs"])
+            finally:
+                os.close(fd)
         grant,birth,scope=successor_positive._verify_positive_reply(
             response,old,prepared,fresh,self.node,100,self.pub,self.now+1)
         self.assertEqual(scope["reservationId"],prepared["reservationId"])
