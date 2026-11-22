@@ -109,6 +109,34 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
                     cap_install._verify_fresh_zero_meter_receipt(
                         changed, self.scope, self.runtime[3])
 
+    def test_fresh_container_environment_is_bound_to_actual_wal_mount(self):
+        import journal_integrity
+        expected = [
+            "GITHUB_ACTIONS=true",
+            "XMESH_EXPERIMENTAL_DRAIN=1",
+            "XMESH_EXPERIMENTAL_OBSERVED_DIR=" + journal_integrity.JOURNAL_DEST,
+            "XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING=/run/xmesh/positive-cap-binding.json",
+        ]
+        container = {"Config": {"Env": list(expected)}}
+        self.assertIsNone(successor_meter._verify_fresh_container_env(container))
+        for changed in (
+            {"Config": {}},
+            {"Config": {"Env": None}},
+            {"Config": {"Env": [17]}},
+            {"Config": {"Env": expected[:-1]}},
+            {"Config": {"Env": expected + [expected[0]]}},
+            {"Config": {"Env": expected + [expected[-1]]}},
+            {"Config": {"Env": [
+                "GITHUB_ACTIONS=false", *expected[1:]]}},
+            {"Config": {"Env": [
+                *expected[:2], "XMESH_EXPERIMENTAL_OBSERVED_DIR=/tmp/wal",
+                expected[-1]]}},
+            {"Config": {"Env": [
+                *expected[:-1], "XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING=relative.json"]}},
+        ):
+            with self.subTest(config=changed), self.assertRaises(ValueError):
+                successor_meter._verify_fresh_container_env(changed)
+
     def test_new_wal_root_is_private_distinct_and_empty(self):
         with tempfile.TemporaryDirectory(prefix="xmesh-meter-old-") as old:
             with tempfile.TemporaryDirectory(prefix="xmesh-meter-fresh-") as fresh:
