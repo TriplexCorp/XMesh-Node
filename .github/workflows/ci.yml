@@ -31,7 +31,7 @@ jobs:
       - run: python3 tests/test_tls_provision.py
       - run: python3 deploy/test-xmesh-policy-guard.py
       - run: python3 tests/test_v1_partial_ack_no_refill.py
-      - run: python3 -m py_compile experiments/quota-v2-physical-stop/renewal_worker.py experiments/quota-v2-physical-stop/charge_worker.py tests/test_quota_v2_renewal_request_nonce.py tests/test_quota_v2_charge_worker.py
+      - run: python3 -m py_compile experiments/quota-v2-physical-stop/renewal_worker.py experiments/quota-v2-physical-stop/calendar_fence.py experiments/quota-v2-physical-stop/charge_worker.py tests/test_quota_v2_renewal_request_nonce.py tests/test_quota_v2_charge_worker.py
       - run: sudo python3 tests/test_quota_v2_renewal_request_nonce.py
       - run: sudo python3 tests/test_quota_v2_charge_worker.py
       - run: bash -n bootstrap.sh deploy/install-v6-strict-operational-agents.sh
