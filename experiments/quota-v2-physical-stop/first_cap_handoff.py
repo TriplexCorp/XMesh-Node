@@ -352,6 +352,124 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
     return install_staged_cap(panel,node_id,state,socket_path,grant,executable_pin)
 
 
+def _verify_cap_envelope(raw, pinned, public_file):
+    if not 0 < len(raw) <= MAX_BYTES:
+        raise ValueError("oversized spending permit")
+    env = wal_transport.observed.strict_json(raw)
+    if not isinstance(env, dict) or wal_transport.observed.canonical(env) + b"\n" != raw:
+        raise ValueError("noncanonical spending permit")
+    _signed(env, DOMAIN, pinned, public_file)
+    payload = env["payload"]
+    if (set(payload) != CAP_KEYS or not _int(payload["schemaVersion"], 1, 1)
+            or payload["canSpend"] is not True or payload["canStart"] is not False
+            or payload["canResume"] is not False or payload["finalMeterVerified"] is not False
+            or not _int(payload["refundableBytes"], 0, 0)):
+        raise ValueError("unexpected permit authority")
+    return payload
+
+
+def verify_renewal(raw, previous, pinned, challenge):
+    with tempfile.TemporaryDirectory(prefix="xmesh-renew-verify-") as tmp:
+        public_file = os.path.join(tmp, "pinned-nexus.pem")
+        wal_transport._write_public(pinned, public_file)
+        prior = _verify_cap_envelope(previous, pinned, public_file)
+        current = _verify_cap_envelope(raw, pinned, public_file)
+    policy_fields = ("nodeId", "userId", "activationReceiptSha256", "runtimeId",
+                     "policySha256", "accountEpoch", "meterEpoch", "reservationId", "aliasScopes",
+                     "validUntilMs")
+    now = time.time_ns() // 1_000_000
+    if (prior["kind"] not in ("xmesh.quota-v2.xray-cap-admission",
+                              "xmesh.quota-v2.xray-cap-renewal")
+            or current["kind"] != "xmesh.quota-v2.xray-cap-renewal"
+            or any(current[k] != prior[k] for k in policy_fields)
+            or current["reservationRevision"] != prior["reservationRevision"] + 1
+            or current["nonce"] != challenge
+            or current["nonce"] == prior["nonce"]
+            or not prior["issuedAtMs"] <= current["issuedAtMs"] <= now
+            or not now < current["installBeforeMs"] < current["validUntilMs"]
+            or not isinstance(current["inventoryTailDigest"], str)
+            or HEX64.fullmatch(current["inventoryTailDigest"]) is None
+            or any(not _int(current[k], prior[k], prior[k] + MAX_CAP) for k in (
+                "sharedCeilingBytes", "nodeCeilingBytes", "cdnCeilingBytes"))
+            or not _int(current["witnessedWalBytes"], prior["witnessedWalBytes"],
+                        prior["sharedCeilingBytes"])
+            or not _int(current["witnessedCdnBytes"], prior["witnessedCdnBytes"],
+                        min(prior["cdnCeilingBytes"], current["witnessedWalBytes"]))):
+        raise ValueError("renewal changes authority or does not advance the live permit")
+    return {
+        "userId": current["userId"], "policySha256": current["policySha256"],
+        "accountEpoch": current["accountEpoch"], "meterEpoch": current["meterEpoch"],
+        "reservationId": current["reservationId"], "revision": current["reservationRevision"],
+        "nonce": challenge, "aliases": prior["aliasScopes"],
+    }
+
+
+def fetch_and_install_renewal(panel, node_id, user_id, state, socket_path,
+                              executable_pin, request_challenge, previous_revision):
+    if (os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
+            or os.geteuid() != 0 or not _int(node_id, 1) or not _int(user_id, 1)
+            or not isinstance(panel, str) or not panel.startswith("https://")
+            or HEX64.fullmatch(executable_pin) is None
+            or HEX64.fullmatch(request_challenge) is None
+            or not _int(previous_revision, 1, 2**63 - 2)):
+        raise ValueError("renewal requires the enrolled root Agent and measured Xray")
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        original = confirmed_lease._identity_file(
+            fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)
+        genesis = original["prepared"]["payload"]
+        staged = original["reply"]
+        activation = quarantine._enrolled_activation(panel, node_id)["activationReceiptSha256"]
+        if genesis["activationReceiptSha256"] != activation or staged["nodeId"] != node_id:
+            raise ValueError("renewal is outside the enrolled Xray scope")
+        pins = confirmed_lease._original_measurement_pins(fd, original, node_id, activation)
+        if pins[0] != executable_pin:
+            raise ValueError("Xray executable pin differs from the original measured release")
+        measured = wal_transport._measure_quarantined_runtime(pins)
+        if measured[3] != genesis["candidateRuntimeId"]:
+            raise ValueError("renewal cannot authorize a replacement Xray")
+        pinned = wal_transport._panel_pin()
+        target = f"genesis-renewal-u{user_id}-r{previous_revision}.json"
+        try:
+            saved = confirmed_lease._identity_file(fd, target, 16384)
+        except FileNotFoundError:
+            saved = confirmed_lease._identity_file(fd, f"genesis-positive-cap-u{user_id}.json", 16384)
+        previous = saved["signedEnvelope"].encode()
+        with tempfile.TemporaryDirectory(prefix="xmesh-renew-prior-") as tmp:
+            public_file = os.path.join(tmp, "pinned-nexus.pem")
+            wal_transport._write_public(pinned, public_file)
+            prior = _verify_cap_envelope(previous, pinned, public_file)
+        if (prior["reservationRevision"] != previous_revision or prior["nodeId"] != node_id
+                or prior["userId"] != user_id or prior["runtimeId"] != measured[3]
+                or prior["policySha256"] != staged["policySha256"]
+                or prior["activationReceiptSha256"] != activation):
+            raise ValueError("previous spending permit differs from the original Xray scope")
+        raw = quarantine._post_quarantined_desired({
+            "nodeId": node_id, "userId": user_id, "requestChallenge": request_challenge,
+            "measurement": {"containerId": measured[0], "hostPid": measured[2],
+                            "runtimeId": measured[3]},
+            "renewal": {"reservationId": prior["reservationId"],
+                        "previousRevision": previous_revision},
+        }, state, quarantine.CAP_DELIVERY_PATH)
+        if not isinstance(raw, bytes) or not 0 < len(raw) <= 16384:
+            raise ValueError("invalid renewal response size")
+        response = wal_transport.observed.strict_json(raw)
+        if (not isinstance(response, dict)
+                or set(response) != {"status", "nodeId", "userId", "signedEnvelope"}
+                or response["status"] != "committed_renewal"
+                or response["nodeId"] != node_id or response["userId"] != user_id):
+            raise ValueError("incorrect committed renewal response")
+        permit = response["signedEnvelope"].encode()
+        scope = verify_renewal(permit, previous, pinned, request_challenge)
+        receipt = cap_install.install_in_xray(socket_path, measured[2], measured[3], b"", permit, scope)
+        quarantine._durable_store(fd, response,
+            f"genesis-renewal-u{user_id}-r{scope['revision']}.json")
+        return receipt
+    finally:
+        os.close(lock)
+        os.close(fd)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Disposable first-Genesis strict signed-cap handoff")
     ap.add_argument("--panel",required=True)
@@ -361,11 +479,15 @@ if __name__ == "__main__":
     ap.add_argument("--socket",required=True)
     ap.add_argument("--executable-sha256",required=True)
     ap.add_argument("--request-challenge",required=True)
+    ap.add_argument("--previous-revision", type=int)
     args = ap.parse_args()
     try:
-        proof=fetch_and_install_rehearsal(
-            args.panel,args.node_id,args.user_id,args.state,args.socket,
-            args.executable_sha256,args.request_challenge)
+        common = (args.panel, args.node_id, args.user_id, args.state, args.socket,
+                  args.executable_sha256, args.request_challenge)
+        if args.previous_revision is None:
+            proof = fetch_and_install_rehearsal(*common)
+        else:
+            proof = fetch_and_install_renewal(*common, args.previous_revision)
         # No signed envelope, credentials or profile on the console.
         print(json.dumps(proof,sort_keys=True,separators=(",",":")))
     except (OSError, ValueError, TypeError, KeyError) as error:

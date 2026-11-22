@@ -103,6 +103,27 @@ class FirstCapHandoffTests(unittest.TestCase):
             "signature": self.sign(cap.DOMAIN, p),
         }) + b"\n"
 
+    def test_renewal_scope_and_conservative_floors(self):
+        nonce = "a" * 64
+        claims = dict(self.claims, kind="xmesh.quota-v2.xray-cap-renewal",
+                      nonce=nonce, reservationRevision=2, sharedCeilingBytes=1250,
+                      nodeCeilingBytes=1250, cdnCeilingBytes=200,
+                      witnessedWalBytes=600, witnessedCdnBytes=100,
+                      inventoryTailDigest="b" * 64)
+        prior = self.signed_grant()
+        scope = cap.verify_renewal(self.signed_grant(claims), prior, self.pub, nonce)
+        self.assertEqual(scope["revision"], 2)
+        self.assertEqual(scope["aliases"], self.aliases)
+        for field, value in (
+            ("reservationRevision", 3), ("runtimeId", "f" * 64),
+            ("nonce", "b" * 64), ("sharedCeilingBytes", 999),
+            ("witnessedWalBytes", 1001), ("witnessedCdnBytes", 151),
+            ("validUntilMs", self.claims["validUntilMs"] + 1),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                cap.verify_renewal(self.signed_grant(dict(claims, **{field: value})),
+                                   prior, self.pub, nonce)
+
     def verify(self, claims=None):
         return cap.verify_grant(
             self.signed_grant(claims), self.evidence(),
