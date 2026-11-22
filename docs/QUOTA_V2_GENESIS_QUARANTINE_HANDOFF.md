@@ -293,3 +293,33 @@ before the first WAL-index bootstrap, or validate independent new-period
 Xray meter isolation. Those are still necessary before a positive
 successor issuance, and neither a local checkpoint nor an off-host
 index alone can authorize spending.
+
+## All old WAL stream tails must have Nexus-signed charge receipts
+
+The remote **birth** index only proves that each WAL filename was once
+registered. It does not prove that the *last* fsynced old-user byte
+intent was conservatively charged in PostgreSQL. Before publishing the
+Agent's nonfinal `calendar-fence-*.json`, the final root-locked stage
+now independently reopens the old Docker journal, validates every
+registered stream, derives the complete signed MAIN/CDN alias roster
+and requires a durable **Nexus Ed25519 WAL-charge acknowledgement** for
+the exact final sequence/digest/byte count of every old-user WAL file.
+It uses the already tested `charge_worker._durable_cursor` verifier,
+so one lost SQL COMMIT response can be retried and only its signed
+receipt advances the cursor. Remaining unacknowledged WAL keeps the old
+user's completion marker absent; normal scheduled `charge_worker.run`
+continues submitting that debt without touching other users' leases.
+
+A matching marker records only `allOldStreamTailsNexusAcknowledged=true`,
+a digest of the verified stream heads, and explicit **no resume, no final
+meter and no refund** flags. These signed receipts are conservative
+pretransmit byte-intent charges, which may include bytes not ultimately
+delivered by the network. They neither identify safe refunded capacity
+nor prove a fresh independent meter epoch. A separately reviewed
+positive successor protocol remains necessary.
+
+A root-private regression now rejects a missing final WAL charge ACK,
+accepts only the exact last-sequence receipt, and refuses a forged
+old-user counter; the existing charge-worker tests verify the actual
+Nexus signature/sequence contract. The end-to-end two-Node PostgreSQL
+and live-Xray CI workflows still must run to certify the combined chain.
