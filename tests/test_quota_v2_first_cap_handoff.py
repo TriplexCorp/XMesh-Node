@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "experiments" / "quota-v2-physical-stop"))
 from test_quota_v2_quarantine_handoff import QuarantinePolicyTests
 import first_cap_handoff as cap
 import quarantine_policy as quarantine
+import renewal_worker
 
 
 class FirstCapHandoffTests(unittest.TestCase):
@@ -290,6 +291,35 @@ class FirstCapHandoffTests(unittest.TestCase):
         self.assertEqual(sent[4], grant)
         self.assertEqual(sent[5]["aliases"], self.aliases)
         self.assertEqual(sent[5]["reservationId"], self.claims["reservationId"])
+
+    def test_systemd_activation_resumes_after_confirm_without_reopening_prepare(self):
+        import os
+        if os.geteuid() != 0:
+            self.skipTest("root-owned staged activation evidence")
+        state = self.fixture.root / "state"
+        state.mkdir(mode=0o700)
+        for filename, document in (
+            ("genesis-quarantine-envelope.json", self.evidence()),
+            ("genesis-reservation-prepared-u100.json", self.confirmed_lease("prepared")),
+            ("genesis-reservation-confirmed-u100.json", self.confirmed_lease()),
+        ):
+            path = state / filename
+            path.write_bytes(self.guard.canonical(document))
+            path.chmod(0o600)
+        active = {"activationReceiptSha256": self.fixture.activation}
+        panel, socket = "https://isolated.test", "/private/xray.sock"
+        with (
+            mock.patch.object(cap.wal_transport, "_panel_pin", return_value=self.pub),
+            mock.patch.object(quarantine, "_enrolled_activation", return_value=active),
+            mock.patch.object(cap.confirmed_lease, "_original_measurement_pins",
+                              return_value=("e"*64, "d"*64)),
+            mock.patch.object(cap.confirmed_lease, "run") as allocate,
+            mock.patch.object(cap, "fetch_and_install_rehearsal") as install,
+        ):
+            self.assertTrue(renewal_worker.activate_initial_cap(panel, self.node, str(state), socket))
+            allocate.assert_not_called()
+            challenge = renewal_worker.first_cap_challenge(self.prepared["payload"]["challenge"], 100)
+            install.assert_called_once_with(panel, self.node, 100, str(state), socket, "e"*64, challenge)
 
     def test_first_issuance_sends_the_measured_runtime_over_the_product_client(self):
         import os

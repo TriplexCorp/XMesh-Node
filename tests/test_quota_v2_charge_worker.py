@@ -22,6 +22,56 @@ def signed(doc):
 
 
 class ChargeWorkerTests(unittest.TestCase):
+    def test_wal_queue_reaches_every_stream_across_reopened_state(self):
+        streams = [f"meter-{i:064x}.jsonl" for i in range(1, 1001)]
+        with tempfile.TemporaryDirectory() as tmp:
+            def poll():
+                fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    return worker._next_charge_batch(fd, 42, streams)
+                finally:
+                    os.close(fd)
+            assert len(streams) % worker.MAX_BATCHES_PER_POLL == 0
+            scanned = []
+            for _ in range(len(streams) // worker.MAX_BATCHES_PER_POLL):
+                scanned.extend(poll())
+            self.assertEqual(scanned, streams)
+            self.assertEqual(poll(), streams[:worker.MAX_BATCHES_PER_POLL])
+
+    def test_failed_user_charge_does_not_starve_the_other_stream(self):
+        if os.geteuid() != 0:
+            self.skipTest("root-owned WAL and Agent state")
+        files = [f"meter-{i:064x}.jsonl" for i in range(1, 3)]
+        entries = {name: {"email": f"xmesh-u{i}--vless-main"}
+                   for i, name in enumerate(files, 1)}
+        verified = {name: (None, "a"*64) for name in files}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            for name in files:
+                (root / name).touch(mode=0o600)
+            with (
+                mock.patch.dict(os.environ, {
+                    "XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
+                    "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
+                }),
+                mock.patch.object(wal_transport, "run"),
+                mock.patch.object(wal_transport, "_bound_journal",
+                                  return_value=({}, str(root))),
+                mock.patch.object(worker.journal, "_verify_mount"),
+                mock.patch.object(worker.registry, "verify_meter_inventory",
+                                  return_value=(entries, verified)),
+                mock.patch.object(wal_transport, "_panel_pin", return_value="b"*64),
+                mock.patch.object(wal_transport, "_write_public"),
+                mock.patch.object(worker, "_charge_stream",
+                                  side_effect=[ValueError("invalid signed cursor"), 1]) as charge,
+            ):
+                refused = set()
+                self.assertEqual(worker.run("https://isolated.test", 42, str(state), refused), 1)
+                self.assertEqual(refused, {1})
+                self.assertEqual([call.args[-2] for call in charge.call_args_list], [1, 2])
+
     def test_batch_boundaries_never_split_durable_wal_lines(self):
         lines = [b'{"sequence":1}\n', b'{"sequence":2}\n',
                  b'{"sequence":3}\n']

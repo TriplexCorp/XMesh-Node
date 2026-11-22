@@ -6,6 +6,7 @@ fsynced byte-intent journal fragments and verifies Nexus-signed receipts.
 An ACK lost after SQL COMMIT is retried from the last durable signed receipt.
 """
 import base64
+import bisect
 import hashlib
 import json
 import os
@@ -14,7 +15,6 @@ import re
 import stat
 import tempfile
 
-import first_cap_handoff as caps
 import genesis_reservation as lease
 import journal_integrity as journal
 import meter_inventory_audit as registry
@@ -26,6 +26,8 @@ DOMAIN = b"XMESH_QUOTA_V2_WAL_CHARGE_V1\x00"
 BATCH_BYTES = 56 * 1024
 MAX_BATCHES_PER_POLL = 8
 MAX_WAL_BYTES = 64 << 20
+CURSOR_FILE = "wal-charge-scan-cursor.json"
+STREAM = re.compile(r"meter-[0-9a-f]{64}\.jsonl\Z")
 
 
 def _bytes_after_validation(fd, name, expected_digest):
@@ -197,7 +199,84 @@ def _durable_request(fd, key, node, user, reservation, filename, remaining):
     return raw
 
 
-def run(panel, node, state="/var/lib/xmesh-xray-sync"):
+def _next_charge_batch(fd, node, streams):
+    try:
+        cursor = lease._identity_file(fd, CURSOR_FILE, 256)
+    except FileNotFoundError:
+        previous = ""
+    else:
+        if (not isinstance(cursor, dict) or set(cursor) != {"nodeId", "lastStream"}
+                or type(cursor["nodeId"]) is not int or cursor["nodeId"] != node
+                or not isinstance(cursor["lastStream"], str)
+                or STREAM.fullmatch(cursor["lastStream"]) is None):
+            raise ValueError("foreign or corrupt WAL charging cursor")
+        previous = cursor["lastStream"]
+    start = bisect.bisect_right(streams, previous) % len(streams)
+    selected = (streams[start:] + streams[:start])[:MAX_BATCHES_PER_POLL]
+    renewal_worker.store_scan_cursor(fd, CURSOR_FILE,
+                                    {"nodeId": node, "lastStream": selected[-1]})
+    return selected
+
+
+def _charge_stream(fd, state_fd, state_names, node, pinned, public, filename, birth, digest, user, allowance):
+    grant = renewal_worker.latest_signed_cap(
+        state_fd, state_names, node, user, pinned)
+    if (grant["runtimeId"] != birth["runtimeId"]
+            or not any(a["email"] == birth["email"] for a in grant["aliasScopes"])):
+        raise ValueError("WAL witness refers to a foreign signed Xray permit")
+    raw = _bytes_after_validation(fd, filename, digest)
+    lines = [wal_transport.observed.strict_json(line)
+             for line in raw.splitlines()]
+    if (not lines or len(lines) > 2**20 or
+            any(type(row.get("sequence")) is not int or
+                row["sequence"] != i + 1 for i, row in enumerate(lines))):
+        raise ValueError("Xray WAL sequence is not contiguous")
+    position, key = _durable_cursor(
+        state_fd, state_names, filename, user, node, grant,
+        lines, pinned, public)
+    if position == len(lines):
+        return 0
+    all_lines = raw.splitlines(keepends=True)
+    submitted = 0
+    while position < len(lines) and submitted < allowance:
+        remaining = b"".join(all_lines[position:])
+        batch = _durable_request(
+            state_fd, key, node, user, grant["reservationId"],
+            filename, remaining)
+        first = wal_transport.observed.strict_json(batch.splitlines()[0])
+        last = wal_transport.observed.strict_json(batch.splitlines()[-1])
+        request = {
+            "operation": "charge", "nodeId": node,
+            "reservationId": grant["reservationId"],
+            "filename": filename,
+            "journal": base64.b64encode(batch).decode("ascii"),
+        }
+        with tempfile.TemporaryDirectory(prefix="xmesh-charge-xsp-") as tmp:
+            reply = wal_transport.observed.strict_json(
+                wal_transport._post(Path(tmp), request))
+        if not isinstance(reply, dict) or set(reply) != {"receipt"}:
+            raise ValueError("Nexus returned no signed WAL charge receipt")
+        receipt = wal_transport._b64(reply["receipt"], 4096)
+        _validate_receipt(
+            receipt, pinned, public,
+            {"nodeId": node, "userId": user,
+             "reservationId": grant["reservationId"],
+             "filename": filename, "raw": batch},
+            birth, first, last)
+        evidence = {
+            "nodeId": node, "userId": user,
+            "reservationId": grant["reservationId"],
+            "filename": filename, "signedReceipt": reply["receipt"],
+        }
+        quarantine._durable_store(
+            state_fd, evidence,
+            f"wal-charge-{key}-s{last['sequence']}.json")
+        position = last["sequence"]
+        submitted += 1
+    return submitted
+
+
+def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None):
     if (os.geteuid() != 0 or
             os.environ.get("XMESH_QUOTA_V2_AUTO_RENEW_STAGING") != "1" or
             os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
@@ -210,12 +289,16 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync"):
     docker, local = wal_transport._bound_journal()
     journal._verify_mount(docker, local)
     fd = journal._validate_directory(local)
-    state_fd, lock = quarantine._locked_private_state(state)
+    try:
+        state_fd, lock = quarantine._locked_private_state(state)
+    except BaseException:
+        os.close(fd)
+        raise
     submitted = 0
     try:
         names = os.listdir(fd)
         streams = sorted(name for name in names
-                         if re.fullmatch(r"meter-[0-9a-f]{64}\.jsonl", name))
+                         if STREAM.fullmatch(name))
         entries, verified = registry.verify_meter_inventory(
             fd, streams, journal._read_meter_wal, journal._canonical_go)
         if not entries:
@@ -225,68 +308,26 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync"):
         with tempfile.TemporaryDirectory(prefix="xmesh-charge-key-") as tmp:
             public = Path(tmp) / "panel.pem"
             wal_transport._write_public(pinned, public)
-            for filename in sorted(entries):
+            selected = _next_charge_batch(state_fd, node, sorted(entries))
+            per_stream, extra = divmod(MAX_BATCHES_PER_POLL, len(selected))
+            for offset, filename in enumerate(selected):
                 birth = entries[filename]
                 match = registry.EMAIL.fullmatch(birth["email"])
                 if match is None:
                     raise ValueError("WAL email is outside signed Node user scope")
                 user = int(match.group(1))
-                grant = renewal_worker.latest_signed_cap(
-                    state_fd, state_names, node, user, pinned)
-                if (grant["runtimeId"] != birth["runtimeId"]
-                        or not any(a["email"] == birth["email"] for a in grant["aliasScopes"])):
-                    raise ValueError("WAL witness refers to a foreign signed Xray permit")
-                raw = _bytes_after_validation(
-                    fd, filename, verified[filename][1])
-                lines = [wal_transport.observed.strict_json(line)
-                         for line in raw.splitlines()]
-                if (not lines or len(lines) > 2**20 or
-                        any(type(row.get("sequence")) is not int or
-                            row["sequence"] != i + 1 for i, row in enumerate(lines))):
-                    raise ValueError("Xray WAL sequence is not contiguous")
-                position, key = _durable_cursor(
-                    state_fd, state_names, filename, user, node, grant,
-                    lines, pinned, public)
-                if position == len(lines):
-                    continue
-                all_lines = raw.splitlines(keepends=True)
-                while position < len(lines):
-                    if submitted >= MAX_BATCHES_PER_POLL:
-                        return submitted
-                    remaining = b"".join(all_lines[position:])
-                    batch = _durable_request(
-                        state_fd, key, node, user, grant["reservationId"],
-                        filename, remaining)
-                    first = wal_transport.observed.strict_json(batch.splitlines()[0])
-                    last = wal_transport.observed.strict_json(batch.splitlines()[-1])
-                    request = {
-                        "operation": "charge", "nodeId": node,
-                        "reservationId": grant["reservationId"],
-                        "filename": filename,
-                        "journal": base64.b64encode(batch).decode("ascii"),
-                    }
-                    with tempfile.TemporaryDirectory(prefix="xmesh-charge-xsp-") as tmp:
-                        reply = wal_transport.observed.strict_json(
-                            wal_transport._post(Path(tmp), request))
-                    if not isinstance(reply, dict) or set(reply) != {"receipt"}:
-                        raise ValueError("Nexus returned no signed WAL charge receipt")
-                    receipt = wal_transport._b64(reply["receipt"], 4096)
-                    _validate_receipt(
-                        receipt, pinned, public,
-                        {"nodeId": node, "userId": user,
-                         "reservationId": grant["reservationId"],
-                         "filename": filename, "raw": batch},
-                        birth, first, last)
-                    evidence = {
-                        "nodeId": node, "userId": user,
-                        "reservationId": grant["reservationId"],
-                        "filename": filename, "signedReceipt": reply["receipt"],
-                    }
-                    quarantine._durable_store(
-                        state_fd, evidence,
-                        f"wal-charge-{key}-s{last['sequence']}.json")
-                    submitted += 1
-                    position = last["sequence"]
+                try:
+                    submitted += _charge_stream(
+                        fd, state_fd, state_names, node, pinned, public, filename,
+                        birth, verified[filename][1], user, per_stream + (offset < extra))
+                except (ValueError, OSError, KeyError, TypeError) as error:
+                    # A per-stream authority or ACK failure must not stall
+                    # other streams. The verified inventory itself remains
+                    # mandatory before we process any of them.
+                    if failed_users is not None:
+                        failed_users.add(user)
+                    print(f"Quota V2 user {user} WAL stream refused: "
+                          f"{type(error).__name__}", flush=True)
     finally:
         os.close(lock)
         os.close(state_fd)

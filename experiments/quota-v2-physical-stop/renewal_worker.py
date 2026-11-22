@@ -117,8 +117,11 @@ def _durable_scan_cursor(state_fd, node, last_user):
     if (type(node) is not int or node <= 0 or
             type(last_user) is not int or last_user <= 0):
         raise ValueError("invalid quota renewal scan cursor")
-    raw = wal_transport.observed.canonical({
-        "nodeId": node, "lastUserId": last_user})
+    store_scan_cursor(state_fd, CURSOR_FILE, {"nodeId": node, "lastUserId": last_user})
+
+
+def store_scan_cursor(state_fd, filename, cursor):
+    raw = wal_transport.observed.canonical(cursor)
     temporary = ".genesis-renewal-scan-" + secrets.token_hex(16)
     output = os.open(temporary,
                      os.O_WRONLY | os.O_CREAT | os.O_EXCL |
@@ -129,7 +132,7 @@ def _durable_scan_cursor(state_fd, node, last_user):
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, CURSOR_FILE,
+        os.replace(temporary, filename,
                    src_dir_fd=state_fd, dst_dir_fd=state_fd)
         os.fsync(state_fd)
     finally:
@@ -213,7 +216,8 @@ def first_cap_challenge(genesis_challenge, user):
 def activate_initial_cap(panel, node, state, socket_path):
     fd, lock = quarantine._locked_private_state(state)
     try:
-        if any(BASE.fullmatch(name) for name in os.listdir(fd)):
+        names = set(os.listdir(fd))
+        if any(BASE.fullmatch(name) for name in names):
             return False
         original = lease._identity_file(
             fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)
@@ -232,11 +236,28 @@ def activate_initial_cap(panel, node, state, socket_path):
         executable, _ = lease._original_measurement_pins(
             fd, original, node, active["activationReceiptSha256"])
         challenge = first_cap_challenge(original["prepared"]["payload"]["challenge"], user)
+        prepared_name = f"genesis-reservation-prepared-u{user}.json"
+        confirmed_name = f"genesis-reservation-confirmed-u{user}.json"
+        needs_prepare = prepared_name not in names
+        needs_confirm = confirmed_name not in names
+        if not needs_confirm and needs_prepare:
+            raise ValueError("confirmed reservation is missing its prepared identity")
+        if not needs_prepare:
+            prepared = lease.verify_lease_response(
+                wal_transport.observed.canonical(lease._identity_file(fd, prepared_name, lease.MAX_REPLY)),
+                node, user, "prepare", original, pinned, active["activationReceiptSha256"])
+            if not needs_confirm:
+                lease.verify_lease_response(
+                    wal_transport.observed.canonical(lease._identity_file(fd, confirmed_name, lease.MAX_REPLY)),
+                    node, user, "confirm", original, pinned, active["activationReceiptSha256"],
+                    previous=prepared)
     finally:
         os.close(lock)
         os.close(fd)
-    lease.run(panel, node, user, state, "prepare")
-    lease.run(panel, node, user, state, "confirm")
+    if needs_prepare:
+        lease.run(panel, node, user, state, "prepare")
+    if needs_confirm:
+        lease.run(panel, node, user, state, "confirm")
     caps.fetch_and_install_rehearsal(
         panel, node, user, state, socket_path, executable, challenge)
     return True
@@ -254,7 +275,8 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
     # Ed25519 charge receipt and persist a monotonic retry cursor. A signed
     # birth-index head alone is NOT a PostgreSQL spending receipt.
     import charge_worker
-    charge_worker.run(panel, node, state)
+    failed_users = set()
+    charge_worker.run(panel, node, state, failed_users)
     pinned = wal_transport._panel_pin()
     jobs = pending_renewals(state, node, pinned)
     if not jobs:
@@ -272,6 +294,8 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
         os.close(fd)
     installed = 0
     for user, revision, challenge in jobs:
+        if user in failed_users:
+            continue
         try:
             caps.fetch_and_install_renewal(
                 panel, node, user, state, socket_path,
