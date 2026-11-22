@@ -80,3 +80,81 @@ def install_in_xray(path, trusted_pid, runtime, genesis, grant, scope):
         return receipt
     finally:
         os.close(pidfd)
+
+def fence_calendar_in_xray(path, trusted_pid, runtime, scope):
+    """Commit a ZERO-RESTART, irreversible old-epoch user fence.
+
+    The existing disposable Xray /v1/fence writes and fsyncs a root-private
+    denial BEFORE cancelling sessions and taking its nonfinal WAL snapshot.
+    This endpoint must NEVER be interpreted as a positive quota grant or as
+    authorization to refund the historical reservation.
+    """
+    if not isinstance(scope, dict) or set(scope) != {
+            "email", "nodeId", "userId", "epoch", "meterEpoch",
+            "reservationId", "revision", "revocationId"}:
+        raise ValueError("invalid calendar fence scope")
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError("Xray calendar fence socket must be absolute")
+    uid = os.geteuid()
+    parent, endpoint = path.parent.lstat(), path.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != uid
+            or parent.st_mode & 0o077
+            or not stat.S_ISSOCK(endpoint.st_mode) or endpoint.st_uid != uid
+            or endpoint.st_mode & 0o077):
+        raise ValueError("calendar fence socket escaped the private process boundary")
+    body = json.dumps(scope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if not 0 < len(body) <= 2048:
+        raise ValueError("oversized calendar fence scope")
+    pidfd = os.pidfd_open(trusted_pid, 0)
+    try:
+        poll = select.poll()
+        poll.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+
+        def check_runtime():
+            if poll.poll(0) or wal_transport.runtime_identity.trusted_runtime_identity(trusted_pid) != runtime:
+                raise ValueError("calendar fence Xray PID exited or changed")
+
+        check_runtime()
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(12)
+            conn.connect(str(path))
+            peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                   struct.calcsize("3i"))
+            peer_pid, peer_uid, _ = struct.unpack("3i", peer)
+            if peer_pid != trusted_pid or peer_uid != uid:
+                raise ValueError("calendar fence Unix peer is not the measured Xray")
+            check_runtime()
+            client = http.client.HTTPConnection("localhost", timeout=12)
+            client.auto_open = False
+            client.sock = conn
+            try:
+                client.request("POST", "/v1/fence", body=body,
+                               headers={"Connection": "close"})
+                response = client.getresponse()
+                raw = response.read(16 * 1024 + 1)
+                if response.status != 200 or len(raw) > 16 * 1024:
+                    raise ValueError(f"Xray calendar fence not confirmed (HTTP {response.status})")
+            finally:
+                client.close()
+        result = wal_transport.observed.strict_json(raw)
+        if (not isinstance(result, dict)
+                or result.get("email") != scope["email"]
+                or result.get("fenced") is not True
+                or result.get("active") != 0
+                or result.get("drained") is not True
+                or result.get("finalMeterVerified") is not False
+                or result.get("refundable") is not False):
+            raise ValueError("Xray calendar fence lacks the mandatory nonfinal denial")
+        checkpoint = result.get("observedCheckpoint")
+        if (not isinstance(checkpoint, dict)
+                or any(checkpoint.get(k) != v for k, v in scope.items())
+                or checkpoint.get("runtimeId") != runtime
+                or checkpoint.get("drained") is not True
+                or checkpoint.get("finalMeterVerified") is not False
+                or checkpoint.get("refundableBytes") != 0):
+            raise ValueError("calendar fence checkpoint missing or changed its old reservation")
+        check_runtime()
+        return result
+    finally:
+        os.close(pidfd)
