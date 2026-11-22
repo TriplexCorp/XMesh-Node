@@ -518,6 +518,62 @@ class FirstCapHandoffTests(unittest.TestCase):
                     calendar_fence._offhost_birth_registry_proof(
                         "https://isolated.test", self.node, payload)
 
+    def test_calendar_requires_signed_nexus_ack_for_every_old_wal_tail(self):
+        import charge_worker
+        import meter_inventory_audit as registry
+
+        directory = self.fixture.root / "old-wal-charge-audit"
+        directory.mkdir(mode=0o700)
+        state_dir = self.fixture.root / "old-wal-charge-state"
+        state_dir.mkdir(mode=0o700)
+        fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        runtime = ("f" * 64, "2026-11-21T00:00:00Z", 4321, self.runtime)
+        docker = {"Id": runtime[0], "State": {
+            "StartedAt": runtime[1], "Running": True, "Pid": runtime[2]}}
+        filename = "meter-" + "a" * 64 + ".jsonl"
+        birth = {"runtimeId": self.runtime,
+                 "email": self.aliases[0]["email"], "direction": "uplink"}
+        last = {"sequence": 1, "nextBytes": 5, "digest": "b" * 64}
+        valid_checkpoint = {"inboundMeters": [
+            {"email": self.aliases[0]["email"], "uplinkBytes": 5,
+             "downlinkBytes": 0},
+            {"email": self.aliases[1]["email"], "uplinkBytes": 0,
+             "downlinkBytes": 0},
+        ]}
+        raw = self.guard.canonical({
+            "sequence": 1, "digest": "b" * 64}) + b"\\n"
+        with (
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=(docker, str(directory))),
+            mock.patch.object(registry, "verify_meter_inventory",
+                              return_value=(
+                                  {filename: birth}, {filename: (last, "c" * 64, "d" * 64)})),
+            mock.patch.object(charge_worker, "_bytes_after_validation",
+                              return_value=raw),
+            mock.patch.object(calendar_fence.wal_transport, "_write_public"),
+            mock.patch.object(charge_worker, "_durable_cursor",
+                              side_effect=[(0, "k"), (1, "k")]) as cursor,
+        ):
+            with self.assertRaisesRegex(ValueError, "no signed Nexus charge receipt"):
+                calendar_fence._verified_old_wal_charge_heads(
+                    fd, self.node, 100, self.claims, valid_checkpoint,
+                    self.pub, runtime)
+            complete = calendar_fence._verified_old_wal_charge_heads(
+                fd, self.node, 100, self.claims, valid_checkpoint,
+                self.pub, runtime)
+            self.assertEqual(cursor.call_count, 2)
+            self.assertEqual(complete["verifiedStreamCount"], 1)
+            self.assertTrue(complete["allOldStreamTailsNexusAcknowledged"])
+            self.assertFalse(complete["finalMeterVerified"])
+            self.assertFalse(complete["canResume"])
+            self.assertFalse(complete["refundableBytes"])
+            forged = copy.deepcopy(valid_checkpoint)
+            forged["inboundMeters"][0]["uplinkBytes"] = 6
+            with self.assertRaisesRegex(ValueError, "differs from signed inbound"):
+                calendar_fence._verified_old_wal_charge_heads(
+                    fd, self.node, 100, self.claims, forged, self.pub, runtime)
+
     def verify(self, claims=None):
         return cap.verify_grant(
             self.signed_grant(claims), self.evidence(),
