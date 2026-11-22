@@ -24,6 +24,7 @@ import first_cap_handoff as cap
 import calendar_fence
 import quarantine_policy as quarantine
 import renewal_worker
+import successor_positive
 
 
 class FirstCapHandoffTests(unittest.TestCase):
@@ -127,6 +128,112 @@ class FirstCapHandoffTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 cap.verify_renewal(self.signed_grant(dict(claims, **{field: value})),
                                    prior, self.pub, nonce)
+
+    def test_calendar_positive_must_pair_two_real_signatures_and_new_process(self):
+        old = dict(self.claims, validUntilMs=self.now - 1)
+        fresh = {"freshRuntimeId": "e" * 64}
+        prepared = {
+            "meterEpoch": "55555555-5555-4555-8555-555555555555",
+            "reservationId": "66666666-6666-4666-8666-666666666666",
+        }
+        challenge = successor_positive._challenge(old["reservationId"],
+                                                  fresh["freshRuntimeId"])
+        p = dict(self.claims,
+            runtimeId=fresh["freshRuntimeId"],
+            meterEpoch=prepared["meterEpoch"],
+            reservationId=prepared["reservationId"],
+            nonce=challenge,
+            validUntilMs=self.now + 3_600_000,
+            installBeforeMs=self.now + 60_000,
+            issuedAtMs=self.now,
+            reservationRevision=1,
+            witnessedWalBytes=0, witnessedCdnBytes=0,
+            canSpend=True, canStart=False, canResume=False,
+            finalMeterVerified=False, refundableBytes=0)
+        g = {
+            "schemaVersion":1, "kind":"xmesh.xray.genesis-prepared",
+            "nodeId":self.node,
+            "activationReceiptSha256":old["activationReceiptSha256"],
+            "candidateRuntimeId":fresh["freshRuntimeId"],
+            "challenge":challenge,"preparedAtMs":self.now,
+            "validUntilMs":self.now+120_000,
+            "authorizedBytes":0,"canStart":False,"canResume":False,
+        }
+
+        def reply(cap_claims=p, genesis_claims=g):
+            grant = self.guard.canonical({
+                "algorithm":"Ed25519","payload":cap_claims,
+                "signature":self.sign(cap.DOMAIN,cap_claims),
+            }) + b"\n"
+            birth = self.guard.canonical({
+                "algorithm":"Ed25519","payload":genesis_claims,
+                "signature":self.sign(successor_positive.GENESIS_DOMAIN,
+                                       genesis_claims),
+            })
+            return {
+                "status":"committed_calendar_successor",
+                "nodeId":self.node,"userId":100,
+                "signedEnvelope":grant.decode(),
+                "freshGenesisEnvelope":birth.decode(),
+            }
+        response=reply()
+        grant,birth,scope=successor_positive._verify_positive_reply(
+            response,old,prepared,fresh,self.node,100,self.pub,self.now+1)
+        self.assertEqual(scope["reservationId"],prepared["reservationId"])
+        self.assertEqual(scope["meterEpoch"],prepared["meterEpoch"])
+        self.assertEqual(scope["revision"],1)
+        self.assertEqual(scope["aliases"],self.aliases)
+        self.assertEqual(scope["nonce"],challenge)
+        original = {
+            "nodeId":self.node,"userId":100,
+            "predecessorId":old["reservationId"],
+            "freshRuntimeId":fresh["freshRuntimeId"],
+            "grantSha256":hashlib.sha256(grant).hexdigest(),
+            "xrayReceipt":{"runtimeId":fresh["freshRuntimeId"],
+                           "grantSha256":hashlib.sha256(grant).hexdigest()},
+            "response":response,
+        }
+        # An exact archived installation is historical evidence only.
+        # After the cap's expiry it cannot turn into a new reservation.
+        self.assertEqual(
+            successor_positive._verified_saved_receipt(
+                original,old,prepared,fresh,self.node,100,self.pub),
+            original)
+        bad = copy.deepcopy(original)
+        bad["xrayReceipt"]["grantSha256"] = "f"*64
+        with self.assertRaisesRegex(ValueError,"unmatched original"):
+            successor_positive._verified_saved_receipt(
+                bad,old,prepared,fresh,self.node,100,self.pub)
+        for key,value in (
+            ("runtimeId","a"*64),("reservationId",old["reservationId"]),
+            ("meterEpoch",old["meterEpoch"]),("accountEpoch","9"*8+"-0000-4000-8000-000000000000"),
+            ("nonce","0"*64),("cdnCeilingBytes",1001),
+            ("canStart",True),("canResume",True),("refundableBytes",1),
+            ("aliasScopes",self.aliases[:1]),
+        ):
+            with self.subTest(claim=key):
+                tampered=copy.deepcopy(p)
+                tampered[key]=value
+                with self.assertRaises(ValueError):
+                    successor_positive._verify_positive_reply(
+                        reply(tampered,g),old,prepared,fresh,self.node,100,
+                        self.pub,self.now+1)
+        for key,value in (
+            ("candidateRuntimeId",old["runtimeId"]),
+            ("challenge","0"*64),("canStart",True),
+            ("authorizedBytes",1),("validUntilMs",self.now+120_001),
+        ):
+            with self.subTest(genesis=key):
+                tampered=dict(g,**{key:value})
+                with self.assertRaises(ValueError):
+                    successor_positive._verify_positive_reply(
+                        reply(p,tampered),old,prepared,fresh,self.node,100,
+                        self.pub,self.now+1)
+        self.assertEqual(successor_positive._challenge(
+            old["reservationId"],fresh["freshRuntimeId"]),challenge)
+        self.assertNotEqual(successor_positive._challenge(
+            "77777777-7777-4777-8777-777777777777",
+            fresh["freshRuntimeId"]),challenge)
 
     def test_calendar_prepare_retries_identical_request_and_never_installs(self):
         if os.geteuid() != 0:
