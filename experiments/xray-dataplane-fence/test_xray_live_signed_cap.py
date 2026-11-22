@@ -26,7 +26,7 @@ from test_quota_v2_xray_user_inbound_drain import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "quota-v2-physical-stop"))
-from cap_install import fence_calendar_in_xray, install_in_xray
+from cap_install import fence_calendar_in_xray, install_in_xray, observe_zero_meter_in_xray
 from first_cap_handoff import verify_grant
 import journal_integrity
 from runtime_identity import trusted_runtime_identity
@@ -133,7 +133,23 @@ def run(xray, root, target, processes, scenario):
     client = launch("client", os.environ)
     await_socket(sock_path, server)
     runtime = trusted_runtime_identity(server.pid)
-
+    # This fresh, pre-admission process must prove its *entire* StatsService
+    # and private byte-WAL namespace is pristine over the same measured
+    # kernel PID / SO_PEERCRED private Unix socket. This is NEVER a grant.
+    first_zero_scope = {
+        "schemaVersion": 1, "nodeId": node, "userId": user,
+        "nonce": digest(), "meterEpoch": str(uuid.uuid4()),
+        "reservationId": str(uuid.uuid4()),
+        "aliases": [{"email": alias[n], "class": n} for n in ("cdn", "main")],
+    }
+    zero_receipt = observe_zero_meter_in_xray(
+        sock_path, server.pid, runtime, first_zero_scope)
+    assert zero_receipt["runtimeId"] == runtime
+    assert zero_receipt["zeroInitialRawCounters"] is True
+    assert zero_receipt["isolatedNewWalRoot"] is True
+    assert zero_receipt["authorizedBytes"] == 0
+    assert zero_receipt["canSpend"] is False and zero_receipt["canResume"] is False
+    assert not list(root.glob("meter-*.jsonl"))
     def open_stream(name):
         return connect_socks(ports[name], target, "127.0.0.1")
 
@@ -217,6 +233,13 @@ def run(xray, root, target, processes, scenario):
     reject(sock_path, server.pid, runtime, genesis, canonical(forged) + b"\n", scope)
     install_in_xray(sock_path, server.pid, runtime, genesis, grant, scope)
     assert (root / f"positive-cap-u{user}.json").read_bytes() == grant
+    try:
+        observe_zero_meter_in_xray(
+            sock_path, server.pid, runtime, first_zero_scope)
+    except ValueError as exc:
+        assert "refused zero-meter" in str(exc), str(exc)
+    else:
+        raise AssertionError("already provisioned Xray returned a fresh zero-meter proof")
 
     if scenario == "calendar-fence":
         # Genuine loopback VLESS from MAIN and CDN exists under ONE signed
