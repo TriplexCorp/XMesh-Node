@@ -98,8 +98,14 @@ def _independent_journal_digest(old_checkpoint, measured):
             or state.get("Running") is not True
             or state.get("Pid") != measured[2]):
         raise ValueError("calendar WAL journal belongs to a different Xray process")
-    digest = journal_integrity.verify_poststop_journal(
-        old_checkpoint, journal_dir, docker)
+    try:
+        digest = journal_integrity.verify_poststop_journal(
+            old_checkpoint, journal_dir, docker)
+    except (KeyError, TypeError, IndexError, UnicodeError) as exc:
+        # A malformed checkpoint or journal from one stopped user must
+        # never escape the bounded per-user fail-closed scheduler and
+        # prevent other signed users from reaching their own safe window.
+        raise ValueError("malformed old-Xray calendar WAL evidence") from exc
     if (not isinstance(digest, str)
             or caps.HEX64.fullmatch(digest) is None):
         raise ValueError("invalid independently audited calendar WAL digest")
