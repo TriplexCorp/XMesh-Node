@@ -19,6 +19,7 @@ import uuid
 import cap_install
 import first_cap_handoff as caps
 import genesis_reservation as lease
+import journal_integrity
 import quarantine_policy as quarantine
 import renewal_worker
 import wal_transport
@@ -77,17 +78,48 @@ def _original_signed_scope(fd, old, node, pinned):
     return original["revision"]
 
 
+def _independent_journal_digest(old_checkpoint, measured):
+    """Re-read actual fsynced Xray WAL and birth registry from Docker bind.
+
+    The observed HTTP response is only an untrusted, nonfinal account
+    snapshot; a same-PID peer is not an accounting proof by itself.
+    The existing independent root-owned Docker/mount verifier checks
+    EVERY WAL birth against raw file contents, a matching immutable
+    fence/checkpoint record, and the exact old process identity.
+    """
+    if (not isinstance(measured, tuple) or len(measured) != 4
+            or type(measured[2]) is not int or measured[2] <= 0):
+        raise ValueError("untrusted measured Xray identity for calendar WAL audit")
+    docker, journal_dir = wal_transport._bound_journal()
+    state = docker.get("State") if isinstance(docker, dict) else None
+    if (not isinstance(state, dict)
+            or docker.get("Id") != measured[0]
+            or state.get("StartedAt") != measured[1]
+            or state.get("Running") is not True
+            or state.get("Pid") != measured[2]):
+        raise ValueError("calendar WAL journal belongs to a different Xray process")
+    digest = journal_integrity.verify_poststop_journal(
+        old_checkpoint, journal_dir, docker)
+    if (not isinstance(digest, str)
+            or caps.HEX64.fullmatch(digest) is None):
+        raise ValueError("invalid independently audited calendar WAL digest")
+    return digest
+
+
 def _checked_saved(record, old, successor, runtime):
     if (not isinstance(record, dict)
             or set(record) != {
                 "nodeId", "userId", "predecessorId", "runtimeId",
-                "successorSha256", "scope", "observedFence"}
+                "successorSha256", "scope", "observedFence",
+                "independentJournalSha256"}
             or record["nodeId"] != old["nodeId"]
             or record["userId"] != old["userId"]
             or record["predecessorId"] != old["reservationId"]
             or record["runtimeId"] != runtime
             or record["successorSha256"] != successor
-            or record["scope"] != _fence_scope(old, old["reservationId"])):
+            or record["scope"] != _fence_scope(old, old["reservationId"])
+            or not isinstance(record["independentJournalSha256"], str)
+            or caps.HEX64.fullmatch(record["independentJournalSha256"]) is None):
         raise ValueError("calendar fence record does not match original signed scope")
     observed = record["observedFence"]
     scope = record["scope"]
@@ -199,6 +231,11 @@ def fence_successor(panel, node, user, state, socket_path, executable_pin):
             "successorSha256": digest, "scope": scope,
             "observedFence": snapshot,
         }
+        journal_digest = _independent_journal_digest(
+            snapshot["observedCheckpoint"], observed_before)
+        if observed_before != wal_transport._measure_quarantined_runtime(pins):
+            raise ValueError("Xray process changed during independent WAL audit")
+        record["independentJournalSha256"] = journal_digest
         _checked_saved(record, old, digest, old["runtimeId"])
         quarantine._durable_store(fd, record, name)
         return True
