@@ -89,16 +89,21 @@ func verifyPristineSuccessorMeter(req zeroMeterRequest) (zeroMeterResult,error) 
         len(gate.sessions)!=0 || len(gate.meterTails)!=0 {
         return empty,errors.New("successor meter contains prior or unverified state")
     }
-    var unexpected bool
+    // Xray may pre-register per-user StatsService counters at startup
+    // even when there has never been any traffic. Read the real raw
+    // counters; all must be zero, including users outside this request.
+    // A missing counter is NOT assumed zero by this global enumeration.
+    var dirty bool
     observed.manager.VisitCounters(func(name string, counter stats.Counter) bool {
-        if strings.HasPrefix(name,"user>>>") {
-            unexpected=true
+        if strings.HasPrefix(name,"user>>>") &&
+           (counter==nil || counter.Value()!=0) {
+            dirty=true
             return false
         }
         return true
     })
-    if unexpected {
-        return empty,errors.New("successor already has user StatsService counters")
+    if dirty {
+        return empty,errors.New("fresh successor has nonzero or invalid StatsService counters")
     }
     // A fresh WAL namespace contains only the process-lifetime lock. Never
     // infer emptiness from a missing inventory file while orphan files exist.
