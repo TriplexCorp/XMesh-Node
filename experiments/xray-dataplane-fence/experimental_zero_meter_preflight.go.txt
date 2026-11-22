@@ -128,6 +128,7 @@ func verifyPristineSuccessorMeter(req zeroMeterRequest) (zeroMeterResult,error) 
         SchemaVersion:1,Kind:zeroMeterKind,NodeID:req.NodeID,
         UserID:req.UserID,Nonce:req.Nonce,
         MeterEpoch:req.MeterEpoch,ReservationID:req.ReservationID,
+        Aliases:append([]signedCapAlias(nil),req.Aliases...),
         RuntimeID:runtime,InventorySHA256:emptySha256,
         ZeroInitialRawCounters:true,IsolatedNewWalRoot:true,
         AuthorizedBytes:0,CanSpend:false,CanStart:false,CanResume:false,
