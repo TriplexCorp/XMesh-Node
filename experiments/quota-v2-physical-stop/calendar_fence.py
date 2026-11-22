@@ -13,6 +13,8 @@ denial. No response here is proof of terminal metering or a quota refund.
 """
 import hashlib
 import os
+from pathlib import Path
+import tempfile
 import time
 import uuid
 
@@ -173,12 +175,107 @@ def _offhost_birth_registry_proof(panel, node, checkpoint):
     }
 
 
+def _verified_old_wal_charge_heads(state_fd, node, user, old, checkpoint, pinned,
+                                   measured):
+    """Require a Nexus-signed ACK covering EVERY fsynced old-user stream.
+
+    This is not terminal delivered-byte metering. A signed charge receipt
+    confirms conservative PRETRANSMIT byte debt is committed in SQL. An
+    off-host WAL BIRTH index proves a stream once existed; it cannot prove
+    that its last appended sequence was charged. Both are required before
+    completing the nonfinal predecessor stage.
+    """
+    import charge_worker
+    import meter_inventory_audit as registry
+
+    docker, directory = wal_transport._bound_journal()
+    state = docker.get("State") if isinstance(docker, dict) else None
+    if (not isinstance(state, dict) or docker.get("Id") != measured[0]
+            or state.get("StartedAt") != measured[1]
+            or state.get("Running") is not True or state.get("Pid") != measured[2]):
+        raise ValueError("old WAL charge receipt audit changed Xray PID")
+    dfd = journal_integrity._validate_directory(directory)
+    try:
+        names = sorted(name for name in os.listdir(dfd) if name.startswith("meter-"))
+        indexed, verified = registry.verify_meter_inventory(
+            dfd, names, journal_integrity._read_meter_wal,
+            journal_integrity._canonical_go)
+        signed_aliases = {alias["email"] for alias in old["aliasScopes"]}
+        expected = {}
+        rows = checkpoint.get("inboundMeters")
+        if not isinstance(rows, list):
+            raise ValueError("missing nonfinal old WAL per-alias observations")
+        for row in rows:
+            if (not isinstance(row, dict) or
+                    not isinstance(row.get("email"), str)):
+                raise ValueError("invalid old WAL inbound row identity")
+            for direction in ("uplink", "downlink"):
+                value = row.get(direction + "Bytes")
+                if type(value) is not int or not 0 <= value <= (1 << 63) - 1:
+                    raise ValueError("invalid old WAL accounting byte amount")
+                expected[(row["email"], direction)] = value
+        if set(row["email"] for row in rows) != signed_aliases:
+            raise ValueError("old WAL charge roster differs from signed Node policy")
+        state_names = os.listdir(state_fd)
+        charged = set()
+        heads = []
+        with tempfile.TemporaryDirectory(prefix="xmesh-calendar-old-wal-") as tmp:
+            pub = Path(tmp) / "nexus-pinned.pem"
+            wal_transport._write_public(pinned, pub)
+            for name in sorted(indexed):
+                birth = indexed[name]
+                if birth["runtimeId"] != measured[3]:
+                    if birth["email"].startswith(f"xmesh-u{user}--"):
+                        raise ValueError("unsettled older Xray runtime for this user")
+                    continue
+                if not birth["email"].startswith(f"xmesh-u{user}--"):
+                    continue
+                if birth["email"] not in signed_aliases:
+                    raise ValueError("unlisted old Xray alias has uncharged WAL")
+                key = (birth["email"], birth["direction"])
+                last = verified[name][0]
+                if key in charged or key not in expected or (
+                        last["nextBytes"] != expected[key]):
+                    raise ValueError("old user WAL total differs from signed inbound checkpoint")
+                raw = charge_worker._bytes_after_validation(
+                    dfd, name, verified[name][1])
+                lines = [wal_transport.observed.strict_json(line)
+                         for line in raw.splitlines()]
+                if (not lines or len(lines) != last["sequence"]
+                        or lines[-1]["digest"] != last["digest"]):
+                    raise ValueError("old Xray WAL sequence changed after independent audit")
+                position, _ = charge_worker._durable_cursor(
+                    state_fd, state_names, name, user, node,
+                    old, lines, pinned, pub)
+                if position != len(lines):
+                    raise ValueError("old Xray WAL has no signed Nexus charge receipt for its tail")
+                charged.add(key)
+                heads.append({
+                    "filename": name, "lastSequence": len(lines),
+                    "lastDigest": last["digest"],
+                    "conservativeBytes": last["nextBytes"],
+                })
+        if any(expected[k] != 0 and k not in charged for k in expected):
+            raise ValueError("unacknowledged byte-bearing old Xray WAL alias")
+        return {
+            "allOldStreamTailsNexusAcknowledged": True,
+            "verifiedStreamCount": len(heads),
+            "chargeHeadsSha256": hashlib.sha256(
+                wal_transport.observed.canonical(heads)).hexdigest(),
+            "finalMeterVerified": False, "refundableBytes": 0,
+            "canResume": False,
+        }
+    finally:
+        os.close(dfd)
+
+
 def _checked_saved(record, old, successor, runtime):
     if (not isinstance(record, dict)
             or set(record) != {
                 "nodeId", "userId", "predecessorId", "runtimeId",
                 "successorSha256", "scope", "observedFence",
-                "independentJournalSha256", "offhostBirthRegistry"}
+                "independentJournalSha256", "offhostBirthRegistry",
+                "oldWalChargeConfirmation"}
             or record["nodeId"] != old["nodeId"]
             or record["userId"] != old["userId"]
             or record["predecessorId"] != old["reservationId"]
@@ -207,6 +304,21 @@ def _checked_saved(record, old, successor, runtime):
             or (remote["offhostBirthIndexVerified"] is False
                 and remote["firstRemoteSnapshotWasOnlyBootstrap"] is True)):
         raise ValueError("calendar fence has no valid nonauthorizing off-host WAL proof")
+    charge = record["oldWalChargeConfirmation"]
+    if (not isinstance(charge, dict) or set(charge) != {
+            "allOldStreamTailsNexusAcknowledged", "verifiedStreamCount",
+            "chargeHeadsSha256", "finalMeterVerified", "refundableBytes",
+            "canResume"}
+            or charge["allOldStreamTailsNexusAcknowledged"] is not True
+            or type(charge["verifiedStreamCount"]) is not int
+            or not 0 <= charge["verifiedStreamCount"] <= 32
+            or not isinstance(charge["chargeHeadsSha256"], str)
+            or caps.HEX64.fullmatch(charge["chargeHeadsSha256"]) is None
+            or charge["finalMeterVerified"] is not False
+            or type(charge["refundableBytes"]) is not int
+            or charge["refundableBytes"] != 0
+            or charge["canResume"] is not False):
+        raise ValueError("calendar fence has no complete signed old WAL charge coverage")
     observed = record["observedFence"]
     scope = record["scope"]
     checkpoint = observed.get("observedCheckpoint") if isinstance(observed, dict) else None
@@ -373,6 +485,10 @@ def fence_successor(panel, node, user, state, socket_path, executable_pin):
         if (wal_transport._measure_quarantined_runtime(pins) != measured
                 or quarantine._enrolled_activation(panel, node) != enrolled):
             raise ValueError("old Xray or Node activation changed after WAL audit")
+        charge = _verified_old_wal_charge_heads(
+            fd, node, user, old, checkpoint, pinned, measured)
+        if wal_transport._measure_quarantined_runtime(pins) != measured:
+            raise ValueError("old Xray changed while verifying complete WAL charge receipts")
         record = {
             "nodeId": node, "userId": user,
             "predecessorId": old["reservationId"], "runtimeId": old["runtimeId"],
@@ -380,6 +496,7 @@ def fence_successor(panel, node, user, state, socket_path, executable_pin):
             "observedFence": snapshot,
             "independentJournalSha256": journal_sha,
             "offhostBirthRegistry": remote,
+            "oldWalChargeConfirmation": charge,
         }
         _checked_saved(record, old, preparation_sha, old["runtimeId"])
         quarantine._durable_store(fd, record, name)
