@@ -97,8 +97,13 @@ func TestQuotaV2FreshMeterRejectsCountersAndExistingSignedCaps(t *testing.T) {
     observed.Lock()
     manager:=observed.manager
     observed.Unlock()
-    counter,err:=manager.RegisterCounter(rawMeterName(req.Aliases[0].Email,"uplink"))
-    if err!=nil{t.Fatal(err)}
+    name:=rawMeterName(req.Aliases[0].Email,"uplink")
+    counter:=manager.GetCounter(name)
+    if counter==nil {
+        var err error
+        counter,err=manager.RegisterCounter(name)
+        if err!=nil{t.Fatal(err)}
+    }
     if _,err:=verifyPristineSuccessorMeter(req);err!=nil{
         t.Fatalf("a genuinely registered but zero-valued user counter is safe: %v",err)
     }
