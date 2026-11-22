@@ -237,8 +237,12 @@ def fence_successor(panel, node, user, state, socket_path, executable_pin):
             "successorSha256": digest, "scope": scope,
             "observedFence": snapshot,
         }
+        checkpoint = (snapshot.get("observedCheckpoint")
+                      if isinstance(snapshot, dict) else None)
+        if not isinstance(checkpoint, dict):
+            raise ValueError("old Xray did not return an auditable calendar WAL checkpoint")
         journal_digest = _independent_journal_digest(
-            snapshot["observedCheckpoint"], observed_before)
+            checkpoint, observed_before)
         if observed_before != wal_transport._measure_quarantined_runtime(pins):
             raise ValueError("Xray process changed during independent WAL audit")
         record["independentJournalSha256"] = journal_digest
