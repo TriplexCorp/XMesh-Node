@@ -28,6 +28,7 @@ from test_quota_v2_xray_user_inbound_drain import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "quota-v2-physical-stop"))
 from cap_install import fence_calendar_in_xray, install_in_xray
 from first_cap_handoff import verify_grant
+import journal_integrity
 from runtime_identity import trusted_runtime_identity
 
 MIB = 1024 * 1024
@@ -245,6 +246,17 @@ def run(xray, root, target, processes, scenario):
             assert checkpoint["reservationId"] == scope["reservationId"]
             assert checkpoint["finalMeterVerified"] is False
             assert checkpoint["refundableBytes"] == 0
+            # This disposable, direct-process fixture has no Docker mount.
+            # A synthetic mount mapping only exercises the independent
+            # byte-level verifier; the installed Agent validates a real
+            # independently inspected Docker binding before trusting it.
+            mount = {"Mounts": [{
+                "Source": str(root), "Destination": journal_integrity.JOURNAL_DEST,
+                "Type": "bind", "RW": True,
+            }]}
+            journal_sha = journal_integrity.verify_poststop_journal(
+                checkpoint, str(root), mount)
+            assert len(journal_sha) == 64
             assert {(row["email"], row["uplinkBytes"], row["downlinkBytes"])
                     for row in checkpoint["inboundMeters"]} == {
                         (alias["cdn"], 16384, 16384),
@@ -254,6 +266,8 @@ def run(xray, root, target, processes, scenario):
             assert not probe_echo(cdn, 1), "CDN old epoch survived irreversible fence"
         assert fence_calendar_in_xray(
             sock_path, server.pid, runtime, old_scope) == fence
+        assert journal_integrity.verify_poststop_journal(
+            checkpoint, str(root), mount) == journal_sha
         assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == old
         for kind in ("main", "cdn"):
             with open_stream(kind) as conn:
