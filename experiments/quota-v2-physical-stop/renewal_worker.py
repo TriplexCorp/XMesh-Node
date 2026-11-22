@@ -136,9 +136,11 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
             or not isinstance(panel, str) or not panel.startswith("https://")
             or type(node) is not int or node <= 0):
         raise ValueError("automatic renewal is permitted only in explicit root staging")
-    # Without durable WAL submission the server refuses a new grant. Do not
-    # bypass the signed WAL charge floor or pretend local counters are final.
-    wal_transport.run("sync", panel, node)
+    # First submit the actual fsynced byte-intent WAL, validate each Nexus
+    # Ed25519 charge receipt and persist a monotonic retry cursor. A signed
+    # birth-index head alone is NOT a PostgreSQL spending receipt.
+    import charge_worker
+    charge_worker.run(panel, node, state)
     pinned = wal_transport._panel_pin()
     jobs = pending_renewals(state, node, pinned)
     if not jobs:
