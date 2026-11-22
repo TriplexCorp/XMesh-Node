@@ -1,14 +1,12 @@
-// CI-only positive, signed per-process Xray byte-cap admission.
-// This is NOT a shipping API: callers must independently prove the
-// registered Node, signed policy, first Genesis, WAL completeness, and
-// remote PostgreSQL reservation before constructing the trusted context.
-// No path in production invokes this function. It cannot start Xray, bind
-// an inbound, settle traffic, or authorize refunds.
+// Signed spending permits for the source-pinned WAL-capable Xray.
+// The first permit requires independently verified Genesis and policy.
+// A renewal can only modify the existing live reservation.
 package xmeshdrain
 
 import (
     "bytes"
     "crypto/ed25519"
+    "crypto/sha256"
     "encoding/hex"
     "encoding/json"
     "errors"
@@ -24,6 +22,7 @@ import (
 
 const signedCapDomain = "XMESH_QUOTA_V2_XRAY_CAP_ADMISSION_V1\x00"
 const signedCapKind = "xmesh.quota-v2.xray-cap-admission"
+const signedCapRenewalKind = "xmesh.quota-v2.xray-cap-renewal"
 const maxSignedCapGrant = uint64(64 * 1024 * 1024)
 
 var signedCapHex64 = regexp.MustCompile("^[0-9a-f]{64}$")
@@ -138,7 +137,7 @@ func decodeCanonicalSignedCap(raw []byte) (signedCapEnvelope,[]byte,error) {
 }
 
 func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
-    expected signedCapContext, now int64) (signedCapPayload,error) {
+    expected signedCapContext, kind string, now int64) (signedCapPayload,error) {
     deny:=func(message string)(signedCapPayload,error) {
         return signedCapPayload{},errors.New("signed Xray cap: "+message)
     }
@@ -154,7 +153,7 @@ func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
         !ed25519.Verify(pinned,append([]byte(signedCapDomain),payloadBytes...),signature) {
         return deny("signature or signer invalid")
     }
-    if payload.SchemaVersion!=1 || payload.Kind!=signedCapKind ||
+    if payload.SchemaVersion!=1 || payload.Kind!=kind ||
         payload.NodeID<=0 || payload.UserID<=0 ||
         payload.ReservationRevision<=0 || !payload.CanSpend ||
         payload.CanStart || payload.CanResume ||
@@ -178,15 +177,17 @@ func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
         now>=payload.ValidUntilMs {
         return deny("invalid signed installation time or expired reservation")
     }
-    if payload.SharedCeilingBytes==0 ||
-        payload.SharedCeilingBytes>maxSignedCapGrant ||
-        payload.NodeCeilingBytes==0 ||
-        payload.NodeCeilingBytes>maxSignedCapGrant ||
-        payload.CdnCeilingBytes>maxSignedCapGrant ||
-        payload.WitnessedWalBytes!=0 || payload.WitnessedCdnBytes!=0 {
-        // Staged FIRST-GENESIS admission only. Nonzero-history issuance
-        // needs the separately tested complete WAL recovery path, not
-        // another zeroed StatsService or manually asserted unused bytes.
+    if payload.SharedCeilingBytes==0 || payload.NodeCeilingBytes==0 ||
+        payload.SharedCeilingBytes>maxSignedByteCeiling ||
+        payload.NodeCeilingBytes>maxSignedByteCeiling ||
+        payload.CdnCeilingBytes>maxSignedByteCeiling ||
+        payload.WitnessedWalBytes>min(payload.SharedCeilingBytes,payload.NodeCeilingBytes) ||
+        payload.WitnessedCdnBytes>min(payload.WitnessedWalBytes,payload.CdnCeilingBytes) {
+        return deny("invalid cumulative ceilings or witnessed usage")
+    }
+    if kind==signedCapKind && (payload.SharedCeilingBytes>maxSignedCapGrant ||
+        payload.NodeCeilingBytes>maxSignedCapGrant || payload.CdnCeilingBytes>maxSignedCapGrant ||
+        payload.WitnessedWalBytes!=0 || payload.WitnessedCdnBytes!=0) {
         return deny("only bounded first-genesis zero-spend cap supported")
     }
     if payload.NodeID!=expected.NodeID || payload.UserID!=expected.UserID ||
@@ -197,7 +198,7 @@ func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
         payload.MeterEpoch!=expected.MeterEpoch ||
         payload.ReservationID!=expected.ReservationID ||
         payload.ReservationRevision!=expected.ReservationRevision ||
-        payload.InventoryTailDigest!=expected.InventoryTailDigest {
+        (kind==signedCapKind && payload.InventoryTailDigest!=expected.InventoryTailDigest) {
         return deny("signed candidate conflicts with independent Node/runtime/lease")
     }
     if len(payload.AliasScopes)==0 || len(payload.AliasScopes)>16 ||
@@ -219,7 +220,7 @@ func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
     if !hasCDN && payload.CdnCeilingBytes!=0 {
         return deny("CDN budget without scoped CDN inbound")
     }
-    if !expected.FirstGenesisIndependentlyProved || expected.Current==nil {
+    if (kind==signedCapKind && !expected.FirstGenesisIndependentlyProved) || expected.Current==nil {
         return deny("first genesis or actual live meters unverified")
     }
     return payload,nil
@@ -233,7 +234,7 @@ func verifySignedCapCandidate(raw []byte, pinned ed25519.PublicKey,
 func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     expected signedCapContext) error {
     verifiedAt:=experimentalCapClockMs()
-    payload,err:=verifySignedCapCandidate(raw,pinned,expected,verifiedAt)
+    payload,err:=verifySignedCapCandidate(raw,pinned,expected,signedCapKind,verifiedAt)
     if err!=nil{return err}
     gate.Lock()
     defer gate.Unlock()
@@ -283,26 +284,7 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     // A crash before fsync leaves the grant unusable; reusing a file name
     // on restart is impossible without separately proven rollover.
     name:="positive-cap-u"+strconv.FormatInt(payload.UserID,10)+".json"
-    file:=filepath.Join(gate.journalDir,name)
-    fd,err:=os.OpenFile(file,os.O_WRONLY|os.O_CREATE|os.O_EXCL|
-        syscall.O_NOFOLLOW,0600)
-    if err!=nil{return fmt.Errorf("signed Xray cap: prior grant or unsafe file: %w",err)}
-    if _,err=fd.Write(raw);err!=nil{
-        fd.Close()
-        return fmt.Errorf("signed Xray cap: failed durable write: %w",err)
-    }
-    if err=fd.Sync();err!=nil{
-        fd.Close()
-        return fmt.Errorf("signed Xray cap: failed durable fsync: %w",err)
-    }
-    if err=fd.Close();err!=nil {
-        return fmt.Errorf("signed Xray cap: cannot close grant record: %w",err)
-    }
-    dir,err:=os.Open(gate.journalDir)
-    if err!=nil{return err}
-    err=dir.Sync()
-    _=dir.Close()
-    if err!=nil{return fmt.Errorf("signed Xray cap: grant directory fsync failed: %w",err)}
+    if err:=persistSignedCap(gate.journalDir,name,raw);err!=nil{return err}
     if expected.BeforeInstall!=nil {
         if err:=expected.BeforeInstall();err!=nil{return err}
     }
@@ -319,9 +301,152 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
         runtimeID:payload.RuntimeID,grantCeiling:payload.SharedCeilingBytes,
         nodeCeiling:payload.NodeCeilingBytes,cdnCeiling:payload.CdnCeilingBytes,
         validUntilMs:payload.ValidUntilMs,lastSeenMs:installedAt,
-        aliases:aliases,
+        aliases:aliases, signedGrant:payload, signedGrantDigest:sha256.Sum256(raw),
     }
     return nil
+}
+
+func persistSignedCap(directory, name string, raw []byte) error {
+	file := filepath.Join(directory, name)
+	fd, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL|
+		syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return fmt.Errorf("signed Xray cap: prior grant or unsafe file: %w", err)
+	}
+	if _, err = io.Copy(fd, bytes.NewReader(raw)); err != nil {
+		fd.Close()
+		return fmt.Errorf("signed Xray cap: failed durable write: %w", err)
+	}
+	if err = fd.Sync(); err != nil {
+		fd.Close()
+		return fmt.Errorf("signed Xray cap: failed durable fsync: %w", err)
+	}
+	if err = fd.Close(); err != nil {
+		return fmt.Errorf("signed Xray cap: cannot close grant record: %w", err)
+	}
+	dir, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	_ = dir.Close()
+	if err != nil {
+		return fmt.Errorf("signed Xray cap: grant directory fsync failed: %w", err)
+	}
+	return nil
+}
+
+// Update only an installed, still-valid permit in the same process. The WAL
+// and counters use the same lock, so live streams keep their charged bytes.
+func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapContext) error {
+	verifiedAt := experimentalCapClockMs()
+	payload, err := verifySignedCapCandidate(raw, pinned, expected, signedCapRenewalKind, verifiedAt)
+	if err != nil {
+		return err
+	}
+
+	gate.Lock()
+	defer gate.Unlock()
+	identity := "xmesh-u" + strconv.FormatInt(payload.UserID, 10)
+	cap := experimentalByteCaps.users[identity]
+	if !enabled || !experimentalByteCaps.strict || cap == nil ||
+		gate.runtimeID != payload.RuntimeID || cap.runtimeID != payload.RuntimeID {
+		return errors.New("signed Xray cap: renewal requires a live signed permit")
+	}
+	if u := gate.users[identity]; u != nil && (u.fenced || u.historicDebtUnresolved || u.lateCounterMutation) {
+		return errors.New("signed Xray cap: fenced or tainted user")
+	}
+	now := experimentalCapClockMs()
+	if cap.expired || now < cap.lastSeenMs || now >= cap.validUntilMs {
+		cap.expired = true
+		return errors.New("signed Xray cap: expired or nonmonotonic permit")
+	}
+	if now < verifiedAt || now >= payload.InstallBeforeMs {
+		return errors.New("signed Xray cap: renewal installation deadline changed")
+	}
+
+	prior := cap.signedGrant
+	digest := sha256.Sum256(raw)
+	if payload.ReservationRevision == prior.ReservationRevision && digest == cap.signedGrantDigest {
+		return nil
+	}
+	if (prior.Kind != signedCapKind && prior.Kind != signedCapRenewalKind) ||
+		payload.ReservationRevision-1 != prior.ReservationRevision ||
+		payload.Nonce == prior.Nonce ||
+		payload.NodeID != prior.NodeID || payload.UserID != prior.UserID ||
+		payload.ActivationReceiptSHA256 != prior.ActivationReceiptSHA256 ||
+		payload.PolicySHA256 != prior.PolicySHA256 ||
+		payload.AccountEpoch != prior.AccountEpoch || payload.MeterEpoch != prior.MeterEpoch ||
+		payload.ReservationID != prior.ReservationID ||
+		!reflect.DeepEqual(payload.AliasScopes, prior.AliasScopes) {
+		return errors.New("signed Xray cap: renewal changed reservation scope or skipped a revision")
+	}
+	if payload.IssuedAtMs < prior.IssuedAtMs || payload.ValidUntilMs < cap.validUntilMs ||
+		payload.SharedCeilingBytes < cap.grantCeiling || payload.NodeCeilingBytes < cap.nodeCeiling ||
+		payload.CdnCeilingBytes < cap.cdnCeiling ||
+		payload.SharedCeilingBytes-cap.grantCeiling > maxSignedCapGrant ||
+		payload.NodeCeilingBytes-cap.nodeCeiling > maxSignedCapGrant ||
+		payload.CdnCeilingBytes-cap.cdnCeiling > maxSignedCapGrant ||
+		payload.WitnessedWalBytes < prior.WitnessedWalBytes ||
+		payload.WitnessedCdnBytes < prior.WitnessedCdnBytes ||
+		payload.WitnessedWalBytes > cap.chargedAll || payload.WitnessedCdnBytes > cap.chargedCDN {
+		return errors.New("signed Xray cap: renewal regressed counters or exceeded bounded authority")
+	}
+	if expected.BeforeInstall != nil {
+		if err := expected.BeforeInstall(); err != nil {
+			return err
+		}
+	}
+	if err := verifyRenewalWAL(payload, expected.Current); err != nil {
+		return err
+	}
+
+	name := fmt.Sprintf("positive-cap-u%d-r%d.json", payload.UserID, payload.ReservationRevision)
+	if err := persistSignedCap(gate.journalDir, name, raw); err != nil {
+		return err
+	}
+	installedAt := experimentalCapClockMs()
+	if installedAt < now || installedAt >= cap.validUntilMs || installedAt >= payload.InstallBeforeMs {
+		if installedAt < now || installedAt >= cap.validUntilMs {
+			cap.expired = true
+		}
+		return errors.New("signed Xray cap: renewal expired during durable installation")
+	}
+	cap.grantCeiling = payload.SharedCeilingBytes
+	cap.nodeCeiling = payload.NodeCeilingBytes
+	cap.cdnCeiling = payload.CdnCeilingBytes
+	cap.validUntilMs = payload.ValidUntilMs
+	cap.lastSeenMs = installedAt
+	cap.signedGrant = payload
+	cap.signedGrantDigest = digest
+	return nil
+}
+
+// A signed Nexus head can lag behind new local WAL births. It must still be
+// part of the local index, whose files and live counters must all agree.
+func verifyRenewalWAL(payload signedCapPayload, current func(string, string) (uint64, error)) error {
+	if err := verifyMeterInventory(gate.journalDir); err != nil {
+		return err
+	}
+	inventory, err := readInventory(gate.journalDir)
+	if err != nil {
+		return err
+	}
+	found := payload.InventoryTailDigest == zeroCapInventory && payload.WitnessedWalBytes == 0
+	for _, birth := range inventory.steps {
+		if birth.Digest == payload.InventoryTailDigest {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("signed Xray cap: missing witnessed WAL inventory prefix")
+	}
+	aliases := make([]string, 0, len(payload.AliasScopes))
+	for _, scope := range payload.AliasScopes {
+		aliases = append(aliases, scope.Email)
+	}
+	return assertMeterLedgerMatchesCounters(aliases, current)
 }
 
 // All authenticated VLESS streams are denied until their exact inbound is

@@ -379,3 +379,130 @@ func TestV2SignedCapCannotPublishAfterInstallDeadlineOrClockRollback(t *testing.
         })
     }
 }
+
+func TestV2SignedRenewalKeepsWALAndCumulativeSpend(t *testing.T) {
+	dir, manager, p, expected, pub, priv := signedCapTestFixture(t)
+	if err := installSignedFirstGenesisCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	up := newCapCounter(t, manager, capMain, "uplink")
+	cdn := newCapCounter(t, manager, capCDN, "downlink")
+	if !capAttempt(t, up, capMain, "uplink", 40) || !capAttempt(t, cdn, capCDN, "downlink", 20) {
+		t.Fatal("cannot spend initial reserve")
+	}
+	snapshot, err := readInventory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected.FirstGenesisIndependentlyProved = false
+	p.Kind = signedCapRenewalKind
+	p.WitnessedWalBytes, p.WitnessedCdnBytes = 60, 20
+	p.InventoryTailDigest = snapshot.tail.Digest
+	p.SharedCeilingBytes, p.NodeCeilingBytes, p.CdnCeilingBytes = 120, 100, 25
+	p.ReservationRevision++
+	expected.ReservationRevision = p.ReservationRevision
+	p.Nonce = strings.Repeat("d", 64)
+	rejected := []struct {
+		name   string
+		change func(*signedCapPayload, *signedCapContext)
+	}{
+		{"revision gap", func(p *signedCapPayload, c *signedCapContext) { p.ReservationRevision++; c.ReservationRevision++ }},
+		{"foreign lease", func(p *signedCapPayload, c *signedCapContext) {
+			p.ReservationID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+			c.ReservationID = p.ReservationID
+		}},
+		{"foreign policy", func(p *signedCapPayload, c *signedCapContext) {
+			p.PolicySHA256 = strings.Repeat("a", 64)
+			c.PolicySHA256 = p.PolicySHA256
+		}},
+		{"unobserved spend", func(p *signedCapPayload, _ *signedCapContext) { p.WitnessedWalBytes++ }},
+		{"unknown WAL digest", func(p *signedCapPayload, _ *signedCapContext) { p.InventoryTailDigest = strings.Repeat("a", 64) }},
+		{"decreased ceiling", func(p *signedCapPayload, _ *signedCapContext) { p.CdnCeilingBytes = 20; p.NodeCeilingBytes = 69 }},
+		{"excess increment", func(p *signedCapPayload, _ *signedCapContext) { p.SharedCeilingBytes += maxSignedCapGrant }},
+	}
+	for _, test := range rejected {
+		bad, ctx := p, expected
+		test.change(&bad, &ctx)
+		if err := renewSignedCap(signedCapTestEnvelope(t, bad, priv), pub, ctx); err == nil {
+			t.Fatalf("renewed an invalid permit: %s", test.name)
+		}
+	}
+	raw := signedCapTestEnvelope(t, p, priv)
+	if err := renewSignedCap(raw, pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	record, err := os.ReadFile(filepath.Join(dir, "positive-cap-u101-r4.json"))
+	if err != nil || !bytes.Equal(record, raw) {
+		t.Fatal("renewed permit was not durably recorded")
+	}
+	if err := renewSignedCap(raw, pub, expected); err != nil {
+		t.Fatal("exact replay should be idempotent", err)
+	}
+	conflicting := p
+	conflicting.NodeCeilingBytes++
+	if err := renewSignedCap(signedCapTestEnvelope(t, conflicting, priv), pub, expected); err == nil {
+		t.Fatal("different permit reused the same revision")
+	}
+	if !capAttempt(t, cdn, capCDN, "downlink", 5) || capAttempt(t, cdn, capCDN, "downlink", 1) ||
+		!capAttempt(t, up, capMain, "uplink", 35) || capAttempt(t, up, capMain, "uplink", 1) {
+		t.Fatal("renewed cumulative limits did not retain prior debits")
+	}
+	all, cdnUsed := capValues(t)
+	if all != 100 || cdnUsed != 25 {
+		t.Fatalf("renewed spend diverged: %d/%d", all, cdnUsed)
+	}
+	if up.Value() != 75 || cdn.Value() != 25 {
+		t.Fatal("StatsService counters changed during renewal")
+	}
+
+	next := p
+	next.ReservationRevision++
+	next.Nonce = strings.Repeat("e", 64)
+	next.NodeCeilingBytes += 10
+	expected.ReservationRevision = next.ReservationRevision
+	if err := renewSignedCap(signedCapTestEnvelope(t, next, priv), pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	if !capAttempt(t, up, capMain, "uplink", 10) || capAttempt(t, up, capMain, "uplink", 1) {
+		t.Fatal("second renewal did not preserve cumulative spend")
+	}
+	expected.ReservationRevision = p.ReservationRevision
+	if err := renewSignedCap(raw, pub, expected); err == nil {
+		t.Fatal("older revision accepted after renewal")
+	}
+}
+
+func TestV2SignedRenewalRejectsWALLossAndFreshRuntime(t *testing.T) {
+	dir, manager, p, expected, pub, priv := signedCapTestFixture(t)
+	if err := installSignedFirstGenesisCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	up := newCapCounter(t, manager, capMain, "uplink")
+	if !capAttempt(t, up, capMain, "uplink", 1) {
+		t.Fatal("cannot create live WAL")
+	}
+	snapshot, err := readInventory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Kind = signedCapRenewalKind
+	p.ReservationRevision++
+	p.Nonce = strings.Repeat("d", 64)
+	p.WitnessedWalBytes = 1
+	p.InventoryTailDigest = snapshot.tail.Digest
+	p.SharedCeilingBytes++
+	expected.ReservationRevision = p.ReservationRevision
+	raw := signedCapTestEnvelope(t, p, priv)
+	if err := os.Remove(meterTestFile(t, dir, capMain, "uplink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := renewSignedCap(raw, pub, expected); err == nil {
+		t.Fatal("renewed with a missing indexed WAL")
+	}
+	gate.Lock()
+	experimentalByteCaps.users = nil
+	gate.Unlock()
+	if err := renewSignedCap(raw, pub, expected); err == nil {
+		t.Fatal("renewal opened fresh Xray state")
+	}
+}

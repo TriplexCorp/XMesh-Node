@@ -234,9 +234,33 @@ def run(xray, root, target, processes, *, restart):
         print("PASS: SIGKILL after 32768 accounted bytes preserved the WAL and denied reuse by new Xray")
         return
 
-    for name, echoed in (("cdn", MIB), ("main", 3 * MIB)):
+    def renew(main_echoed, ceiling, revision):
+        index = (root / "xmesh-meter-inventory-v1.jsonl").read_bytes()
+        tail = json.loads(index.splitlines()[-1])["digest"]
+        timestamp = time.time_ns() // 1_000_000
+        next_scope = dict(scope, nonce=digest(), revision=revision)
+        renewed = grant_for(dict(
+            claims, kind="xmesh.quota-v2.xray-cap-renewal",
+            nonce=next_scope["nonce"], reservationRevision=revision,
+            inventoryTailDigest=tail, witnessedWalBytes=2 * (main_echoed + MIB),
+            witnessedCdnBytes=2 * MIB, sharedCeilingBytes=ceiling, nodeCeilingBytes=ceiling,
+            issuedAtMs=timestamp, installBeforeMs=timestamp + 90_000,
+            validUntilMs=timestamp + 180_000,
+        ))
+        receipt = install_in_xray(sock_path, server.pid, runtime, b"", renewed, next_scope)
+        assert install_in_xray(sock_path, server.pid, runtime, b"", renewed, next_scope) == receipt
+        assert (root / f"positive-cap-u{user}-r{revision}.json").read_bytes() == renewed
+        return renewed, next_scope
+
+    older_renewal = None
+    for name, echoed in (("cdn", MIB), ("main", 5 * MIB)):
         with open_stream(name) as sock:
-            for _ in range(echoed // 16384):
+            for sent in range(0, echoed, 16384):
+                if name == "main" and sent == MIB:
+                    older_renewal = renew(sent, 10 * MIB, 2)
+                if name == "main" and sent == 3 * MIB:
+                    renew(sent, 12 * MIB, 3)
+                    reject(sock_path, server.pid, runtime, b"", *older_renewal)
                 echo_bytes(sock, 16384)
             assert not probe_echo(sock, 1), f"{name} delivered bytes past its limit"
         direction = query_direction_counters(xray, api_port, alias[name])
@@ -250,7 +274,7 @@ def run(xray, root, target, processes, *, restart):
             assert not probe_echo(sock, 1), "new VLESS stream obtained extra budget"
     reject(sock_path, server.pid, runtime, genesis, grant, scope)
     assert server.poll() is None and client.poll() is None, "quota exhaustion killed Xray"
-    print("PASS: local signed grant enabled live VLESS; 8 MiB bidirectional bytes, including 2 MiB CDN; WAL and StatsService exact")
+    print("PASS: two signed renewals on one live VLESS stream; 12 MiB total, including 2 MiB CDN; WAL and StatsService exact")
 
 
 def wait_for_peer(path, process):

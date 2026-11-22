@@ -31,7 +31,9 @@ def install_in_xray(path, trusted_pid, runtime, genesis, grant, scope):
             or parent.st_mode & 0o077 or not stat.S_ISSOCK(endpoint.st_mode)
             or endpoint.st_uid != uid or endpoint.st_mode & 0o077):
         raise ValueError("Xray control socket is outside the private service boundary")
-    if not (0 < len(genesis) <= 4096 and 0 < len(grant) <= 8192):
+    # Renewal requests have an empty Genesis field. Xray validates the
+    # signed kind and requires an installed permit before accepting them.
+    if not (len(genesis) <= 4096 and 0 < len(grant) <= 8192):
         raise ValueError("invalid signed Xray admission lengths")
     body = json.dumps({
         "genesis": base64.b64encode(genesis).decode("ascii"),

@@ -31,6 +31,8 @@ type experimentalByteCap struct {
     lastSeenMs int64
     expired bool
     aliases map[string]bool // exact alias -> CDN marker
+    signedGrant signedCapPayload
+    signedGrantDigest [32]byte
 }
 
 // Byte-cap activation is deliberately absent from the shipping protocol;

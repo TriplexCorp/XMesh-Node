@@ -182,9 +182,6 @@ func (c *localCapControl) admit(req localCapRequest) (string, error) {
 		return "", err
 	}
 	genesisVerifiedAt := experimentalCapClockMs()
-	if !c.verifyGenesis(req.Genesis, runtime, genesisVerifiedAt) {
-		return "", errors.New("invalid Nexus first-genesis proof")
-	}
 	scope := req.Scope
 	if !signedCapHex64.MatchString(scope.Nonce) {
 		return "", errors.New("invalid independent request nonce")
@@ -192,6 +189,14 @@ func (c *localCapControl) admit(req localCapRequest) (string, error) {
 	envelope, _, err := decodeCanonicalSignedCap(req.Grant)
 	if err != nil || envelope.Payload.Nonce != scope.Nonce {
 		return "", errors.New("signed cap request nonce mismatch")
+	}
+	renewal := envelope.Payload.Kind == signedCapRenewalKind
+	if renewal {
+		if len(req.Genesis) != 0 {
+			return "", errors.New("renewal cannot include a Genesis proof")
+		}
+	} else if !c.verifyGenesis(req.Genesis, runtime, genesisVerifiedAt) {
+		return "", errors.New("invalid Nexus first-genesis proof")
 	}
 	observed.Lock()
 	manager := observed.manager
@@ -227,10 +232,13 @@ func (c *localCapControl) admit(req localCapRequest) (string, error) {
 		RuntimeID:               runtime, PolicySHA256: scope.PolicySHA256, AccountEpoch: scope.AccountEpoch,
 		MeterEpoch: scope.MeterEpoch, ReservationID: scope.ReservationID,
 		ReservationRevision: scope.Revision, InventoryTailDigest: zeroCapInventory,
-		Aliases: scope.Aliases, FirstGenesisIndependentlyProved: true, Current: current,
+		Aliases: scope.Aliases, FirstGenesisIndependentlyProved: !renewal, Current: current,
 		BeforeInstall: func() error {
 			if err := verifyObservedCounterRegistry(manager, "xmesh-u"+strconv.FormatInt(scope.UserID, 10), aliases); err != nil {
 				return err
+			}
+			if renewal {
+				return nil
 			}
 			now := experimentalCapClockMs()
 			if now < genesisVerifiedAt || !c.verifyGenesis(req.Genesis, runtime, now) {
@@ -238,6 +246,9 @@ func (c *localCapControl) admit(req localCapRequest) (string, error) {
 			}
 			return nil
 		},
+	}
+	if renewal {
+		return runtime, renewSignedCap(req.Grant, c.signer, expected)
 	}
 	if err := installSignedFirstGenesisCap(req.Grant, c.signer, expected); err != nil {
 		return "", err
