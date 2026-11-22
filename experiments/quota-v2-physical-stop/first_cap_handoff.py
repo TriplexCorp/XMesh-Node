@@ -404,6 +404,28 @@ def verify_renewal(raw, previous, pinned, challenge):
     }
 
 
+def _persist_renewal_request(state_fd, node_id, user_id, previous_revision,
+                             request_challenge):
+    """A lost XSP/2 response must retry the original SQL request identity."""
+    if (not _int(node_id, 1) or not _int(user_id, 1)
+            or not _int(previous_revision, 1, 2**63 - 2)
+            or not isinstance(request_challenge, str)
+            or HEX64.fullmatch(request_challenge) is None):
+        raise ValueError("invalid durable renewal request identity")
+    name = f"genesis-renewal-request-u{user_id}-r{previous_revision}.json"
+    intent = {"nodeId": node_id, "userId": user_id,
+              "previousRevision": previous_revision,
+              "requestChallenge": request_challenge}
+    try:
+        saved = confirmed_lease._identity_file(state_fd, name, 4096)
+    except FileNotFoundError:
+        quarantine._durable_store(state_fd, intent, name)
+    else:
+        if saved != intent:
+            raise ValueError("renewal retry replaced a fsynced request nonce")
+    return name
+
+
 def fetch_and_install_renewal(panel, node_id, user_id, state, socket_path,
                               executable_pin, request_challenge, previous_revision):
     if (os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
@@ -444,22 +466,8 @@ def fetch_and_install_renewal(panel, node_id, user_id, state, socket_path,
                 or prior["policySha256"] != staged["policySha256"]
                 or prior["activationReceiptSha256"] != activation):
             raise ValueError("previous spending permit differs from the original Xray scope")
-        # The nonce is durable BEFORE contacting Nexus. If its response is
-        # lost after COMMIT, the next Agent poll must retry this exact
-        # request and cannot accidentally claim a second revision.
-        request_name = f"genesis-renewal-request-u{user_id}-r{previous_revision}.json"
-        request_intent = {
-            "nodeId": node_id, "userId": user_id,
-            "previousRevision": previous_revision,
-            "requestChallenge": request_challenge,
-        }
-        try:
-            prior_intent = confirmed_lease._identity_file(fd, request_name, 4096)
-        except FileNotFoundError:
-            quarantine._durable_store(fd, request_intent, request_name)
-        else:
-            if prior_intent != request_intent:
-                raise ValueError("renewal retry replaced a fsynced request nonce")
+        # Persist exact nonce before the first possible SQL COMMIT.
+        _persist_renewal_request(fd,node_id,user_id,previous_revision,request_challenge)
         raw = quarantine._post_quarantined_desired({
             "nodeId": node_id, "userId": user_id, "requestChallenge": request_challenge,
             "measurement": {"containerId": measured[0], "hostPid": measured[2],
