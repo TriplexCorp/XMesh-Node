@@ -127,8 +127,9 @@ class VlessIngressTests(unittest.TestCase):
             self.addCleanup(os.close, fd)
             measured_a = ("c"*64, "2026-01-01T00:00:00Z", os.getpid(), RUNTIME_A)
             measured_b = ("d"*64, "2026-01-02T00:00:00Z", os.getpid(), RUNTIME_B)
-            a = "/proc/test/xray-a"
-            b = "/proc/test/xray-b"
+            a, b = str(Path(folder) / "xray-a"), str(Path(folder) / "xray-b")
+            Path(a).mkdir(mode=0o700)
+            Path(b).mkdir(mode=0o700)
             with (mock.patch.object(ingress, "target", side_effect=[a, b, b, b]),
                   mock.patch.object(ingress.wal_transport.runtime_identity,
                                     "trusted_runtime_identity",
@@ -140,11 +141,17 @@ class VlessIngressTests(unittest.TestCase):
                 ingress.publish(fd, signed_claims(), measured_a)
                 self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), a)
                 self.assertEqual(conn.return_value.__enter__.call_count, 2)
+                for call in peer.connect.call_args_list:
+                    unix_path = call.args[0]
+                    self.assertTrue(unix_path.startswith("/proc/self/fd/"))
+                    self.assertLess(len(unix_path.encode()), 108)
                 # Wrong predecessor route cannot replace an existing signed epoch.
                 with self.assertRaisesRegex(ValueError, "predecessor"):
                     ingress.publish(fd, signed_claims(RUNTIME_B), measured_b)
                 self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), a)
-            self.assertEqual(os.listdir(folder), [f"ingress-u{USER}"])
+            self.assertEqual(sorted(os.listdir(folder)), sorted([
+                f"ingress-u{USER}", "xray-a", "xray-b",
+            ]))
 
     def test_non_ci_frontend_must_not_spoof_github_runner(self):
         with mock.patch.dict(os.environ, {
