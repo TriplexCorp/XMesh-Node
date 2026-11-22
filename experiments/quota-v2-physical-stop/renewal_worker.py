@@ -91,9 +91,17 @@ def latest_signed_cap(fd, names, node, user, pinned):
 def _candidate(fd, names, node, user, pinned, now):
     original = latest_signed_cap(fd, names, node, user, pinned)
     if now >= original["validUntilMs"]:
-        if _successor_filename(user, original) not in names:
-            return user, 0, _successor_nonce(original)
-        return None
+        successor_name = _successor_filename(user, original)
+        if successor_name in names:
+            # An existing pathname alone does not prove a prepared successor.
+            # Re-verify the immutable, independently pinned signature on each
+            # bounded scan; damaged evidence fails closed and is logged.
+            saved = lease._identity_file(fd, successor_name, 16384)
+            _verify_successor_reply(
+                saved, original, node, user, _successor_nonce(original),
+                pinned, now)
+            return None
+        return user, 0, _successor_nonce(original)
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
         return None
     revision = original["reservationRevision"]
@@ -230,6 +238,67 @@ def _successor_nonce(previous):
     return hashlib.sha256(raw.encode("ascii")).hexdigest()
 
 
+def _verify_successor_reply(response, old, node, user, challenge, pinned, now):
+    """Authenticate durable zero-authority successor evidence on EVERY retry.
+
+    This is only a preparation receipt, never a replacement Xray permit.
+    A corrupt or expired local marker must not silently suppress further
+    admission processing or be mistaken for successfully installed capacity.
+    """
+    if (not isinstance(response, dict)
+            or set(response) != {"status", "nodeId", "userId", "signedEnvelope"}
+            or response["status"] != "prepared_calendar_successor"
+            or type(response["nodeId"]) is not int or response["nodeId"] != node
+            or type(response["userId"]) is not int or response["userId"] != user
+            or not isinstance(response["signedEnvelope"], str)
+            or not 0 < len(response["signedEnvelope"]) <= 8192):
+        raise ValueError("unexpected successor response")
+    raw = response["signedEnvelope"].encode("utf-8")
+    envelope = wal_transport.observed.strict_json(raw)
+    if (raw != wal_transport.observed.canonical(envelope)
+            or not isinstance(envelope, dict)):
+        raise ValueError("noncanonical successor signature envelope")
+    with tempfile.TemporaryDirectory(prefix="xmesh-successor-") as tmp:
+        public = os.path.join(tmp, "pinned.pem")
+        wal_transport._write_public(pinned, public)
+        caps._signed(envelope, b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\\x00", pinned, public)
+    payload = envelope["payload"]
+    expected = {
+        "schemaVersion": 1, "kind": "xmesh.quota-v2.calendar-successor-prepared",
+        "nodeId": node, "userId": user, "nonce": challenge,
+        "activationReceiptSha256": old["activationReceiptSha256"],
+        "policySha256": old["policySha256"],
+        "predecessorRuntimeId": old["runtimeId"],
+        "predecessorId": old["reservationId"],
+        "accountEpoch": old["accountEpoch"],
+        "authorizedBytes": 0, "canSpend": False,
+        "canStart": False, "canResume": False,
+        "finalMeterVerified": False, "refundableBytes": 0,
+    }
+    if (not isinstance(payload, dict)
+            or set(payload) != set(expected) | {
+                "meterEpoch", "reservationId", "issuedAtMs", "validUntilMs"}):
+        raise ValueError("successor changes predecessor scope or authority")
+    for key, value in expected.items():
+        if type(payload.get(key)) is not type(value) or payload[key] != value:
+            raise ValueError("successor changes predecessor scope or authority")
+    for key in ("meterEpoch", "reservationId"):
+        value = payload[key]
+        if (not isinstance(value, str) or lease.UUID.fullmatch(value) is None
+                or str(uuid.UUID(value)) != value or value == old[key]):
+            raise ValueError("successor lacks a distinct valid meter identity")
+    if payload["meterEpoch"] == payload["reservationId"]:
+        raise ValueError("successor reuses its meter epoch as a reservation")
+    if (type(now) is not int or now <= 0
+            or type(payload["issuedAtMs"]) is not int
+            or type(payload["validUntilMs"]) is not int
+            or not old["validUntilMs"] <= payload["issuedAtMs"] <= now
+            or not now < payload["validUntilMs"]
+            or payload["validUntilMs"] - payload["issuedAtMs"] > 120_000):
+        raise ValueError("successor preparation expired or has invalid clock")
+    return payload
+
+
 def _prepare_successor(panel, state, node, user, challenge):
     fd, lock = quarantine._locked_private_state(state)
     try:
@@ -238,7 +307,11 @@ def _prepare_successor(panel, state, node, user, challenge):
         old = latest_signed_cap(fd, names, node, user, pinned)
         now = time.time_ns() // 1_000_000
         name = _successor_filename(user, old)
-        if name in names or now < old["validUntilMs"] or challenge != _successor_nonce(old):
+        if now < old["validUntilMs"] or challenge != _successor_nonce(old):
+            return
+        if name in names:
+            saved = lease._identity_file(fd, name, 16384)
+            _verify_successor_reply(saved, old, node, user, challenge, pinned, now)
             return
         active = quarantine._enrolled_activation(panel, node)
         activation = active["activationReceiptSha256"]
@@ -248,35 +321,7 @@ def _prepare_successor(panel, state, node, user, challenge):
             "nodeId": node, "userId": user, "requestChallenge": challenge,
             "calendarSuccessor": {"predecessorId": old["reservationId"]},
         }, state, quarantine.CAP_DELIVERY_PATH))
-        if (not isinstance(response, dict)
-                or set(response) != {"status", "nodeId", "userId", "signedEnvelope"}
-                or response["status"] != "prepared_calendar_successor"
-                or response["nodeId"] != node or response["userId"] != user):
-            raise ValueError("unexpected successor response")
-        with tempfile.TemporaryDirectory(prefix="xmesh-successor-") as tmp:
-            public = os.path.join(tmp, "pinned.pem")
-            wal_transport._write_public(pinned, public)
-            envelope = wal_transport.observed.strict_json(response["signedEnvelope"].encode())
-            caps._signed(envelope, b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\x00", pinned, public)
-        payload = envelope["payload"]
-        expected = {
-            "schemaVersion": 1, "kind": "xmesh.quota-v2.calendar-successor-prepared",
-            "nodeId": node, "userId": user, "nonce": challenge,
-            "activationReceiptSha256": activation, "policySha256": old["policySha256"],
-            "predecessorRuntimeId": old["runtimeId"], "predecessorId": old["reservationId"],
-            "accountEpoch": old["accountEpoch"], "authorizedBytes": 0,
-            "canSpend": False, "canStart": False, "canResume": False,
-            "finalMeterVerified": False, "refundableBytes": 0,
-        }
-        for key, value in expected.items():
-            if type(payload.get(key)) is not type(value) or payload[key] != value:
-                raise ValueError("successor changes predecessor scope or authority")
-        if (set(payload) != set(expected) | {"meterEpoch", "reservationId", "issuedAtMs", "validUntilMs"}
-                or any(str(uuid.UUID(payload[k])) != payload[k] or payload[k] == old[k]
-                       for k in ("meterEpoch", "reservationId"))
-                or type(payload["issuedAtMs"]) is not int or type(payload["validUntilMs"]) is not int
-                or not old["validUntilMs"] <= payload["issuedAtMs"] < payload["validUntilMs"]):
-            raise ValueError("successor lacks a distinct valid meter identity")
+        _verify_successor_reply(response, old, node, user, challenge, pinned, now)
         quarantine._durable_store(fd, response, name)
     finally:
         os.close(lock)
