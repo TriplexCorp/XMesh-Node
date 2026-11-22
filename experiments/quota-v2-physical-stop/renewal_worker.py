@@ -183,8 +183,21 @@ def pending_renewals(state, node, pinned, now=None):
         # Durable round-robin: wall-clock slots can repeat or skip whenever
         # a systemd run exceeds 20 seconds; neither case may starve users.
         selected = _next_scan_batch(fd, selected, node)
-        return [item for user in selected
-                if (item := _candidate(fd, names, node, user, pinned, instant)) is not None]
+        jobs = []
+        for user in selected:
+            try:
+                item = _candidate(fd, names, node, user, pinned, instant)
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                # A damaged signed receipt belongs to THIS user. Its cap
+                # remains closed, but it must not prevent other users in the
+                # same bounded batch from reaching their verified renewals.
+                # Never print signed payloads, paths or credentials.
+                print(f"Quota V2 user {user} renewal evidence refused: "
+                      f"{type(error).__name__}", flush=True)
+                continue
+            if item is not None:
+                jobs.append(item)
+        return jobs
     finally:
         os.close(lock)
         os.close(fd)
