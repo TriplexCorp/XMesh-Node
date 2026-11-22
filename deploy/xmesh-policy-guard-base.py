@@ -964,16 +964,20 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         limit = user.get("limitBytes", 0)
         expires = user["expireAtMs"]
         fresh = not offline and policy["issuedAtMs"] > int(record.get("authorizedAtMs", -1))
-        # A genuine, newer signed panel revision may acknowledge usage, renew
-        # expiry, increase the plan, or reset metering. An identical policy
-        # poll never refills a depleted local allowance.
-        newly_authorized = (
-            fresh and (
-                (user["panelUsedBytes"] != previous and (policy.get("version") != 2 or limit > 0)) or
-                limit > int(record.get("limitBytes", 0)) or
-                expires > int(record.get("expireAtMs", 0)) or
-                record.get("revokedReason") == "policy-expired"
-            )
+        # V1 panelUsedBytes aggregates OTHER Nodes. A newer signed policy
+        # reporting their usage is NOT an acknowledgement of this Node's
+        # unreported bytes and must never reset its durable offline budget.
+        # V2's node-bound signed reservation carries its own acknowledgement.
+        plan_extended = (
+            limit > int(record.get("limitBytes", 0))
+            or expires > int(record.get("expireAtMs", 0))
+        )
+        newly_authorized = fresh and plan_extended
+        # A policy that merely replaces an expired signature may restore
+        # admission using the SAME old local anchor and remaining allowance.
+        # It cannot refill the budget or resolve a previous quota denial.
+        expired_policy_refreshed = (
+            fresh and record.get("revokedReason") == "policy-expired"
         )
         reservation_reason = None
         if policy.get("version") == 2 and limit > 0:
@@ -993,7 +997,13 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
                     record["budget"] = None
                 elif record.get("budget") is not None:
                     record["budget"] = min(int(record["budget"]), budget)
+                if expired_policy_refreshed:
+                    record["revoked"] = False
+                    record.pop("revokedReason", None)
             if not offline:
+                # Keep the latest aggregate usage as metadata, not as a
+                # node-local receipt or a new allowance anchor.
+                record["panelUsedBytes"] = user["panelUsedBytes"]
                 record["authorizedAtMs"] = max(int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
                 record["limitBytes"] = limit
                 record["expireAtMs"] = expires
