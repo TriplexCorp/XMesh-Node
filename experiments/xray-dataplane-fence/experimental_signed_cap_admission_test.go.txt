@@ -472,6 +472,53 @@ func TestV2SignedRenewalKeepsWALAndCumulativeSpend(t *testing.T) {
 	}
 }
 
+func TestV2SignedMixedMainTopupKeepsCDNSubCapExhausted(t *testing.T) {
+    dir, manager, p, expected, pub, priv := signedCapTestFixture(t)
+    if err := installSignedFirstGenesisCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal(err)
+    }
+    main := newCapCounter(t, manager, capMain, "uplink")
+    cdn := newCapCounter(t, manager, capCDN, "downlink")
+    if !capAttempt(t, cdn, capCDN, "downlink", 20) ||
+        !capAttempt(t, main, capMain, "uplink", 30) {
+        t.Fatal("could not precharge the original independent MAIN/CDN grant")
+    }
+    snapshot, err := readInventory(dir)
+    if err != nil {
+        t.Fatal(err)
+    }
+    expected.FirstGenesisIndependentlyProved = false
+    p.Kind = signedCapRenewalKind
+    p.WitnessedWalBytes = 50
+    p.WitnessedCdnBytes = 20
+    p.InventoryTailDigest = snapshot.tail.Digest
+    p.SharedCeilingBytes = 140
+    p.NodeCeilingBytes = 140
+    // Nexus's immutable mixed CDN hold is already consumed. An independently
+    // signed MAIN refill MUST leave this cumulative class ceiling unchanged.
+    p.CdnCeilingBytes = 20
+    p.ReservationRevision++
+    expected.ReservationRevision = p.ReservationRevision
+    p.Nonce = strings.Repeat("d", 64)
+    if err := renewSignedCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal(err)
+    }
+    if capAttempt(t, cdn, capCDN, "downlink", 1) || cdn.Value() != 20 {
+        t.Fatal("MAIN renewal silently refilled the fixed CDN class hold")
+    }
+    if !capAttempt(t, main, capMain, "uplink", 90) {
+        t.Fatal("MAIN could not continue after independently exhausted CDN quota")
+    }
+    if capAttempt(t, main, capMain, "uplink", 1) {
+        t.Fatal("MAIN exceeded its own new finite signed cumulative ceiling")
+    }
+    all, usedCDN := capValues(t)
+    if all != 140 || usedCDN != 20 || main.Value() != 120 || cdn.Value() != 20 {
+        t.Fatalf("mixed renewal changed CDN spending: %d/%d MAIN=%d CDN=%d",
+            all, usedCDN, main.Value(), cdn.Value())
+    }
+}
+
 func TestV2SignedRenewalRejectsWALLossAndFreshRuntime(t *testing.T) {
 	dir, manager, p, expected, pub, priv := signedCapTestFixture(t)
 	if err := installSignedFirstGenesisCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
