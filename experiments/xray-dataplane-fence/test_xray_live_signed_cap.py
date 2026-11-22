@@ -26,7 +26,7 @@ from test_quota_v2_xray_user_inbound_drain import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "quota-v2-physical-stop"))
-from cap_install import install_in_xray
+from cap_install import fence_calendar_in_xray, install_in_xray
 from first_cap_handoff import verify_grant
 from runtime_identity import trusted_runtime_identity
 
@@ -216,6 +216,52 @@ def run(xray, root, target, processes, scenario):
     reject(sock_path, server.pid, runtime, genesis, canonical(forged) + b"\n", scope)
     install_in_xray(sock_path, server.pid, runtime, genesis, grant, scope)
     assert (root / f"positive-cap-u{user}.json").read_bytes() == grant
+
+    if scenario == "calendar-fence":
+        # Genuine loopback VLESS from MAIN and CDN exists under ONE signed
+        # reservation before the old-process barrier. The local agent will
+        # only reach this IPC after verifying Nexus's ZERO-SPEND successor.
+        with open_stream("main") as main, open_stream("cdn") as cdn:
+            echo_bytes(main, 16384)
+            echo_bytes(cdn, 16384)
+            old = {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")}
+            assert len(old) == 4
+            old_scope = {
+                "email": alias["cdn"], "nodeId": node, "userId": user,
+                "epoch": scope["accountEpoch"],
+                "meterEpoch": scope["meterEpoch"],
+                "reservationId": scope["reservationId"],
+                "revision": scope["revision"],
+                "revocationId": str(uuid.uuid5(
+                    uuid.UUID("becd936f-23a2-5a5a-92eb-c277f259f70a"),
+                    scope["reservationId"])),
+            }
+            fence = fence_calendar_in_xray(
+                sock_path, server.pid, runtime, old_scope)
+            assert fence["drained"] is True and fence["fenced"] is True
+            assert fence["finalMeterVerified"] is False and fence["refundable"] is False
+            checkpoint = fence["observedCheckpoint"]
+            assert checkpoint["runtimeId"] == runtime
+            assert checkpoint["reservationId"] == scope["reservationId"]
+            assert checkpoint["finalMeterVerified"] is False
+            assert checkpoint["refundableBytes"] == 0
+            assert {(row["email"], row["uplinkBytes"], row["downlinkBytes"])
+                    for row in checkpoint["inboundMeters"]} == {
+                        (alias["cdn"], 16384, 16384),
+                        (alias["main"], 16384, 16384),
+                    }
+            assert not probe_echo(main, 1), "MAIN old epoch survived irreversible fence"
+            assert not probe_echo(cdn, 1), "CDN old epoch survived irreversible fence"
+        assert fence_calendar_in_xray(
+            sock_path, server.pid, runtime, old_scope) == fence
+        assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == old
+        for kind in ("main", "cdn"):
+            with open_stream(kind) as conn:
+                assert not probe_echo(conn, 1), "new connection reopened an old signed epoch"
+        reject(sock_path, server.pid, runtime, genesis, grant, scope)
+        assert server.poll() is None and client.poll() is None
+        print("PASS: real mixed MAIN/CDN VLESS old epoch fenced on measured PID; WAL unchanged; 0 refund/resume authority")
+        return
 
     if scenario == "expiry":
         with open_stream("main") as sock:
@@ -408,6 +454,7 @@ if __name__ == "__main__":
     scenario("renewal")
     scenario("restart")
     scenario("expiry")
+    scenario("calendar-fence")
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft != resource.RLIM_INFINITY and soft < 4096:
         assert hard == resource.RLIM_INFINITY or hard >= 4096
