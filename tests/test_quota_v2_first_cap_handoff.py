@@ -434,6 +434,31 @@ class FirstCapHandoffTests(unittest.TestCase):
                     calendar_fence.fence_successor(
                         "https://isolated.test", self.node, 100, str(state),
                         path, "e" * 64)
+            for field, value in (
+                ("offhostBirthRegistry", dict(
+                    record_original["offhostBirthRegistry"], canResume=True)),
+                ("offhostBirthRegistry", dict(
+                    record_original["offhostBirthRegistry"],
+                    offhostBirthIndexVerified=False,
+                    firstRemoteSnapshotWasOnlyBootstrap=True)),
+                ("oldWalChargeConfirmation", dict(
+                    record_original["oldWalChargeConfirmation"],
+                    allOldStreamTailsNexusAcknowledged=False)),
+                ("oldWalChargeConfirmation", dict(
+                    record_original["oldWalChargeConfirmation"],
+                    verifiedStreamCount=True)),
+                ("oldWalChargeConfirmation", dict(
+                    record_original["oldWalChargeConfirmation"],
+                    refundableBytes=1)),
+            ):
+                tampered = copy.deepcopy(record_original)
+                tampered[field] = value
+                marker.write_bytes(self.guard.canonical(tampered))
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    calendar_fence.fence_successor(
+                        "https://isolated.test", self.node, 100, str(state),
+                        path, "e" * 64)
+            marker.write_bytes(self.guard.canonical(record_original))
             positive.assert_not_called()
 
     def test_calendar_journal_audit_refuses_foreign_xray_or_missing_birth(self):
