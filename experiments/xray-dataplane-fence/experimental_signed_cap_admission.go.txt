@@ -17,6 +17,7 @@ import (
     "reflect"
     "regexp"
     "strconv"
+    "time"
     "syscall"
 )
 
@@ -259,7 +260,7 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     if running:=experimentalByteCaps.users[identity];running!=nil {
         // Lost local acknowledgment is recoverable only against the same
         // in-memory first revision. Do not touch its balance or deadline.
-        if running.expired || lockedAt<running.lastSeenMs ||
+        if checkExperimentalCapTimeLocked(running,lockedAt)!=nil ||
             running.signedGrant.Kind!=signedCapKind ||
             running.signedGrantDigest!=sha256.Sum256(raw) {
             return errors.New("signed Xray cap: a newer or different live reservation exists")
@@ -302,13 +303,29 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     if experimentalByteCaps.users==nil {
         experimentalByteCaps.users=map[string]*experimentalByteCap{}
     }
-    experimentalByteCaps.users[identity]=&experimentalByteCap{
+    cap:=&experimentalByteCap{
         runtimeID:payload.RuntimeID,grantCeiling:payload.SharedCeilingBytes,
         nodeCeiling:payload.NodeCeilingBytes,cdnCeiling:payload.CdnCeilingBytes,
         validUntilMs:payload.ValidUntilMs,lastSeenMs:installedAt,
         aliases:aliases, signedGrant:payload, signedGrantDigest:sha256.Sum256(raw),
     }
+    experimentalByteCaps.users[identity]=cap
+    armSignedCapExpiryLocked(identity,cap,time.Now().Add(time.Duration(payload.ValidUntilMs-installedAt)*time.Millisecond))
     return nil
+}
+
+// A monotonic timer cuts off idle transports and cannot be prolonged by a
+// backwards wall-clock adjustment or an exact delivery replay.
+func armSignedCapExpiryLocked(identity string, cap *experimentalByteCap, deadline time.Time) {
+    if cap.expiryTimer!=nil {cap.expiryTimer.Stop()}
+    cap.deadline=deadline
+    cap.expiryTimer=time.AfterFunc(time.Until(deadline),func(){
+        gate.Lock()
+        defer gate.Unlock()
+        if experimentalByteCaps.users[identity]!=cap || cap.deadline!=deadline {return}
+        cap.expired=true
+        if u:=gate.users[identity];u!=nil {scheduleUserCancellationLocked(u)}
+    })
 }
 
 // A zero-spend admission applies to one user of the original process.
@@ -395,8 +412,7 @@ func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapCont
 		return errors.New("signed Xray cap: fenced or tainted user")
 	}
 	now := experimentalCapClockMs()
-	if cap.expired || now < cap.lastSeenMs || now >= cap.validUntilMs {
-		cap.expired = true
+	if checkExperimentalCapTimeLocked(cap, now) != nil {
 		return errors.New("signed Xray cap: expired or nonmonotonic permit")
 	}
 	if now < verifiedAt || now >= payload.InstallBeforeMs {
@@ -444,8 +460,8 @@ func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapCont
 		return err
 	}
 	installedAt := experimentalCapClockMs()
-	if installedAt < now || installedAt >= cap.validUntilMs || installedAt >= payload.InstallBeforeMs {
-		if installedAt < now || installedAt >= cap.validUntilMs {
+	if installedAt < now || checkExperimentalCapTimeLocked(cap, installedAt) != nil || installedAt >= payload.InstallBeforeMs {
+		if installedAt < now {
 			cap.expired = true
 		}
 		return errors.New("signed Xray cap: renewal expired during durable installation")
@@ -453,6 +469,9 @@ func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapCont
 	cap.grantCeiling = payload.SharedCeilingBytes
 	cap.nodeCeiling = payload.NodeCeilingBytes
 	cap.cdnCeiling = payload.CdnCeilingBytes
+    if payload.ValidUntilMs > cap.validUntilMs {
+        armSignedCapExpiryLocked(identity,cap,cap.deadline.Add(time.Duration(payload.ValidUntilMs-cap.validUntilMs)*time.Millisecond))
+    }
 	cap.validUntilMs = payload.ValidUntilMs
 	cap.lastSeenMs = installedAt
 	cap.signedGrant = payload
@@ -498,17 +517,11 @@ func checkSignedCapBeforeRegisterLocked(email string) error {
     }
     isCDN,ok:=cap.aliases[email]
     if !ok {return errors.New("signed Xray cap: inbound not covered by grant")}
-    now:=experimentalCapClockMs()
-    if cap.expired || now<=0 || now>=cap.validUntilMs ||
-        (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
-        cap.expired=true
-        return errors.New("signed Xray cap: grant expired or clock rolled back")
-    }
+    if err:=checkExperimentalCapTimeLocked(cap,experimentalCapClockMs());err!=nil {return err}
     if cap.chargedAll>=cap.grantCeiling ||
         cap.chargedAll>=cap.nodeCeiling ||
         (isCDN && cap.chargedCDN>=cap.cdnCeiling) {
         return errors.New("signed Xray cap: no spendable bytes remain")
     }
-    cap.lastSeenMs=now
     return nil
 }

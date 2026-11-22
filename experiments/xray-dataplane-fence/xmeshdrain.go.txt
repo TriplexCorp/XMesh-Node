@@ -149,6 +149,7 @@ type userState struct {
     // worker/route is NOT enough to claim drained if its close callback has
     // not yet returned (for example, a blocked network/socket Close).
     stopping int
+    cancellationScheduled bool
     // Any direct user-byte Counter.Add/Set after fencing poisons the meter.
     lateCounterMutation bool
     done chan struct{}
@@ -515,24 +516,13 @@ func state(email string, u *userState) result {
     }
 }
 
-func fence(ctx context.Context, email string) (result, error) {
-    gate.Lock()
-    u := ensureUser(canonicalMeterUser(email))
-    var cancels []func()
-    if !u.fenced {
-        u.fenced = true
-        for _, closeConn := range u.active {
-            cancels = append(cancels, closeConn)
-        }
-        // Register all cancellation tasks BEFORE checking completion or
-        // releasing the gate. Otherwise the last Finish/RouteFinish can close
-        // done while a transport close is still outstanding.
-        u.stopping += len(cancels)
-        completeUserIfIdleLocked(u)
-    }
-    done := u.done
-    gate.Unlock()
-    for _, closeConn := range cancels {
+// Caller holds gate.Mutex. Expiry and a later explicit fence share the
+// transport cancellation tasks and their completion accounting.
+func scheduleUserCancellationLocked(u *userState) {
+    if u.cancellationScheduled {return}
+    u.cancellationScheduled=true
+    u.stopping += len(u.active)
+    for _, closeConn := range u.active {
         go func(stop func()) {
             defer func() {
                 gate.Lock()
@@ -547,6 +537,18 @@ func fence(ctx context.Context, email string) (result, error) {
             stop()
         }(closeConn)
     }
+}
+
+func fence(ctx context.Context, email string) (result, error) {
+    gate.Lock()
+    u := ensureUser(canonicalMeterUser(email))
+    if !u.fenced {
+        u.fenced = true
+        scheduleUserCancellationLocked(u)
+        completeUserIfIdleLocked(u)
+    }
+    done := u.done
+    gate.Unlock()
     select {
     case <-ctx.Done():
         return result{}, ctx.Err()

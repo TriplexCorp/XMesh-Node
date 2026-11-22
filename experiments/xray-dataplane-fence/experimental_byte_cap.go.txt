@@ -28,6 +28,8 @@ type experimentalByteCap struct {
     chargedAll uint64
     chargedCDN uint64
     validUntilMs int64
+    deadline time.Time
+    expiryTimer *time.Timer
     lastSeenMs int64
     expired bool
     aliases map[string]bool // exact alias -> CDN marker
@@ -66,7 +68,7 @@ func checkExperimentalByteCapLocked(email string, delta int64) error {
     // if a future clock correction would make the old window appear valid.
     // The actual production protocol must additionally verify signed expiry
     // and off-host time continuity at (re)admission.
-    if err:=checkExperimentalCapTimeLocked(cap);err!=nil {return err}
+    if err:=checkExperimentalCapTimeLocked(cap,experimentalCapClockMs());err!=nil {return err}
     amount := uint64(delta)
     if amount > maxSignedByteCeiling || cap.chargedAll > maxSignedByteCeiling ||
         cap.grantCeiling > maxSignedByteCeiling || cap.nodeCeiling > maxSignedByteCeiling ||
@@ -110,13 +112,13 @@ func commitExperimentalByteCapLocked(email string, delta int64) error {
     if cdn { cap.chargedCDN += uint64(delta) }
     // Fsync may finish at or after a calendar boundary. The prior scope
     // keeps the already persisted debt, but the buffer cannot be sent.
-    return checkExperimentalCapTimeLocked(cap)
+    return checkExperimentalCapTimeLocked(cap,experimentalCapClockMs())
 }
 
-func checkExperimentalCapTimeLocked(cap *experimentalByteCap) error {
-    now:=experimentalCapClockMs()
+func checkExperimentalCapTimeLocked(cap *experimentalByteCap,now int64) error {
     if cap.expired || now<=0 || cap.validUntilMs<=0 ||
-        now>=cap.validUntilMs || (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
+        now>=cap.validUntilMs || (!cap.deadline.IsZero() && !time.Now().Before(cap.deadline)) ||
+        (cap.lastSeenMs>0 && now<cap.lastSeenMs) {
         cap.expired=true
         return errors.New("experimental quota: expired or nonmonotonic reservation")
     }

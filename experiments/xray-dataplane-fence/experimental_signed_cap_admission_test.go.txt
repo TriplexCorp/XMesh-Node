@@ -13,6 +13,7 @@ import (
     "strings"
     "sync"
     "testing"
+    "time"
 
     xstats "github.com/xtls/xray-core/app/stats"
     "github.com/xtls/xray-core/features/stats"
@@ -329,6 +330,45 @@ func TestV2SignedFirstCapsIsolateUsersInALiveRuntime(t *testing.T) {
         capAttempt(t,secondCounter,second.AliasScopes[0].Email,"uplink",1) {
         t.Fatal("peer installation or exact replay refilled already spent bytes")
     }
+}
+
+func TestV2SignedCapDeadlineCancelsOnlyItsIdleUser(t *testing.T) {
+    _,_,first,scope,pub,priv:=signedCapTestFixture(t)
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,first,priv),pub,scope);err!=nil {
+        t.Fatal(err)
+    }
+    second:=first
+    second.UserID=102
+    second.Nonce=strings.Repeat("d",64)
+    second.ReservationID="44444444-4444-4444-8444-444444444444"
+    second.AliasScopes=[]signedCapAlias{{Email:"xmesh-u102--vless-main",Class:"main"}}
+    second.CdnCeilingBytes=0
+    secondScope:=scope
+    secondScope.UserID=second.UserID
+    secondScope.ReservationID=second.ReservationID
+    secondScope.Aliases=second.AliasScopes
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,second,priv),pub,secondScope);err!=nil {
+        t.Fatal(err)
+    }
+    firstClosed,secondClosed:=make(chan struct{}),make(chan struct{})
+    if err:=Register(ctx(717),capMain,func(){close(firstClosed)});err!=nil {t.Fatal(err)}
+    if err:=Register(ctx(718),second.AliasScopes[0].Email,func(){close(secondClosed)});err!=nil {t.Fatal(err)}
+    gate.Lock()
+    identity:=canonicalMeterUser(capMain)
+    armSignedCapExpiryLocked(identity,experimentalByteCaps.users[identity],time.Now().Add(10*time.Millisecond))
+    gate.Unlock()
+    select {
+    case <-firstClosed:
+    case <-time.After(time.Second):
+        t.Fatal("signed deadline did not cancel idle transport")
+    }
+    select {
+    case <-secondClosed:
+        t.Fatal("one signed deadline cancelled another user's transport")
+    default:
+    }
+    if err:=Register(ctx(719),capMain,func(){});err==nil {t.Fatal("expired cap accepted another stream")}
+    if err:=Register(ctx(720),second.AliasScopes[0].Email,func(){});err!=nil {t.Fatal(err)}
 }
 
 func TestV2SignedCapFsyncAtDeadlineKeepsDebtWithoutDelivery(t *testing.T) {

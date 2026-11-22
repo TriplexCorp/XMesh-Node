@@ -221,20 +221,19 @@ def run(xray, root, target, processes, scenario):
             wal = {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")}
             assert len(wal) == 2
             assert all(json.loads(raw.splitlines()[-1])["nextBytes"] == 16384 for raw in wal.values())
-            while (remaining := claims["validUntilMs"] - time.time_ns() // 1_000_000) > 0:
-                time.sleep(min(remaining / 1000, 0.1))
-            sock.settimeout(4)
+            remaining = claims["validUntilMs"] - time.time_ns() // 1_000_000
+            sock.settimeout(max(0, remaining) / 1000 + 4)
             try:
-                sock.sendall(b"x")
-                assert sock.recv(1) == b"", "expired VLESS stream did not close"
-            except (BrokenPipeError, ConnectionResetError):
+                assert sock.recv(1) == b"", "expired idle VLESS stream did not close"
+            except ConnectionResetError:
                 pass
+            assert time.time_ns() // 1_000_000 >= claims["validUntilMs"]
         reject(sock_path, server.pid, runtime, genesis, grant, scope)
         with open_stream("main") as sock:
             assert not probe_echo(sock, 1), "new VLESS stream reused an expired grant"
         assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == wal
         assert server.poll() is None and client.poll() is None
-        print("PASS: live VLESS closed on post-expiry write, preserved fsynced WAL and refused replay")
+        print("PASS: live idle VLESS closed at signed expiry, preserved fsynced WAL and refused replay")
         return
 
     if scenario == "restart":
