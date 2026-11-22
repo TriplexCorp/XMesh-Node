@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import secrets
+import subprocess
 import tempfile
 import time
 
@@ -28,6 +29,7 @@ RENEW = re.compile(r"genesis-renewal-u([1-9][0-9]{0,18})-r([1-9][0-9]{0,18})\.js
 MAX_USERS = 2048
 MAX_PER_POLL = 16
 CURSOR_FILE = "genesis-renewal-scan-cursor.json"
+ADMISSION_CURSOR_FILE = "genesis-admission-scan-cursor.json"
 PIN_KEYS = ("nodeId", "userId", "activationReceiptSha256", "runtimeId",
             "policySha256", "accountEpoch", "meterEpoch", "reservationId",
             "aliasScopes", "validUntilMs")
@@ -107,7 +109,7 @@ def _candidate(fd, names, node, user, pinned, now):
 
 
 
-def _durable_scan_cursor(state_fd, node, last_user):
+def _durable_scan_cursor(state_fd, node, last_user, filename=CURSOR_FILE):
     """Advance a scheduling-only cursor; no quota entitlement lives here.
 
     Atomic replacement and a parent fsync survive a service restart without
@@ -117,7 +119,7 @@ def _durable_scan_cursor(state_fd, node, last_user):
     if (type(node) is not int or node <= 0 or
             type(last_user) is not int or last_user <= 0):
         raise ValueError("invalid quota renewal scan cursor")
-    store_scan_cursor(state_fd, CURSOR_FILE, {"nodeId": node, "lastUserId": last_user})
+    store_scan_cursor(state_fd, filename, {"nodeId": node, "lastUserId": last_user})
 
 
 def store_scan_cursor(state_fd, filename, cursor):
@@ -142,7 +144,7 @@ def store_scan_cursor(state_fd, filename, cursor):
             pass
 
 
-def _next_scan_batch(state_fd, users, node):
+def _next_scan_batch(state_fd, users, node, filename=CURSOR_FILE):
     """Round-robin by persisted user ID, not by unreliable wall-clock slots.
 
     A 20-second timer with a 16-user batch must advance by 16 users, not
@@ -152,7 +154,7 @@ def _next_scan_batch(state_fd, users, node):
     if not users or users != sorted(set(users)):
         raise ValueError("invalid ordered quota renewal work queue")
     try:
-        saved = lease._identity_file(state_fd, CURSOR_FILE, 256)
+        saved = lease._identity_file(state_fd, filename, 256)
     except FileNotFoundError:
         last_user = 0
     else:
@@ -164,7 +166,7 @@ def _next_scan_batch(state_fd, users, node):
         last_user = saved["lastUserId"]
     start = bisect.bisect_right(users, last_user) % len(users)
     batch = (users[start:] + users[:start])[:MAX_PER_POLL]
-    _durable_scan_cursor(state_fd, node, batch[-1])
+    _durable_scan_cursor(state_fd, node, batch[-1], filename)
     return batch
 
 
@@ -216,19 +218,43 @@ def first_cap_challenge(genesis_challenge, user):
 def activate_initial_cap(panel, node, state, socket_path):
     fd, lock = quarantine._locked_private_state(state)
     try:
-        names = set(os.listdir(fd))
-        if any(BASE.fullmatch(name) for name in names):
-            return False
         original = lease._identity_file(
             fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)
         users = original["reply"]["policy"]["users"]
-        # Nexus and Xray currently permit one first lease per pristine
-        # runtime. Refuse ambiguous enrollment before funding anything.
-        if not isinstance(users, list) or len(users) != 1:
-            raise ValueError("first admission requires one signed quarantine user")
-        user = users[0]["userId"]
-        if type(user) is not int or user <= 0:
-            raise ValueError("invalid signed quarantine user")
+        if not isinstance(users, list) or len(users) > MAX_USERS:
+            raise ValueError("invalid admission queue size")
+        ids = [entry.get("userId") for entry in users if isinstance(entry, dict)]
+        if (len(ids) != len(users)
+                or any(type(user) is not int or not 0 < user < 2**63 for user in ids)
+                or len(set(ids)) != len(ids)):
+            raise ValueError("invalid or duplicate quarantine user identity")
+        names = set(os.listdir(fd))
+        pending = sorted(user for user in ids
+                         if f"genesis-positive-cap-u{user}.json" not in names)
+        # Only setup within the signed Genesis window. Expiry of this
+        # first-admission proof cannot stall already installed renewals.
+        if not pending or time.time_ns() // 1_000_000 >= original["prepared"]["payload"]["validUntilMs"]:
+            return 0
+        batch = _next_scan_batch(fd, pending, node, ADMISSION_CURSOR_FILE)
+    finally:
+        os.close(lock)
+        os.close(fd)
+    installed = 0
+    for user in batch:
+        try:
+            installed += _activate_user(panel, node, user, state, socket_path)
+        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            print(f"Quota V2 user {user} initial admission refused: "
+                  f"{type(error).__name__}", flush=True)
+    return installed
+
+
+def _activate_user(panel, node, user, state, socket_path):
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        names = set(os.listdir(fd))
+        if f"genesis-positive-cap-u{user}.json" in names:
+            return False
         pinned = wal_transport._panel_pin()
         active = quarantine._enrolled_activation(panel, node)
         original = lease._staged_original(
@@ -269,8 +295,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
             or not isinstance(panel, str) or not panel.startswith("https://")
             or type(node) is not int or node <= 0):
         raise ValueError("automatic renewal is permitted only in explicit root staging")
-    if activate_initial_cap(panel, node, state, socket_path):
-        return 1
+    installed = activate_initial_cap(panel, node, state, socket_path)
     # First submit the actual fsynced byte-intent WAL, validate each Nexus
     # Ed25519 charge receipt and persist a monotonic retry cursor. A signed
     # birth-index head alone is NOT a PostgreSQL spending receipt.
@@ -280,7 +305,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
     pinned = wal_transport._panel_pin()
     jobs = pending_renewals(state, node, pinned)
     if not jobs:
-        return 0
+        return installed
     fd, lock = quarantine._locked_private_state(state)
     try:
         intent = lease._identity_file(fd, quarantine.INTENT_FILE, 4096)
@@ -292,7 +317,6 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
     finally:
         os.close(lock)
         os.close(fd)
-    installed = 0
     for user, revision, challenge in jobs:
         if user in failed_users:
             continue
@@ -300,7 +324,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
             caps.fetch_and_install_renewal(
                 panel, node, user, state, socket_path,
                 executable, challenge, revision)
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
             # A 409 while half of the reservation remains is expected.
             # The immutable nonce persists, so a retry cannot change the
             # SQL request identity. Never continue with a guessed permit.

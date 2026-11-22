@@ -291,6 +291,46 @@ func TestV2SignedCapRequiresIndependentGenesisAndEmptyHonestMeterHistory(t *test
     })
 }
 
+func TestV2SignedFirstCapsIsolateUsersInALiveRuntime(t *testing.T) {
+    dir,manager,first,ctx,pub,priv:=signedCapTestFixture(t)
+    raw:=signedCapTestEnvelope(t,first,priv)
+    if err:=installSignedFirstGenesisCap(raw,pub,ctx);err!=nil {t.Fatal(err)}
+    firstCounter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,firstCounter,capMain,"uplink",70) {
+        t.Fatal("could not spend first user's cap")
+    }
+    second:=first
+    second.UserID=102
+    second.Nonce=strings.Repeat("d",64)
+    second.AliasScopes=[]signedCapAlias{{Email:"xmesh-u102--vless-main",Class:"main"}}
+    second.CdnCeilingBytes=0
+    secondCtx:=ctx
+    secondCtx.UserID=second.UserID
+    secondCtx.Aliases=second.AliasScopes
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,second,priv),pub,secondCtx);err==nil {
+        t.Fatal("second user reused the first user's reservation")
+    }
+    second.ReservationID="44444444-4444-4444-8444-444444444444"
+    secondCtx.ReservationID=second.ReservationID
+    secondRaw:=signedCapTestEnvelope(t,second,priv)
+    wal:=meterLedgerPath(dir,first.RuntimeID,capMain,"uplink")
+    if err:=os.Rename(wal,wal+".backup");err!=nil {t.Fatal(err)}
+    if err:=installSignedFirstGenesisCap(secondRaw,pub,secondCtx);err==nil {
+        t.Fatal("second user admitted while the first user's WAL was missing")
+    }
+    if err:=os.Rename(wal+".backup",wal);err!=nil {t.Fatal(err)}
+    if err:=installSignedFirstGenesisCap(secondRaw,pub,secondCtx);err!=nil {t.Fatal(err)}
+    secondCounter:=newCapCounter(t,manager,second.AliasScopes[0].Email,"uplink")
+    if !capAttempt(t,secondCounter,second.AliasScopes[0].Email,"uplink",70) {
+        t.Fatal("first user's spend affected the second user's cap")
+    }
+    if err:=installSignedFirstGenesisCap(secondRaw,pub,secondCtx);err!=nil {t.Fatal(err)}
+    if capAttempt(t,firstCounter,capMain,"uplink",1) ||
+        capAttempt(t,secondCounter,second.AliasScopes[0].Email,"uplink",1) {
+        t.Fatal("peer installation or exact replay refilled already spent bytes")
+    }
+}
+
 func TestV2SignedCapConcurrentReplayExactlyOnceNoDebtReset(t *testing.T){
     dir,manager,p,ctx,pub,priv:=signedCapTestFixture(t)
     raw:=signedCapTestEnvelope(t,p,priv)

@@ -321,6 +321,32 @@ class FirstCapHandoffTests(unittest.TestCase):
             challenge = renewal_worker.first_cap_challenge(self.prepared["payload"]["challenge"], 100)
             install.assert_called_once_with(panel, self.node, 100, str(state), socket, "e"*64, challenge)
 
+    def test_multiuser_activation_isolates_failure_and_preserves_cursor(self):
+        import os
+        if os.geteuid() != 0:
+            self.skipTest("root-owned staged activation evidence")
+        state = self.fixture.root / "state"
+        state.mkdir(mode=0o700)
+        self.reply["policy"]["users"] = [{"userId": user} for user in range(10, 14)]
+        path = state / "genesis-quarantine-envelope.json"
+        path.write_bytes(self.guard.canonical(self.evidence()))
+        path.chmod(0o600)
+        visited = []
+
+        def activate(panel, node, user, state, socket):
+            visited.append(user)
+            if user == 10:
+                raise ValueError("one user denied")
+            return True
+
+        with (mock.patch.object(renewal_worker, "MAX_PER_POLL", 2),
+              mock.patch.object(renewal_worker, "_activate_user", side_effect=activate)):
+            self.assertEqual(renewal_worker.activate_initial_cap(
+                "https://isolated.test", self.node, str(state), "/private/xray.sock"), 1)
+            self.assertEqual(renewal_worker.activate_initial_cap(
+                "https://isolated.test", self.node, str(state), "/private/xray.sock"), 2)
+        self.assertEqual(visited, [10, 11, 12, 13])
+
     def test_first_issuance_sends_the_measured_runtime_over_the_product_client(self):
         import os
 

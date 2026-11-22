@@ -266,18 +266,15 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
         }
         return verifyRenewalWAL(payload,expected.Current)
     }
-    if len(gate.meterTails)!=0 || (u!=nil && (len(u.active)!=0 || u.writes!=0 || u.reads!=0)) {
+    if u!=nil && (len(u.active)!=0 || u.writes!=0 || u.reads!=0) {
         return errors.New("signed Xray cap: existing measured user traffic")
     }
-    // For a first-ever Xray, there can be NO local counted WAL. An observed
-    // index alone does not prove history; the independent Nexus first
-    // activation receipt must also be pinned in expected.
-    inventory,err:=readInventory(gate.journalDir)
-    if err!=nil{return err}
-    if inventory.exists || len(inventory.steps)!=0 {
-        return errors.New("signed Xray cap: historic WAL cannot use zero-spend genesis")
+    for _,peer:=range experimentalByteCaps.users {
+        if peer.signedGrant.ReservationID==payload.ReservationID {
+            return errors.New("signed Xray cap: reservation already belongs to another user")
+        }
     }
-    if err:=verifyMeterJournalDirectory(gate.journalDir);err!=nil{return err}
+    if err:=verifyFirstCapHistory(identity);err!=nil{return err}
     aliases:=make(map[string]bool,len(payload.AliasScopes))
     for _,scope:=range payload.AliasScopes {
         aliases[scope.Email]=scope.Class=="cdn"
@@ -310,6 +307,39 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
         nodeCeiling:payload.NodeCeilingBytes,cdnCeiling:payload.CdnCeilingBytes,
         validUntilMs:payload.ValidUntilMs,lastSeenMs:installedAt,
         aliases:aliases, signedGrant:payload, signedGrantDigest:sha256.Sum256(raw),
+    }
+    return nil
+}
+
+// A zero-spend admission applies to one user of the original process.
+// Each previously observed stream must still belong to an installed peer
+// and match the exact live-process WAL. The gate lock prevents counter writes
+// during this check.
+func verifyFirstCapHistory(identity string) error {
+    inventory,err:=readInventory(gate.journalDir)
+    if err!=nil{return err}
+    if len(inventory.steps)!=len(gate.meterTails) {
+        return errors.New("signed Xray cap: WAL inventory differs from live process")
+    }
+    if err:=verifyMeterInventory(gate.journalDir);err!=nil{return err}
+    for name,birth:=range inventory.steps {
+        owner:=canonicalMeterUser(birth.Email)
+        peer:=experimentalByteCaps.users[owner]
+        if owner==identity || birth.RuntimeID!=gate.runtimeID || peer==nil ||
+            peer.runtimeID!=gate.runtimeID || peer.signedGrant.ReservationID=="" {
+            return errors.New("signed Xray cap: historic WAL cannot use zero-spend genesis")
+        }
+        path:=filepath.Join(gate.journalDir,name)
+        cached,ok:=gate.meterTails[path]
+        if !ok {
+            return errors.New("signed Xray cap: indexed WAL was not measured by this process")
+        }
+        actual,err:=readMeterTail(path)
+        if err!=nil{return err}
+        if cached.last.Digest!=actual.last.Digest || cached.dev!=actual.dev ||
+            cached.ino!=actual.ino || cached.size!=actual.size {
+            return errors.New("signed Xray cap: live peer WAL was replaced or rolled back")
+        }
     }
     return nil
 }
