@@ -83,43 +83,53 @@ func verifyPristineSuccessorMeter(req zeroMeterRequest) (zeroMeterResult,error) 
     defer observed.Unlock()
     gate.Lock()
     defer gate.Unlock()
+    identity:="xmesh-u"+strconv.FormatInt(req.UserID,10)
     if observed.manager==nil || observed.directory=="" ||
         observed.runtimeID!=runtime || gate.runtimeID!=runtime ||
         gate.journalDir!=observed.directory || !experimentalByteCaps.strict ||
-        len(experimentalByteCaps.users)!=0 || len(gate.users)!=0 ||
-        len(gate.sessions)!=0 || len(gate.meterTails)!=0 {
+        experimentalByteCaps.users[identity]!=nil || gate.users[identity]!=nil {
         return empty,errors.New("successor meter contains prior or unverified state")
     }
-    // Xray may pre-register per-user StatsService counters at startup
-    // even when there has never been any traffic. Read the real raw
-    // counters; all must be zero, including users outside this request.
-    // A missing counter is NOT assumed zero by this global enumeration.
+    if err:=verifyFirstCapHistory(identity);err!=nil{return empty,err}
+    // Peers already admitted to this exact process keep their balances.
+    // This candidate and every other unsigned account must remain at zero.
     var dirty bool
     observed.manager.VisitCounters(func(name string, counter stats.Counter) bool {
-        if strings.HasPrefix(name,"user>>>") &&
-           (counter==nil || counter.Value()!=0) {
-            dirty=true
-            return false
+        if !strings.HasPrefix(name,"user>>>") {return true}
+        if counter!=nil && counter.Value()==0 {return true}
+        alias,direction,valid:=strings.Cut(strings.TrimPrefix(name,"user>>>"),">>>traffic>>>")
+        peer:=experimentalByteCaps.users[canonicalMeterUser(alias)]
+        if valid && (direction=="uplink" || direction=="downlink") &&
+            peer!=nil && peer.runtimeID==runtime && peer.signedGrant.ReservationID!="" &&
+            counter!=nil && counter.Value()>0 {
+            if _,allowed:=peer.aliases[alias];allowed {return true}
         }
-        return true
+        dirty=true
+        return false
     })
     if dirty {
         return empty,errors.New("fresh successor has nonzero or invalid StatsService counters")
     }
-    // A fresh WAL namespace contains only the process-lifetime lock. Never
-    // infer emptiness from a missing inventory file while orphan files exist.
+    // Every extra file belongs to a verified peer or the live WAL index.
+    inventory,err:=readInventory(observed.directory)
+    if err!=nil{return empty,err}
+    allowed:=map[string]bool{"xray-instance.lock":true}
+    if inventory.exists {allowed[inventoryName]=true}
+    for name:=range inventory.steps {allowed[name]=true}
+    for _,peer:=range experimentalByteCaps.users {
+        if peer.runtimeID==runtime && peer.signedGrant.ReservationID!="" {
+            allowed["positive-cap-u"+strconv.FormatInt(peer.signedGrant.UserID,10)+".json"]=true
+        }
+    }
     entries,err:=os.ReadDir(observed.directory)
     if err!=nil{return empty,err}
     for _,entry:=range entries {
-        if entry.Name()!="xray-instance.lock" {
+        if !allowed[entry.Name()] {
             return empty,errors.New("successor WAL root contains preexisting state")
         }
         if entry.IsDir() || !entry.Type().IsRegular() {
             return empty,errors.New("successor process lock identity changed")
         }
-    }
-    if err:=verifyMeterJournalDirectory(observed.directory);err!=nil {
-        return empty,err
     }
     if runtime2,err:=currentRuntimeIdentity();err!=nil || runtime2!=runtime {
         return empty,errors.New("successor Xray runtime changed during zero-meter observation")

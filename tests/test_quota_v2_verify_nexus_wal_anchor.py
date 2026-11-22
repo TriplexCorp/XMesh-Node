@@ -119,11 +119,11 @@ class NexusExternalWalAnchorTests(unittest.TestCase):
     def test_transport_head_binds_fresh_challenge_receipt_and_local_history(self):
         receipt = self.signed()
         challenge = "1" * 64
-        def bundle(domain=wal_transport.HEAD_DOMAIN):
+        def bundle(domain=wal_transport.HEAD_DOMAIN, **scope):
             head = self.signed({
                 "schemaVersion": 1, "kind": "xmesh.quota-v2.external-wal-head",
                 "nodeId": self.node, "challenge": challenge, **self.head,
-                "receiptSha256": hashlib.sha256(receipt).hexdigest(),
+                "receiptSha256": hashlib.sha256(receipt).hexdigest(), **scope,
             }, domain=domain)
             return signed.canonical({
                 name: base64.b64encode(blob).decode("ascii")
@@ -133,16 +133,26 @@ class NexusExternalWalAnchorTests(unittest.TestCase):
                 )
             })
 
-        def verify(raw, nonce=challenge, expected=receipt):
+        def verify(raw, nonce=challenge, expected=receipt, runtime=None):
             return wal_transport.verify_bundle(
                 raw, nonce, self.node, self.node_pub, self.pub, str(self.fi.directory),
-                expected_receipt=expected,
+                expected_receipt=expected, runtime_id=runtime,
             )
 
         raw = bundle()
         result = verify(raw)
         self.assertTrue(result["offhostFullBirthIndexHeadMatched"])
         self.assertFalse(result["canResume"])
+        runtime = signed.strict_json(self.raw.splitlines()[0])["runtimeId"]
+        scoped = bundle(runtimeId=runtime)
+        self.assertTrue(verify(scoped, runtime=runtime)["offhostFullBirthIndexHeadMatched"])
+        foreign_runtime = "9" * 64
+        with self.assertRaisesRegex(ValueError, "fresh WAL head binding"):
+            verify(scoped, runtime=foreign_runtime)
+        with self.assertRaisesRegex(ValueError, "different Xray runtime"):
+            verify(bundle(runtimeId=foreign_runtime), runtime=foreign_runtime)
+        with self.assertRaisesRegex(ValueError, "fresh WAL head binding"):
+            verify(raw, runtime=runtime)
         with self.assertRaisesRegex(ValueError, "fresh WAL head binding"):
             verify(raw, "2" * 64)
         with self.assertRaisesRegex(ValueError, "differs from the current checkpoint"):

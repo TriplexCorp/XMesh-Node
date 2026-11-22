@@ -328,10 +328,6 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
         wal_transport.run("charge-sync", panel, node)
         docker, local = wal_transport._bound_journal()
     else:
-        # Staged ONLY. The existing external off-host birth index may
-        # reject a second per-Node runtime because it must extend the
-        # old hash chain. Never bypass that remote head or charge a fresh
-        # stream without a signed, immutable born-file ownership proof.
         wal_transport.run("charge-sync", panel, node, container_name)
         docker, local = wal_transport._bound_journal(container_name)
     journal._verify_mount(docker, local)

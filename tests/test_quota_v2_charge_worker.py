@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 import charge_worker as worker
 import quarantine_policy as quarantine
+import successor_positive
 import wal_transport
 
 
@@ -48,8 +49,10 @@ class ChargeWorkerTests(unittest.TestCase):
                     raise result
                 return result
 
-            with mock.patch.object(worker.renewal_worker, "_verified_reply",
-                                   side_effect=verify) as verify_reply:
+            with (mock.patch.object(worker.renewal_worker, "_verified_reply",
+                                    side_effect=verify) as verify_reply,
+                  mock.patch.object(successor_positive, "_read_evidence",
+                                    side_effect=ValueError("no saved successor evidence"))):
                 if accepted:
                     self.assertEqual(worker._grant_for_birth(3, 7, 42, "c" * 64, birth), cap)
                 else:

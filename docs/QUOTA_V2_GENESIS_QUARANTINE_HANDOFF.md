@@ -461,14 +461,16 @@ Nexus WAL charge selection also distinguishes the original signed
 first cap from the separately signed successor cap; old streams still
 select their old reservation.
 
-**Release is still blocked.** The existing single-per-Node off-host
-birth hash chain cannot yet merge a second Xray runtime's independent
-inventory as an append-only extension of the original external head.
-The staged second journal charge path explicitly refuses to charge
-against any unverifiable new birth prefix. The fresh Docker Xray is
-still network-isolated and the live public VLESS listener handoff is
-NOT automated. A second/further automatic calendar epoch, all-user
-onboarding to a running successor, real Postgres Docker 2-node
-SIGKILL/replay tests and queued GitHub Actions results are unfinished.
+The successor charge worker sends its measured runtime with the existing
+XSP/2 birth-index requests. Nexus requires the successor's signed cap
+scope and keeps that runtime's append-only index separately from the
+first Genesis ledger. The signed head includes the runtime and a fresh
+challenge. Xray can check a zero-meter candidate while another user has
+an installed, intact WAL in the same successor process.
+
+**Release is still blocked.** The successor Docker Xray remains isolated.
+Public VLESS listener handoff and automatic rotation to a third process
+are unfinished. The full two-Node SIGKILL and replay scenarios still need
+to exercise the running stack.
 Do NOT merge/enable production Quota V2 based on the signed install
 receipt alone. Keep draft, main/production untouched, feature flag 0.

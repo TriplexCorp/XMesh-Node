@@ -11,6 +11,7 @@ refund, reset, or move an old byte. It is not remote hardware attestation.
 import hashlib
 import os
 from pathlib import Path
+import re
 import stat
 import time
 
@@ -55,8 +56,8 @@ def _verify_fresh_container_env(docker):
         raise ValueError("new Xray must start with one absolute signed-cap binding")
 
 
-def _clean_mount(old_dir, candidate_dir):
-    """Require a distinct root-owned, *empty* WAL namespace at both checks."""
+def _clean_mount(old_dir, candidate_dir, runtime_id=None):
+    """Require a distinct root-owned WAL namespace and verified same-process WAL."""
     old = os.open(old_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     candidate = os.open(candidate_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -68,8 +69,22 @@ def _clean_mount(old_dir, candidate_dir):
                 or (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)):
             raise ValueError("successor WAL root is foreign or shared with predecessor")
         names = os.listdir(candidate)
-        if any(name != "xray-instance.lock" for name in names):
-            raise ValueError("successor WAL is not a fresh empty meter namespace")
+        if runtime_id is None:
+            if any(name != "xray-instance.lock" for name in names):
+                raise ValueError("successor WAL is not a fresh empty meter namespace")
+        else:
+            meter_names = sorted(name for name in names if name.startswith("meter-"))
+            entries, _ = wal_transport.registry.verify_meter_inventory(
+                candidate, meter_names, wal_transport.journal._read_meter_wal,
+                wal_transport.journal._canonical_go)
+            if any(entry["runtimeId"] != runtime_id for entry in entries.values()):
+                raise ValueError("successor WAL belongs to another Xray runtime")
+            permitted = {"xray-instance.lock", "xmesh-meter-inventory-v1.jsonl", *meter_names}
+            # Xray authenticates the peer permits and candidate state over
+            # its measured control socket. Filenames supply no authority.
+            if any(name not in permitted and re.fullmatch(
+                    r"positive-cap-u[1-9][0-9]{0,18}\.json", name) is None for name in names):
+                raise ValueError("successor WAL root contains unknown state")
         # Xray must already hold its own private, source-pinned instance lock.
         # We do not assume this by just seeing a lock-shaped filename; the
         # independent PID and Unix-peer measurements check the live process.
@@ -163,7 +178,7 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
                 or measured[2] != fresh.get("State", {}).get("Pid")
                 or measured[0] == previous.get("Id")):
             raise ValueError("new Xray is the predecessor or an untrusted PID")
-        _clean_mount(old_root, fresh_root)
+        _clean_mount(old_root, fresh_root, measured[3])
         if not 0 < len(old["aliasScopes"]) <= 16:
             raise ValueError("successor signed alias roster is missing")
         scope = {
@@ -175,7 +190,7 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
         }
         observation = cap_install.observe_zero_meter_in_xray(
             socket_path, measured[2], measured[3], scope)
-        _clean_mount(old_root, fresh_root)
+        _clean_mount(old_root, fresh_root, measured[3])
         if wal_transport._measure_quarantined_runtime(
                 (executable_pin, config_pin), container_name=SUCCESSOR) != measured:
             raise ValueError("fresh Xray changed during zero-counter proof")

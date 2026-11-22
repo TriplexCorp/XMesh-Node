@@ -27,6 +27,9 @@ func pristineFixture(t *testing.T) (zeroMeterRequest,string) {
     before:=enabled
     enabled=true
     t.Cleanup(func(){enabled=before})
+    oldTags:=trackedInboundTags
+    trackedInboundTags=map[string]struct{}{"vless-main":{}, "vless-cdn":{}}
+    t.Cleanup(func(){trackedInboundTags=oldTags})
     return zeroMeterRequest{
         SchemaVersion:1,NodeID:signed.NodeID,UserID:signed.UserID,
         Nonce:strings.Repeat("f",64),
@@ -34,6 +37,31 @@ func pristineFixture(t *testing.T) (zeroMeterRequest,string) {
         ReservationID:"66666666-6666-4666-8666-666666666666",
         Aliases:append([]signedCapAlias(nil),signed.AliasScopes...),
     },dir
+}
+
+func TestQuotaV2SuccessorNewUserKeepsSignedPeerWAL(t *testing.T) {
+    dir,manager,peer,expected,pub,private:=signedCapTestFixture(t)
+    previous:=capControl
+    capControl=&localCapControl{binding:localCapBinding{NodeID:peer.NodeID},signer:pub}
+    t.Cleanup(func(){capControl=previous})
+    oldTags:=trackedInboundTags
+    trackedInboundTags=map[string]struct{}{"vless-main":{}, "vless-cdn":{}}
+    t.Cleanup(func(){trackedInboundTags=oldTags})
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,peer,private),pub,expected);err!=nil {
+        t.Fatal(err)
+    }
+    counter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,counter,capMain,"uplink",17){t.Fatal("peer failed to meter")}
+    req:=zeroMeterRequest{
+        SchemaVersion:1,NodeID:peer.NodeID,UserID:102,Nonce:strings.Repeat("f",64),
+        MeterEpoch:"55555555-5555-4555-8555-555555555555",
+        ReservationID:"66666666-6666-4666-8666-666666666666",
+        Aliases:[]signedCapAlias{{Email:"xmesh-u102--vless-main",Class:"main"}},
+    }
+    if _,err:=verifyPristineSuccessorMeter(req);err!=nil{t.Fatal(err)}
+    if counter.Value()!=17 {t.Fatal("peer counter changed during successor proof")}
+    if err:=os.Remove(meterLedgerPath(dir,peer.RuntimeID,capMain,"uplink"));err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil{t.Fatal("missing peer WAL was accepted")}
 }
 
 func TestQuotaV2FreshMeterReturnsOnlyNonAuthorizingEmptyObservation(t *testing.T) {

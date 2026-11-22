@@ -233,7 +233,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             raise ValueError("positive request no longer targets the signed clean process")
         _, old_root = wal_transport._bound_journal()
         _, new_root = wal_transport._bound_journal(successor_meter.SUCCESSOR)
-        successor_meter._clean_mount(old_root, new_root)
+        successor_meter._clean_mount(old_root, new_root, candidate[3])
     finally:
         os.close(lock)
         os.close(fd)
@@ -280,7 +280,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             raise ValueError("new Xray PID changed during signed-positive request")
         _, old_root = wal_transport._bound_journal()
         _, new_root = wal_transport._bound_journal(successor_meter.SUCCESSOR)
-        successor_meter._clean_mount(old_root, new_root)
+        successor_meter._clean_mount(old_root, new_root, candidate[3])
         receipt = cap_install.install_in_xray(
             socket_path, candidate[2], candidate[3], genesis, grant, scope)
         if wal_transport._measure_quarantined_runtime(

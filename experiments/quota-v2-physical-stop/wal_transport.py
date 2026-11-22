@@ -80,13 +80,15 @@ def _pack_inventory(index):
     return {"inventory": base64.b64encode(wire).decode("ascii"), "inventoryEncoding": "gzip"}
 
 
-def verify_bundle(raw, challenge, node, node_public, panel_public, local, expected_receipt=None):
+def verify_bundle(raw, challenge, node, node_public, panel_public, local, expected_receipt=None,
+                  *, runtime_id=None):
     doc, index = _unpack_bundle(raw)
     return _verify_bundle(doc, index, challenge, node, node_public, panel_public, local,
-                          expected_receipt)
+                          expected_receipt, runtime_id)
 
 
-def _verify_bundle(doc, index, challenge, node, node_public, panel_public, local, expected_receipt):
+def _verify_bundle(doc, index, challenge, node, node_public, panel_public, local, expected_receipt,
+                   runtime_id=None):
     head_raw = _b64(doc["head"], 4096)
     receipt = _b64(doc["receipt"], 4096)
     if expected_receipt is not None and receipt != expected_receipt:
@@ -98,16 +100,24 @@ def _verify_bundle(doc, index, challenge, node, node_public, panel_public, local
             or envelope["algorithm"] != "Ed25519" or not _hex(envelope["signature"], 128)):
         raise ValueError("invalid signed current WAL head")
     payload = envelope["payload"]
-    if (not isinstance(payload, dict) or set(payload) != {
-            "schemaVersion", "kind", "nodeId", "challenge", "sequence", "registrySha256", "receiptSha256"}
+    fields = {"schemaVersion", "kind", "nodeId", "challenge", "sequence",
+              "registrySha256", "receiptSha256"}
+    if runtime_id is not None:
+        fields.add("runtimeId")
+    if (not isinstance(payload, dict) or set(payload) != fields
             or type(payload["schemaVersion"]) is not int or payload["schemaVersion"] != 1
             or payload["kind"] != "xmesh.quota-v2.external-wal-head"
             or type(payload["nodeId"]) is not int or payload["nodeId"] != node
             or not _hex(challenge, 64) or payload["challenge"] != challenge
+            or payload.get("runtimeId") != runtime_id
             or payload["registrySha256"] != hashlib.sha256(index).hexdigest()
             or payload["receiptSha256"] != hashlib.sha256(receipt).hexdigest()):
         raise ValueError("fresh WAL head binding mismatch")
     verifier.verify_nexus_signature(HEAD_DOMAIN, payload, envelope["signature"], panel_public)
+    if runtime_id is not None and any(
+            observed.strict_json(line).get("runtimeId") != runtime_id
+            for line in index.splitlines()):
+        raise ValueError("authenticated WAL prefix contains a different Xray runtime")
     head = {name: payload[name] for name in ("sequence", "registrySha256")}
     return verifier.verify_nexus_offhost_anchor(
         receipt, witness, index, node, node_public, panel_public, head, local)
@@ -350,6 +360,10 @@ def run(action, panel, node_id, container_name="xmesh-managed-xray"):
     os.umask(0o077)
     runtime, local = (_bound_journal() if container_name=="xmesh-managed-xray"
                       else _bound_journal(container_name))
+    runtime_id = None
+    if container_name == "xmesh-successor-quarantine":
+        pid = runtime.get("State", {}).get("Pid")
+        runtime_id = runtime_identity.trusted_runtime_identity(pid)
     with tempfile.TemporaryDirectory(prefix="xmesh-wal-transport-") as temp:
         root = Path(temp)
         evidence = [PRODUCT, "wal-evidence", "--panel", panel, "--node-id", str(node_id)]
@@ -370,17 +384,30 @@ def run(action, panel, node_id, container_name="xmesh-managed-xray"):
                 raise ValueError("active product key changed while signing")
             return reply["signature"]
 
-        return sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub,
-                               product_sign, lambda request: _post(root, request))
+        proof = sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub,
+                                product_sign, lambda request: _post(root, request),
+                                runtime_id=runtime_id)
+        if runtime_id is not None:
+            current, source = _bound_journal(container_name)
+            if (current.get("Id") != runtime.get("Id") or source != local
+                    or runtime_identity.trusted_runtime_identity(
+                        current.get("State", {}).get("Pid")) != runtime_id):
+                raise ValueError("Xray changed during authenticated runtime WAL exchange")
+        return proof
 
 
-def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, post):
+def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, post,
+                    *, runtime_id=None):
+    if runtime_id is not None and not _hex(runtime_id, 64):
+        raise ValueError("invalid measured WAL runtime")
+    scope = {"runtimeId": runtime_id} if runtime_id is not None else {}
+
     def current(expected_receipt=None):
         challenge = secrets.token_hex(32)
-        response = post({"operation": "head", "nodeId": node_id, "challenge": challenge})
+        response = post({"operation": "head", "nodeId": node_id, "challenge": challenge, **scope})
         doc, index = _unpack_bundle(response)
         proof = _verify_bundle(doc, index, challenge, node_id, node_pub, panel_pub, local,
-                               expected_receipt)
+                               expected_receipt, runtime_id)
         return proof, index
 
     prior = b""
@@ -420,6 +447,7 @@ def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, 
     stored = observed.strict_json(post({
         "operation": "store", "nodeId": node_id,
         "witness": base64.b64encode(witness).decode("ascii"),
+        **scope,
         **_pack_inventory(inventory),
     }))
     if not isinstance(stored, dict) or set(stored) != {"receipt"}:

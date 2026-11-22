@@ -400,7 +400,7 @@ class FirstCapHandoffTests(unittest.TestCase):
         }
         signed = {"algorithm": "Ed25519", "payload": prepared,
                   "signature": self.sign(
-                      b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\\x00", prepared)}
+                      b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\x00", prepared)}
         response = {
             "status": "prepared_calendar_successor", "nodeId": self.node,
             "userId": 100, "signedEnvelope": self.guard.canonical(signed).decode(),

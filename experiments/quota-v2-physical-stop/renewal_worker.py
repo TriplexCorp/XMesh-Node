@@ -455,10 +455,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
     failed_users = set()
     charge_worker.run(panel, node, state, failed_users)
     # In opt-in staging, keep the successor journal separate and submit
-    # ONLY its own signed birth/charge intents. The existing server WAL
-    # witness is a node-wide append-only chain; if this second runtime
-    # has not been cryptographically anchored as an extension, refuse its
-    # charges rather than relabeling its bytes to the original reservation.
+    # only its own signed birth/charge intents against its runtime checkpoint.
     if (os.environ.get("XMESH_QUOTA_V2_AUTO_SUCCESSOR_POSITIVE") == "1"
             and os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1"):
         try:
