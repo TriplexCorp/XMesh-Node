@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
@@ -71,6 +72,77 @@ class DurableRenewalNonce(unittest.TestCase):
                      "genesis-renewal-u42-r5.json.bad", "genesis-renewal-u42-r5Xjson"):
             self.assertIsNone(renewal_worker.BASE.fullmatch(name))
             self.assertIsNone(renewal_worker.RENEW.fullmatch(name))
+
+
+    def test_renewal_poll_advances_by_full_batch_and_persists_across_restarts(self):
+        # A 20s systemd tick must not shift the 16-user window by ONE
+        # position, which makes 116 users take ~34 minutes to be visited.
+        for user in range(1, 117):
+            (Path(self.state) / f"genesis-positive-cap-u{user}.json").touch()
+        visited = []
+        with mock.patch.object(
+                renewal_worker, "_candidate",
+                side_effect=lambda fd, names, node, user, pinned, now:
+                    (user, 1, "a" * 64)):
+            for tick in range(8):
+                # Simulate arbitrarily slow/jittery service restarts: the
+                # durable cursor, NOT floor(now/20s), controls fairness.
+                jobs = renewal_worker.pending_renewals(
+                    self.state, 7, "b" * 64, now=1_000_000 + tick * 97_000)
+                self.assertLessEqual(len(jobs), renewal_worker.MAX_PER_POLL)
+                visited.extend(user for user, _, _ in jobs)
+            self.assertEqual(visited[:16], list(range(1, 17)))
+            self.assertEqual(sorted(set(visited)), list(range(1, 117)))
+            self.assertEqual(len(visited), 128)
+            # A recreated worker starts after the LAST visited user.
+            follow_up = renewal_worker.pending_renewals(
+                self.state, 7, "b" * 64, now=50_000_000)
+            self.assertEqual([u for u, _, _ in follow_up],
+                             list(range(13, 29)))
+        fd, lock = self.locked()
+        try:
+            cursor = lease._identity_file(fd, renewal_worker.CURSOR_FILE, 256)
+            self.assertEqual(cursor, {"nodeId": 7, "lastUserId": 28})
+        finally:
+            os.close(lock)
+            os.close(fd)
+
+    def test_cursor_survives_user_removal_and_insertion(self):
+        for user in (3, 8, 21, 55):
+            (Path(self.state) / f"genesis-positive-cap-u{user}.json").touch()
+        with mock.patch.object(
+                renewal_worker, "_candidate",
+                side_effect=lambda fd, names, node, user, pinned, now:
+                    (user, 1, "a" * 64)):
+            first = renewal_worker.pending_renewals(self.state, 7, "b" * 64, now=1)
+            self.assertEqual([item[0] for item in first], [3, 8, 21, 55])
+            (Path(self.state) / "genesis-positive-cap-u21.json").unlink()
+            (Path(self.state) / "genesis-positive-cap-u33.json").touch()
+            second = renewal_worker.pending_renewals(self.state, 7, "b" * 64, now=2)
+            self.assertEqual([item[0] for item in second], [3, 8, 33, 55])
+
+    def test_corrupt_foreign_or_symlinked_cursor_refuses_renewal(self):
+        (Path(self.state) / "genesis-positive-cap-u9.json").touch()
+        with mock.patch.object(
+                renewal_worker, "_candidate",
+                return_value=(9, 1, "a" * 64)):
+            renewal_worker.pending_renewals(self.state, 7, "b" * 64, now=1)
+            with self.assertRaisesRegex(ValueError, "foreign"):
+                renewal_worker.pending_renewals(self.state, 8, "b" * 64, now=2)
+            cursor = Path(self.state) / renewal_worker.CURSOR_FILE
+            for raw in ('{"nodeId":7,"lastUserId":true}',
+                        '{"nodeId":7,"lastUserId":0}',
+                        '{"nodeId":7,"lastUserId":9,"extra":1}',
+                        '{"nodeId":7,"lastUserId":'):
+                cursor.write_text(raw)
+                with self.assertRaises((ValueError, TypeError)):
+                    renewal_worker.pending_renewals(
+                        self.state, 7, "b" * 64, now=3)
+            cursor.unlink()
+            cursor.symlink_to("/etc/passwd")
+            with self.assertRaises((ValueError, OSError)):
+                renewal_worker.pending_renewals(
+                    self.state, 7, "b" * 64, now=4)
 
 
 if __name__ == "__main__":
