@@ -8,7 +8,7 @@ export LC_ALL=C
 
 if [[ $EUID -ne 0 ]]; then
   command -v sudo >/dev/null 2>&1 || { echo "Run as root (sudo is unavailable)." >&2; exit 1; }
-  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF,XMESH_NEXUS_RELEASE_REF,XMESH_QUOTA_V2_WAL_STAGE_AGENT bash "$0" "$@"
+  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF,XMESH_NEXUS_RELEASE_REF,XMESH_QUOTA_V2_WAL_STAGE_AGENT,XMESH_QUOTA_V2_AUTO_RENEW_STAGING bash "$0" "$@"
 fi
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "Usage: XMESH_NODE_RELEASE_REF=<40-hex-reviewed-sha> bash bootstrap.sh https://panel.example.com NODE_ID [node-port]" >&2
@@ -90,6 +90,13 @@ NODE_RELEASE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
 }
 AGENT_VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/AGENT_VERSION")"
 WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
+WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
+if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]];then
+  echo "Invalid quota auto renewal staging flag" >&2;exit 2
+fi
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.27 ) ]];then
+  echo "Quota auto renewal requires the explicit control-v6.0.27 WAL staging Agent." >&2;exit 2
+fi
 if [[ "$AGENT_VERSION" == control-v6.0.25 || "$AGENT_VERSION" == control-v6.0.27 || "$WAL_STAGE_AGENT" != 0 ]];then
   if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.27 ) || "$WAL_STAGE_AGENT" != 1 ||
         ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
@@ -111,6 +118,7 @@ for unit in \
   xmesh-node-metrics.timer xmesh-node-metrics.service \
   xmesh-node-control.timer xmesh-node-control.service \
   xmesh-xray-sync.timer xmesh-xray-sync.service \
+  xmesh-quota-v2-renewal.timer xmesh-quota-v2-renewal.service \
   xmesh-node-user-meter.timer xmesh-node-user-meter.service \
   xmesh-node-tls-renew.timer xmesh-node-tls-renew.service \
   xmesh-geodata-sync.timer xmesh-geodata-sync.service; do
