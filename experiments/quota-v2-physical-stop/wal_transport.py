@@ -2,6 +2,7 @@
 """Exchange nonauthorizing WAL history over the enrolled XSP/2 product tunnel."""
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "xray-dataplane-fence"))
 
@@ -27,7 +29,9 @@ PRODUCT = "/usr/local/bin/xmesh-agent-xspv2-product"
 PATH = "/api/v1/node/quota-v2/wal"
 HEAD_DOMAIN = b"XMESH_QUOTA_V2_REMOTE_WAL_HEAD_V1\x00"
 GENESIS_DOMAIN = b"XMESH_XRAY_GENESIS_PREPARED_V1\x00"
-INDEX_LIMIT = 384 * 1024
+WIRE_INDEX_LIMIT = 384 * 1024
+INDEX_LIMIT = 4 * 1024 * 1024
+RESPONSE_LIMIT = 544 * 1024
 POLICY_KEY = "/var/lib/xmesh-xray-sync/policy-public-key"
 
 
@@ -44,16 +48,50 @@ def _b64(value, limit):
     return raw
 
 
-def verify_bundle(raw, challenge, node, node_public, panel_public, local, expected_receipt=None):
-    doc = observed.strict_json(raw)
-    if not isinstance(doc, dict) or set(doc) != {"head", "receipt", "witness", "inventory"}:
+def _unpack_bundle(raw):
+    doc = observed.strict_json(raw, limit=RESPONSE_LIMIT)
+    fields = {"head", "receipt", "witness", "inventory"}
+    if not isinstance(doc, dict) or set(doc) not in (fields, fields | {"inventoryEncoding"}):
         raise ValueError("invalid WAL transport response")
+    wire = _b64(doc["inventory"], WIRE_INDEX_LIMIT)
+    if "inventoryEncoding" not in doc:
+        return doc, wire
+    if doc["inventoryEncoding"] != "gzip":
+        raise ValueError("unsupported WAL inventory encoding")
+    try:
+        decoder = zlib.decompressobj(wbits=31)
+        index = decoder.decompress(wire, INDEX_LIMIT + 1)
+    except zlib.error as error:
+        raise ValueError("invalid compressed WAL inventory") from error
+    if (not WIRE_INDEX_LIMIT < len(index) <= INDEX_LIMIT or not decoder.eof
+            or decoder.unused_data or decoder.unconsumed_tail):
+        raise ValueError("invalid compressed WAL inventory bounds")
+    return doc, index
+
+
+def _pack_inventory(index):
+    if not 0 < len(index) <= INDEX_LIMIT:
+        raise ValueError("full WAL index exceeds the uncompressed limit")
+    if len(index) <= WIRE_INDEX_LIMIT:
+        return {"inventory": base64.b64encode(index).decode("ascii")}
+    wire = gzip.compress(index, compresslevel=6, mtime=0)
+    if len(wire) > WIRE_INDEX_LIMIT:
+        raise ValueError("full WAL index exceeds the XSP/2 transfer cap")
+    return {"inventory": base64.b64encode(wire).decode("ascii"), "inventoryEncoding": "gzip"}
+
+
+def verify_bundle(raw, challenge, node, node_public, panel_public, local, expected_receipt=None):
+    doc, index = _unpack_bundle(raw)
+    return _verify_bundle(doc, index, challenge, node, node_public, panel_public, local,
+                          expected_receipt)
+
+
+def _verify_bundle(doc, index, challenge, node, node_public, panel_public, local, expected_receipt):
     head_raw = _b64(doc["head"], 4096)
     receipt = _b64(doc["receipt"], 4096)
     if expected_receipt is not None and receipt != expected_receipt:
         raise ValueError("stored WAL receipt differs from the current checkpoint")
     witness = _b64(doc["witness"], 4096)
-    index = _b64(doc["inventory"], INDEX_LIMIT)
     envelope = observed.strict_json(head_raw)
     if (not isinstance(envelope, dict) or set(envelope) != {"algorithm", "payload", "signature"}
             or head_raw != observed.canonical(envelope) + b"\n"
@@ -88,8 +126,8 @@ def _post(root, request):
     ], check=True, timeout=30)
     code = status.read_text(encoding="ascii").strip()
     with output.open("rb") as reply:
-        raw = reply.read(544 * 1024 + 1)
-    if len(raw) > 544 * 1024:
+        raw = reply.read(RESPONSE_LIMIT + 1)
+    if len(raw) > RESPONSE_LIMIT:
         raise ValueError("oversized WAL transport response")
     if code == "404" and request["operation"] == "head":
         if observed.strict_json(raw) == {"error": "No committed WAL checkpoint."}:
@@ -327,9 +365,9 @@ def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, 
     def current(expected_receipt=None):
         challenge = secrets.token_hex(32)
         response = post({"operation": "head", "nodeId": node_id, "challenge": challenge})
-        proof = verify_bundle(response, challenge, node_id, node_pub, panel_pub, local,
-                              expected_receipt)
-        index = _b64(observed.strict_json(response)["inventory"], INDEX_LIMIT)
+        doc, index = _unpack_bundle(response)
+        proof = _verify_bundle(doc, index, challenge, node_id, node_pub, panel_pub, local,
+                               expected_receipt)
         return proof, index
 
     prior = b""
@@ -364,14 +402,12 @@ def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, 
 
     witness, inventory = producer.produce_witness(
         node_id, runtime, local, None, node_pub, sign=sign)
-    if len(inventory) > INDEX_LIMIT:
-        raise ValueError("full WAL index exceeds the XSP/2 transfer cap")
     if prior and (len(inventory) <= len(prior) or not inventory.startswith(prior)):
         raise ValueError("local WAL snapshot no longer extends the verified remote head")
     stored = observed.strict_json(post({
         "operation": "store", "nodeId": node_id,
         "witness": base64.b64encode(witness).decode("ascii"),
-        "inventory": base64.b64encode(inventory).decode("ascii"),
+        **_pack_inventory(inventory),
     }))
     if not isinstance(stored, dict) or set(stored) != {"receipt"}:
         raise ValueError("invalid WAL store acknowledgment")

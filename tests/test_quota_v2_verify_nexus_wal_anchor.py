@@ -9,6 +9,7 @@ signing alone must not allow replay, Xray re-admission or any refund.
 """
 import base64
 import copy
+import gzip
 import hashlib
 import os
 from pathlib import Path
@@ -25,6 +26,32 @@ import verify_nexus_wal_anchor as verifier
 import sign_observation as signed
 import quota_v2_meter_wal_fixture as wal_fixture
 from test_quota_v2_inventory_witness import ExternalInventoryWitnessTests
+
+
+class WalIndexEncodingTests(unittest.TestCase):
+    def test_compressed_inventory_retains_exact_bytes_and_rejects_invalid_members(self):
+        raw = b"".join(
+            (signed.canonical({
+                "sequence": sequence,
+                "email": f"xmesh-u{sequence // 2 + 1}--vless-main",
+                "runtimeId": "a" * 64,
+                **{field: hashlib.sha256(f"{field}-{sequence}".encode()).hexdigest()
+                   for field in ("filename", "firstWalDigest", "previousDigest", "digest")},
+            }) + b"\n")
+            for sequence in range(1000)
+        )
+        self.assertGreater(len(raw), wal_transport.WIRE_INDEX_LIMIT)
+        bundle = dict(wal_transport._pack_inventory(raw), head="", receipt="", witness="")
+        self.assertEqual(bundle["inventoryEncoding"], "gzip")
+        self.assertEqual(wal_transport._unpack_bundle(signed.canonical(bundle))[1], raw)
+        wire = base64.b64decode(bundle["inventory"], validate=True)
+        for bad in (wire + wire, wire[:-1], gzip.compress(b"0" * (wal_transport.INDEX_LIMIT + 1))):
+            altered = dict(bundle, inventory=base64.b64encode(bad).decode("ascii"))
+            with self.assertRaisesRegex(ValueError, "compressed WAL inventory"):
+                wal_transport._unpack_bundle(signed.canonical(altered))
+        legacy = dict(wal_transport._pack_inventory(b"existing"), head="", receipt="", witness="")
+        self.assertNotIn("inventoryEncoding", legacy)
+        self.assertEqual(wal_transport._unpack_bundle(signed.canonical(legacy))[1], b"existing")
 
 
 class NexusExternalWalAnchorTests(unittest.TestCase):

@@ -52,8 +52,8 @@ def unique_pairs(pairs):
     return result
 
 
-def strict_json(raw):
-    if not 0 < len(raw) <= MAX_RECORD:
+def strict_json(raw, *, limit=MAX_RECORD):
+    if not 0 < len(raw) <= limit:
         raise ValueError("invalid evidence size")
     value = json.loads(
         raw, object_pairs_hook=unique_pairs,
