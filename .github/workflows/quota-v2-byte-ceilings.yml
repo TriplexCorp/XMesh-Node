@@ -17,6 +17,8 @@ on:
       - 'experiments/xray-dataplane-fence/experimental_zero_meter_preflight.go.txt'
       - 'experiments/xray-dataplane-fence/experimental_zero_meter_preflight_test.go.txt'
       - 'experiments/quota-v2-physical-stop/successor_meter.py'
+      - 'tests/test_quota_v2_successor_meter.py'
+      - 'experiments/xray-dataplane-fence/xmeshdrain.go.txt'
       - 'experiments/quota-v2-physical-stop/quarantine_policy.py'
       - 'experiments/xray-dataplane-fence/test_xray_live_signed_cap.py'
       - 'experiments/quota-v2-physical-stop/cap_install.py'
