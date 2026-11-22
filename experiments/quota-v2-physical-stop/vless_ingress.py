@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import struct
 import time
 import uuid
@@ -69,12 +70,29 @@ def publish(fd, payload, measured, predecessor=None):
         tag = "vless-" + cls
         if email != f"xmesh-u{user}--{tag}":
             raise ValueError("invalid ingress class")
-        with socket.socket(socket.AF_UNIX) as probe:
-            probe.settimeout(3)
-            probe.connect(os.path.join(destination, tag))
-            peer = probe.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-            if struct.unpack("3i", peer)[:2] != (pid, os.geteuid()):
-                raise ValueError("private VLESS socket has a different owner")
+        # A kernel PID can be seven digits: the literal
+        # /proc/<pid>/root/dev/shm/xmesh-<64hex>/vless-* pathname then
+        # exceeds Linux sockaddr_un.sun_path (107 useful bytes).
+        # Open the source-pinned PRIVATE inode first and connect through a
+        # short /proc/self/fd path, without changing global CWD or creating
+        # an attacker-raceable temporary symlink.
+        directory = os.open(destination, os.O_RDONLY | os.O_DIRECTORY
+                            | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            inode = os.fstat(directory)
+            if (not stat.S_ISDIR(inode.st_mode) or
+                    stat.S_IMODE(inode.st_mode) != 0o700 or
+                    inode.st_uid != os.geteuid()):
+                raise ValueError("private VLESS target directory changed")
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(3)
+                probe.connect(f"/proc/self/fd/{directory}/{tag}")
+                peer = probe.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+                if struct.unpack("3i", peer)[:2] != (pid, os.geteuid()):
+                    raise ValueError("private VLESS socket has a different owner")
+        finally:
+            os.close(directory)
     if wal_transport.runtime_identity.trusted_runtime_identity(pid) != runtime:
         raise ValueError("Xray changed before ingress publication")
     if current != destination:
