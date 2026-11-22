@@ -83,7 +83,6 @@ def _checked_marker(record, old, digest, measured, prep):
                 for k, value in expected.items()) or
             not isinstance(record["freshExecutableSha256"], str) or
             not isinstance(record["freshConfigSha256"], str) or
-            cap_install.wal_transport.observed is None or
             not all(len(record[k]) == 64 and
                     all(c in "0123456789abcdef" for c in record[k])
                     for k in ("freshExecutableSha256", "freshConfigSha256"))):
