@@ -747,6 +747,8 @@ type Writer interface {""",
     subprocess.run(
         ["gofmt", "-w", str(shared / "xmeshdrain.go"),
          str(shared / "experimental_cap_socket.go"),
+         str(shared / "experimental_zero_meter_preflight.go"),
+         str(shared / "experimental_zero_meter_preflight_test.go"),
          str(shared / "observed_checkpoint.go"),
          str(shared / "runtime_identity.go"),
          str(shared / "observed_checkpoint_test.go"),
