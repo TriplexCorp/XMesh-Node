@@ -616,6 +616,78 @@ class FirstCapHandoffTests(unittest.TestCase):
                 calendar_fence._verified_old_wal_charge_heads(
                     fd, self.node, 100, self.claims, forged, self.pub, runtime)
 
+    def test_calendar_requires_every_main_and_cdn_stream_ack_independently(self):
+        import charge_worker
+        import meter_inventory_audit as registry
+
+        directory = self.fixture.root / "two-class-ack-audit"
+        directory.mkdir(mode=0o700)
+        state = self.fixture.root / "two-class-ack-state"
+        state.mkdir(mode=0o700)
+        fd = os.open(state, os.O_DIRECTORY | os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        measured = ("f" * 64, "2026-11-21T00:00:00Z", 4321, self.runtime)
+        docker = {"Id": measured[0], "State": {
+            "StartedAt": measured[1], "Running": True, "Pid": measured[2]}}
+        names = ["meter-" + digit * 64 + ".jsonl" for digit in ("a", "b")]
+        births = {
+            names[0]: {"runtimeId": self.runtime,
+                       "email": self.aliases[0]["email"], "direction": "uplink"},
+            names[1]: {"runtimeId": self.runtime,
+                       "email": self.aliases[1]["email"], "direction": "downlink"},
+        }
+        last = {
+            names[0]: {"sequence": 1, "nextBytes": 5, "digest": "b" * 64},
+            names[1]: {"sequence": 1, "nextBytes": 9, "digest": "c" * 64},
+        }
+        verified = {name: (last[name], "d" * 64, "e" * 64) for name in names}
+        contents = {name: self.guard.canonical({
+            "sequence": last[name]["sequence"],
+            "digest": last[name]["digest"]}) + b"\n" for name in names}
+        checkpoint = {"inboundMeters": [
+            {"email": self.aliases[0]["email"], "uplinkBytes": 5,
+             "downlinkBytes": 0},
+            {"email": self.aliases[1]["email"], "uplinkBytes": 0,
+             "downlinkBytes": 9},
+        ]}
+        def read(_fd, name, _digest):
+            return contents[name]
+
+        with (
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=(docker, str(directory))),
+            mock.patch.object(registry, "verify_meter_inventory",
+                              return_value=(births, verified)),
+            mock.patch.object(charge_worker, "_bytes_after_validation",
+                              side_effect=read),
+            mock.patch.object(calendar_fence.wal_transport, "_write_public"),
+            mock.patch.object(charge_worker, "_durable_cursor",
+                              side_effect=[(1, "cdn"), (0, "main")]) as cursors,
+        ):
+            with self.assertRaisesRegex(ValueError, "no signed Nexus charge receipt"):
+                calendar_fence._verified_old_wal_charge_heads(
+                    fd, self.node, 100, self.claims, checkpoint,
+                    self.pub, measured)
+            self.assertEqual(cursors.call_count, 2)
+        with (
+            mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
+                              return_value=(docker, str(directory))),
+            mock.patch.object(registry, "verify_meter_inventory",
+                              return_value=(births, verified)),
+            mock.patch.object(charge_worker, "_bytes_after_validation",
+                              side_effect=read),
+            mock.patch.object(calendar_fence.wal_transport, "_write_public"),
+            mock.patch.object(charge_worker, "_durable_cursor",
+                              side_effect=[(1, "cdn"), (1, "main")]),
+        ):
+            receipt = calendar_fence._verified_old_wal_charge_heads(
+                fd, self.node, 100, self.claims, checkpoint, self.pub, measured)
+            self.assertTrue(receipt["allOldStreamTailsNexusAcknowledged"])
+            self.assertEqual(receipt["verifiedStreamCount"], 2)
+            self.assertFalse(receipt["canResume"])
+            self.assertFalse(receipt["finalMeterVerified"])
+            self.assertEqual(receipt["refundableBytes"], 0)
+
     def verify(self, claims=None):
         return cap.verify_grant(
             self.signed_grant(claims), self.evidence(),
