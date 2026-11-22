@@ -102,7 +102,12 @@ func TestQuotaV2FreshMeterRejectsCountersAndExistingSignedCaps(t *testing.T) {
     if _,err:=verifyPristineSuccessorMeter(req);err!=nil{
         t.Fatalf("a genuinely registered but zero-valued user counter is safe: %v",err)
     }
+    // Synthesize an already-tainted foreign byte *without* using the
+    // source-pinned trusted WAL writer. A strict production raw Add would
+    // intentionally panic and cannot be used to seed a negative fixture.
+    enabled=false
     counter.Add(1)
+    enabled=true
     if _,err:=verifyPristineSuccessorMeter(req);err==nil {
         t.Fatal("nonzero user counter passed pristine successor check")
     }
