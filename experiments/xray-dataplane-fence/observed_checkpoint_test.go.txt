@@ -735,3 +735,34 @@ func TestSignedMainOnlyCalendarFenceIncludesUnusedCDNInNonfinalSnapshot(t *testi
         t.Fatal("old MAIN stream reopened after immutable calendar fence")
     }
 }
+
+func TestSignedCalendarFenceRejectsUnlistedRawAlias(t *testing.T) {
+    _,manager,p,expected,pub,priv:=signedCapTestFixture(t)
+    if err:=installSignedFirstGenesisCap(
+        signedCapTestEnvelope(t,p,priv),pub,expected);err!=nil {
+        t.Fatalf("failed to install exact signed alias roster: %v",err)
+    }
+    // A StatsService counter may exist for a same-account alias that was
+    // never part of the signed MAIN/CDN policy or any active session. A
+    // nonfinal checkpoint must not omit it and claim complete coverage.
+    if _,err:=manager.RegisterCounter(
+        "user>>>xmesh-u101--unassigned>>>traffic>>>uplink");err!=nil {
+        t.Fatal(err)
+    }
+    scope:=checkpointScope{
+        Email:capMain,NodeID:p.NodeID,UserID:p.UserID,
+        Epoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,Revision:p.ReservationRevision,
+        RevocationID:testRevocation,
+    }
+    if _,err:=fenceScoped(context.Background(),scope);err!=nil {
+        t.Fatalf("irreversible deny must remain possible: %v",err)
+    }
+    if _,err:=persistObservedCheckpoint(scope);err==nil {
+        t.Fatal("unlisted StatsService user alias disappeared from signed calendar checkpoint")
+    }
+    gate.Lock()
+    rejected:=gate.users["xmesh-u101"]!=nil && gate.users["xmesh-u101"].fenced
+    gate.Unlock()
+    if !rejected {t.Fatal("refused checkpoint reopened old Xray user")}
+}
