@@ -398,6 +398,12 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertEqual(charge_receipts.call_args.args[1:3], (self.node, 100))
             self.assertEqual(
                 renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
+            with mock.patch.dict(os.environ, {
+                    "XMESH_QUOTA_V2_FRESH_METER_STAGING": "1"}):
+                self.assertEqual(
+                    renewal_worker.pending_renewals(
+                        str(state), self.node, self.pub),
+                    [(100, -1, prepared["nonce"])])
             self.assertFalse(calendar_fence.fence_successor(
                 "https://isolated.test", self.node, 100, str(state),
                 path, "e" * 64))
