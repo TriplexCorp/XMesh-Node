@@ -82,6 +82,43 @@ class MeasuredGenesisTests(unittest.TestCase):
         self.assertFalse(result["payload"]["canResume"])
         self.assertEqual(result["payload"]["authorizedBytes"], 0)
 
+    def test_separately_named_successor_is_measured_with_same_pidfd_and_hardening(self):
+        candidate = copy.deepcopy(self.runtime)
+        candidate["Name"] = "/xmesh-successor-quarantine"
+        self.overrides(runtime=candidate)
+        expected = runtime_identity.trusted_runtime_identity(self.child.pid)
+        observed = wal_transport._measure_quarantined_runtime(
+            container_name="xmesh-successor-quarantine")
+        self.assertEqual(observed, (
+            self.cid, self.started, self.child.pid, expected))
+        for invalid in (
+            lambda row: row["HostConfig"].update(NetworkMode="bridge"),
+            lambda row: row["HostConfig"].update(Privileged=True),
+            lambda row: row["HostConfig"].update(ReadonlyRootfs=False),
+            lambda row: row["HostConfig"].update(PidMode="host"),
+        ):
+            changed = copy.deepcopy(candidate)
+            invalid(changed)
+            with self.subTest(change=changed), mock.patch.object(
+                wal_transport, "_bound_journal",
+                return_value=(changed, "/unused")):
+                with self.assertRaises(ValueError):
+                    wal_transport._measure_quarantined_runtime(
+                        container_name="xmesh-successor-quarantine")
+
+    def test_arbitrary_docker_container_cannot_be_a_successor(self):
+        with mock.patch.object(wal_transport.subprocess, "check_output") as docker:
+            for value in ("", "xmesh-managed-xray-copy", "../other",
+                          "attacker-xray", "xmesh-successor-quarantine/evil"):
+                with self.subTest(name=value):
+                    with self.assertRaisesRegex(ValueError, "unknown measured Xray"):
+                        wal_transport._bound_journal(value)
+            docker.assert_not_called()
+        with mock.patch.object(runtime_identity.subprocess, "run") as docker:
+            with self.assertRaisesRegex(ValueError, "untrusted Xray"):
+                runtime_identity.inspect_managed_xray("other-xray")
+            docker.assert_not_called()
+
     def test_network_restart_and_publication_settings_must_be_isolated(self):
         invalid = [
             lambda x: x["HostConfig"].update(NetworkMode="bridge"),
