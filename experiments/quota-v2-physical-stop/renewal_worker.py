@@ -124,6 +124,16 @@ def _candidate(fd, names, node, user, pinned, now):
                                 evidence.get("freshRuntimeId"))
                     successor_meter._checked_marker(
                         evidence, original, digest, measured, prepared)
+                    if os.environ.get("XMESH_QUOTA_V2_AUTO_SUCCESSOR_POSITIVE") == "1":
+                        import successor_positive
+                        positive_name = successor_positive._filename(
+                            user, original["reservationId"])
+                        if positive_name not in names:
+                            return user, -2, successor_positive._challenge(
+                                original["reservationId"], measured[3])
+                        successor_positive._verified_saved_receipt(
+                            lease._identity_file(fd, positive_name, 32768),
+                            original, prepared, evidence, node, user, pinned)
                 return None
         return user, 0, _successor_nonce(original)
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
@@ -464,6 +474,15 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
         if user in failed_users:
             continue
         try:
+            if revision == -2:
+                if os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") != "1" or not (
+                        fresh_socket and fresh_executable and fresh_config):
+                    raise ValueError("positive successor requires a separately pinned fresh Xray")
+                import successor_positive
+                successor_positive.install_successor(
+                    panel, node, user, state, fresh_socket,
+                    fresh_executable, fresh_config)
+                continue
             if revision == -1:
                 if not (fresh_socket and fresh_executable and fresh_config):
                     raise ValueError("fresh Xray staging requires independent Unix socket and two SHA-256 pins")
