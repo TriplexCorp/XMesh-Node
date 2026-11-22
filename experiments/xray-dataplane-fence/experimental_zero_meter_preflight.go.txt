@@ -38,6 +38,7 @@ type zeroMeterResult struct {
     Nonce string `json:"nonce"`
     MeterEpoch string `json:"meterEpoch"`
     ReservationID string `json:"reservationId"`
+    Aliases []signedCapAlias `json:"aliases"`
     RuntimeID string `json:"runtimeId"`
     InventorySHA256 string `json:"inventorySha256"`
     ZeroInitialRawCounters bool `json:"zeroInitialRawCounters"`
