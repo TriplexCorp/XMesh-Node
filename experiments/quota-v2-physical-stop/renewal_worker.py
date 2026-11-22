@@ -107,6 +107,13 @@ def _candidate(fd, names, node, user, pinned, now):
                 digest = hashlib.sha256(wal_transport.observed.canonical(saved)).hexdigest()
                 calendar_fence._checked_saved(
                     observed, original, digest, original["runtimeId"])
+                # Optional SECOND, zero-spend stage. It never resumes
+                # ingress. Only source-pinned isolated successor Xray may
+                # respond, and it must have an empty private WAL namespace.
+                if os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1":
+                    import successor_meter
+                    if successor_meter._name(user, original["reservationId"]) not in names:
+                        return user, -1, _successor_nonce(original)
                 return None
         return user, 0, _successor_nonce(original)
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
@@ -414,7 +421,8 @@ def _activate_user(panel, node, user, state, socket_path):
     return True
 
 
-def run(panel, node, state=STATE, socket_path=SOCKET):
+def run(panel, node, state=STATE, socket_path=SOCKET,
+        fresh_socket=None, fresh_executable=None, fresh_config=None):
     if (os.geteuid() != 0 or os.environ.get(STAGING_ENV) != "1"
             or os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
             or not isinstance(panel, str) or not panel.startswith("https://")
@@ -446,6 +454,13 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
         if user in failed_users:
             continue
         try:
+            if revision == -1:
+                if not (fresh_socket and fresh_executable and fresh_config):
+                    raise ValueError("fresh Xray staging requires independent Unix socket and two SHA-256 pins")
+                import successor_meter
+                successor_meter.observe_successor_meter(
+                    node, user, state, fresh_socket, fresh_executable, fresh_config)
+                continue
             if revision == 0:
                 _prepare_successor(panel, state, node, user, challenge)
                 # Closing the old process's WAL is a separate, irreversible
@@ -476,9 +491,14 @@ if __name__ == "__main__":
     parser.add_argument("--node-id", required=True, type=int)
     parser.add_argument("--state", default=STATE)
     parser.add_argument("--socket", default=SOCKET)
+    parser.add_argument("--successor-socket", default=None)
+    parser.add_argument("--successor-executable-sha256", default=None)
+    parser.add_argument("--successor-config-sha256", default=None)
     args = parser.parse_args()
     try:
-        count = run(args.panel, args.node_id, args.state, args.socket)
+        count = run(args.panel, args.node_id, args.state, args.socket,
+                    args.successor_socket, args.successor_executable_sha256,
+                    args.successor_config_sha256)
         print(f"Quota V2 staged automatic renewals installed: {count}")
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Quota V2 automatic renewal refused: {error}\n")
