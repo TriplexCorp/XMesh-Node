@@ -126,6 +126,64 @@ def main():
                 "https://disposable.invalid", 42, fingerprint, CHALLENGE)
             print("PASS: real Xray PID/pidfd bound to a no-network, no-restart candidate", flush=True)
 
+            # A second, genuinely independently measured successor Xray is
+            # required. Merely relabeling the same PID, Docker container,
+            # runtime digest or WAL bind cannot create a new quota epoch.
+            successor = "xmesh-successor-quarantine"
+            assert docker("inspect", "--type", "container", successor,
+                          check=False).returncode != 0, (
+                "Refusing to touch an existing successor Xray"
+            )
+            successor_journal = root / "successor-journal"
+            successor_journal.mkdir(mode=0o700)
+            successor_created = False
+            try:
+                docker("run", "-d", "--name", successor, "--network", "none",
+                       "--restart", "no", "--read-only", "--cap-drop", "ALL",
+                       "--security-opt", "no-new-privileges", "--user", "0:0",
+                       "-v", str(config) + ":/etc/xray/config.json:ro",
+                       "-v", str(successor_journal) + ":" +
+                           journal_integrity.JOURNAL_DEST + ":rw",
+                       "--entrypoint", "xray",
+                       IMAGE, "run", "-config", "/etc/xray/config.json")
+                successor_created = True
+                until = time.monotonic() + 15
+                while True:
+                    try:
+                        fresh = wal_transport._measure_quarantined_runtime(
+                            container_name=successor)
+                        break
+                    except ValueError:
+                        if time.monotonic() >= until:
+                            raise
+                        time.sleep(0.25)
+                assert fresh[0] != cid and fresh[1] != started
+                assert fresh[2] != pid and fresh[3] != fingerprint
+                assert fresh[3] == runtime_identity.trusted_runtime_identity(fresh[2])
+                assert runtime_identity.inspect_managed_xray(successor) == fresh[:3]
+                _, old_journal = wal_transport._bound_journal()
+                _, separate_journal = wal_transport._bound_journal(successor)
+                assert os.stat(old_journal)[:2] != os.stat(separate_journal)[:2] or (
+                    os.stat(old_journal).st_ino != os.stat(separate_journal).st_ino)
+                assert old_journal != separate_journal
+                assert not any(name.startswith("meter-") or
+                               name.startswith("xmesh-meter-inventory-")
+                               for name in os.listdir(separate_journal))
+                assert wal_transport._measure_quarantined_runtime() == identity
+                stopped_or_rejected(
+                    lambda: wal_transport._measure_quarantined_runtime(
+                        container_name="arbitrary-container"),
+                    "unknown measured Xray")
+                docker("stop", "-t", "1", successor)
+                stopped_or_rejected(
+                    lambda: wal_transport._measure_quarantined_runtime(
+                        container_name=successor),
+                    "network-isolated")
+                print("PASS: two separate hardened Xray runtimes, Docker/PID fingerprints and private empty successor WAL", flush=True)
+            finally:
+                if successor_created:
+                    docker("rm", "-f", successor, check=False)
+
             # Docker normally disallows attaching another network to a
             # container created with --network none. Independently verify
             # that a real bridged Xray cannot pass the measured candidate
