@@ -189,7 +189,11 @@ class FirstCapHandoffTests(unittest.TestCase):
             # the pinned signed contents on each scan/retry without issuing
             # a new request or silently accepting a damaged local marker.
             self.assertEqual(
-                renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
+                renewal_worker.pending_renewals(str(state), self.node, self.pub),
+                [(100, 0, challenge)])
+            # A saved unsigned Xray-FENCE observation, not the presence of
+            # a zero-spend preparation, is now required to complete the
+            # predecessor-close phase.
             self.assertEqual(post.call_count, 3)
             tampered = json.loads(exact)
             tampered["signedEnvelope"] = tampered["signedEnvelope"].replace(
@@ -208,7 +212,8 @@ class FirstCapHandoffTests(unittest.TestCase):
             later_ns = (self.now + 180_000) * 1_000_000
             with mock.patch.object(renewal_worker.time, "time_ns", return_value=later_ns):
                 self.assertEqual(
-                    renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
+                    renewal_worker.pending_renewals(str(state), self.node, self.pub),
+                    [(100, 0, challenge)])
                 renewal_worker._prepare_successor(*args)
             self.assertEqual(post.call_count, 3)
             self.assertEqual(json.loads(marker.read_bytes()), json.loads(exact))
