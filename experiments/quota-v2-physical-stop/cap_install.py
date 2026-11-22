@@ -169,6 +169,7 @@ def _verify_fresh_zero_meter_receipt(result, scope, runtime):
             "schemaVersion", "nodeId", "userId", "nonce",
             "meterEpoch", "reservationId")},
         "kind": "xmesh.quota-v2.fresh-meter-observed",
+        "aliases": scope["aliases"],
         "runtimeId": runtime,
         "inventorySha256":
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
