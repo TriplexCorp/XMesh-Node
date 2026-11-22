@@ -93,14 +93,21 @@ def _candidate(fd, names, node, user, pinned, now):
     if now >= original["validUntilMs"]:
         successor_name = _successor_filename(user, original)
         if successor_name in names:
-            # An existing pathname alone does not prove a prepared successor.
-            # Re-verify the immutable, independently pinned signature on each
-            # bounded scan; damaged evidence fails closed and is logged.
+            # Existing zero-spend preparation is NOT a completed transition.
+            # Keep scheduling until the measured Xray has durably fenced its
+            # old user and returned a nonfinal WAL checkpoint.
             saved = lease._identity_file(fd, successor_name, 16384)
             _verify_successor_reply(
                 saved, original, node, user, _successor_nonce(original),
                 pinned, now)
-            return None
+            import calendar_fence
+            name = calendar_fence._fence_name(user, original["reservationId"])
+            if name in names:
+                observed = lease._identity_file(fd, name, 32768)
+                digest = hashlib.sha256(wal_transport.observed.canonical(saved)).hexdigest()
+                calendar_fence._checked_saved(
+                    observed, original, digest, original["runtimeId"])
+                return None
         return user, 0, _successor_nonce(original)
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
         return None
@@ -441,6 +448,13 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
         try:
             if revision == 0:
                 _prepare_successor(panel, state, node, user, challenge)
+                # Closing the old process's WAL is a separate, irreversible
+                # stage. This NEVER installs the candidate successor as a
+                # spending cap. A lost IPC response retries its exact durable
+                # fence, not a guessed new reservation or counter reset.
+                import calendar_fence
+                calendar_fence.fence_successor(
+                    panel, node, user, state, socket_path, executable)
                 continue
             caps.fetch_and_install_renewal(
                 panel, node, user, state, socket_path,
