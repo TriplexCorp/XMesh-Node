@@ -435,7 +435,7 @@ func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapCont
 		!reflect.DeepEqual(payload.AliasScopes, prior.AliasScopes) {
 		return errors.New("signed Xray cap: renewal changed reservation scope or skipped a revision")
 	}
-	if payload.IssuedAtMs < prior.IssuedAtMs || payload.ValidUntilMs < cap.validUntilMs ||
+	if payload.IssuedAtMs < prior.IssuedAtMs || payload.ValidUntilMs != cap.validUntilMs ||
 		payload.SharedCeilingBytes < cap.grantCeiling || payload.NodeCeilingBytes < cap.nodeCeiling ||
 		payload.CdnCeilingBytes < cap.cdnCeiling ||
 		payload.SharedCeilingBytes-cap.grantCeiling > maxSignedCapGrant ||
@@ -444,7 +444,7 @@ func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapCont
 		payload.WitnessedWalBytes < prior.WitnessedWalBytes ||
 		payload.WitnessedCdnBytes < prior.WitnessedCdnBytes ||
 		payload.WitnessedWalBytes > cap.chargedAll || payload.WitnessedCdnBytes > cap.chargedCDN {
-		return errors.New("signed Xray cap: renewal regressed counters or exceeded bounded authority")
+		return errors.New("signed Xray cap: renewal changed its deadline, regressed counters or exceeded bounded authority")
 	}
 	if expected.BeforeInstall != nil {
 		if err := expected.BeforeInstall(); err != nil {
@@ -469,10 +469,6 @@ func renewSignedCap(raw []byte, pinned ed25519.PublicKey, expected signedCapCont
 	cap.grantCeiling = payload.SharedCeilingBytes
 	cap.nodeCeiling = payload.NodeCeilingBytes
 	cap.cdnCeiling = payload.CdnCeilingBytes
-    if payload.ValidUntilMs > cap.validUntilMs {
-        armSignedCapExpiryLocked(identity,cap,cap.deadline.Add(time.Duration(payload.ValidUntilMs-cap.validUntilMs)*time.Millisecond))
-    }
-	cap.validUntilMs = payload.ValidUntilMs
 	cap.lastSeenMs = installedAt
 	cap.signedGrant = payload
 	cap.signedGrantDigest = digest

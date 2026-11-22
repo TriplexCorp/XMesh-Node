@@ -538,6 +538,8 @@ func TestV2SignedRenewalKeepsWALAndCumulativeSpend(t *testing.T) {
 			c.PolicySHA256 = p.PolicySHA256
 		}},
 		{"unobserved spend", func(p *signedCapPayload, _ *signedCapContext) { p.WitnessedWalBytes++ }},
+		{"deadline extension", func(p *signedCapPayload, _ *signedCapContext) { p.ValidUntilMs += 60_000 }},
+		{"changed deadline", func(p *signedCapPayload, _ *signedCapContext) { p.ValidUntilMs-- }},
 		{"unknown WAL digest", func(p *signedCapPayload, _ *signedCapContext) { p.InventoryTailDigest = strings.Repeat("a", 64) }},
 		{"decreased ceiling", func(p *signedCapPayload, _ *signedCapContext) { p.CdnCeilingBytes = 20; p.NodeCeilingBytes = 69 }},
 		{"excess increment", func(p *signedCapPayload, _ *signedCapContext) { p.SharedCeilingBytes += maxSignedCapGrant }},
