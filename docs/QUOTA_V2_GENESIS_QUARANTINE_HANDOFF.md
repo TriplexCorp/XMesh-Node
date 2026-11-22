@@ -220,3 +220,14 @@ against that new meter. A preparation or fence receipt MUST NOT be
 accepted as authorization to restart, resume or reset any counter.
 Hosted Actions must execute the new tests before claiming PASS. Keep
 the production flag disabled and both PRs draft.
+
+
+The Agent verifies the returned nonfinal checkpoint **against every
+signed MAIN/CDN alias**, not just whichever session happened to be
+active. It requires sorted full-roster inbound meter rows, monotonic
+integer byte counts, exact uplink/downlink sums, matching predecessor
+epoch/Node/user/runtime and zero refundable bytes. A truncated row,
+mismatched total, booleans in byte counters, unexpected same-user
+StatsService alias or altered local checkpoint fails closed. This
+additional structural verification is a defense against malformed local
+IPC/retained evidence and does not prove terminal byte accounting.
