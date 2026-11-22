@@ -147,11 +147,14 @@ def run(root: Path):
         // Public transport security terminates on the stable Xray frontend.
         h.workers = append(h.workers, &dsWorker{
             address: net.DomainAddress(private), proxy: p, tag: tag,
-            dispatcher: h.mux, sniffingRequest: sniffingRequest, ctx: ctx,
+            stream: mss, dispatcher: h.mux, sniffingRequest: sniffingRequest, ctx: ctx,
             uplinkCounter: uplinkCounter, downlinkCounter: downlinkCounter,
         })
     }
-    if pl == nil {""")
+    // Do not instantiate a second listener at the signed, original path:
+    // a duplicate Unix listener can either fail startup or bypass our
+    // source-pinned runtime/peer identity. The private worker is exclusive.
+    if private == "" && pl == nil {""")
     inbound_file.write_text(inbound_source)
     outbound_file = root / "proxy/vless/outbound/outbound.go"
     outbound_source = replace_once(outbound_file.read_text(), '"github.com/xtls/xray-core/app/reverse"',
