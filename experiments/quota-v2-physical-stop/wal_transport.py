@@ -342,11 +342,14 @@ def prepare_measured_genesis(panel, node_id, challenge, pins=None):
     return receipt
 
 
-def run(action, panel, node_id):
+def run(action, panel, node_id, container_name="xmesh-managed-xray"):
+    if container_name not in ("xmesh-managed-xray", "xmesh-successor-quarantine"):
+        raise ValueError("unknown independently managed Xray WAL container")
     if os.geteuid() != 0:
         raise ValueError("WAL evidence requires the installed root-owned agent")
     os.umask(0o077)
-    runtime, local = _bound_journal()
+    runtime, local = (_bound_journal() if container_name=="xmesh-managed-xray"
+                      else _bound_journal(container_name))
     with tempfile.TemporaryDirectory(prefix="xmesh-wal-transport-") as temp:
         root = Path(temp)
         evidence = [PRODUCT, "wal-evidence", "--panel", panel, "--node-id", str(node_id)]
