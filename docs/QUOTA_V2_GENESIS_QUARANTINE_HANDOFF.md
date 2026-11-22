@@ -262,3 +262,34 @@ This new SHA-256 **cannot** authorize a new SQL reservation, carryforward,
 refund, Xray restart or positive successor grant. Existing migration 0135
 requires separately preserved full WAL birth-index bytes; that condition
 and a genuinely fresh successor WAL stream must be proven before release.
+
+## Staged remote WAL birth confirmation after the fence
+
+Once the old user's Xray checkpoint matches the independently reread
+local WAL, the Agent releases its ordinary root-state flock while it
+runs the EXISTING strict-XSP/2 `charge-sync` protocol. This publishes
+(or idempotently replays) the complete fsynced WAL birth index to Nexus,
+then independently fetches and verifies Nexus's current signed latest
+head. The returned result still has `canResume=false`,
+`carryforwardApplied=false`, `finalMeterVerified=false` and zero
+refundable bytes. A wholly idle old Xray without any birth-index files
+is recorded distinctly as **no off-host birth index** and may not be
+mistaken for an externally witnessed nonzero meter.
+
+**The network request never holds the reconciler flock.** Once it
+completes, the Agent reacquires that same lock, checks the original
+signed cap/preparation and enrolled Node identity byte-for-byte,
+remeasures the exact old Xray PID and config, and independently rereads
+the complete journal. Only if its SHA-256 is unchanged does Agent fsync
+`calendar-fence-*.json` with both the local digest and the
+non-authorizing off-host registry status. If Nexus committed the index
+but its answer was lost, retry authenticates that same head and repeats
+the exact already-fenced Xray scope; no additional grant is created.
+
+This permits per-user WAL closure to make progress without holding a
+root flock across a slow network request. It does NOT authenticate the
+final amount of traffic actually delivered, prove off-host history
+before the first WAL-index bootstrap, or validate independent new-period
+Xray meter isolation. Those are still necessary before a positive
+successor issuance, and neither a local checkpoint nor an off-host
+index alone can authorize spending.
