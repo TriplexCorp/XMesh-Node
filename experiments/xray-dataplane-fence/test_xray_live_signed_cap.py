@@ -447,8 +447,8 @@ def run(xray, root, target, processes, scenario):
             witnessedWalBytes=(2 * (main_echoed + MIB) if witnessed_wal is None else witnessed_wal),
             witnessedCdnBytes=(2 * MIB if witnessed_cdn is None else witnessed_cdn),
             sharedCeilingBytes=ceiling, nodeCeilingBytes=ceiling, cdnCeilingBytes=cdn_ceiling,
-            issuedAtMs=timestamp, installBeforeMs=timestamp + 90_000,
-            validUntilMs=timestamp + 180_000,
+            issuedAtMs=timestamp, installBeforeMs=min(timestamp + 90_000, claims["validUntilMs"] - 1),
+            validUntilMs=claims["validUntilMs"],
         ))
         receipt = install_in_xray(sock_path, server.pid, runtime, b"", renewed, next_scope)
         assert install_in_xray(sock_path, server.pid, runtime, b"", renewed, next_scope) == receipt

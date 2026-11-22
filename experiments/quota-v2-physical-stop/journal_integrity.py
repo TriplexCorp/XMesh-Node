@@ -81,6 +81,8 @@ def _journal_binding(docker):
         raise ValueError("managed Xray journal mount list unavailable")
     found = [m for m in mounts if isinstance(m, dict)
              and m.get("Destination") in (JOURNAL_DEST, RUNTIME_DEST)]
+    if not found:
+        raise ValueError("managed Xray has no configured private WAL bind")
     if (len(found) != 1 or found[0].get("Type") != "bind"
             or found[0].get("RW") is not True
             or not isinstance(found[0].get("Source"), str)):
