@@ -158,6 +158,45 @@ def _chunks(raw):
         yield b"".join(pending)
 
 
+def _durable_request(fd, key, node, user, reservation, filename, remaining):
+    """Persist the EXACT charge batch before its possible SQL COMMIT.
+
+    Resizing a batch after a lost response would collide with the immutable
+    PostgreSQL first-sequence key. Always replay the original bytes, even if
+    the live Xray has appended more fsynced WAL in the meantime.
+    """
+    if not remaining or not remaining.endswith(b"\\n"):
+        raise ValueError("no complete charge WAL suffix")
+    first = wal_transport.observed.strict_json(remaining.splitlines()[0])
+    sequence = first.get("sequence")
+    if type(sequence) is not int or sequence <= 0:
+        raise ValueError("invalid WAL charge request sequence")
+    name = f"wal-charge-request-{key}-s{sequence}.json"
+    try:
+        saved = lease._identity_file(fd, name, 128 * 1024)
+    except FileNotFoundError:
+        raw = next(_chunks(remaining))
+        saved = {
+            "nodeId": node, "userId": user, "reservationId": reservation,
+            "filename": filename, "firstSequence": sequence,
+            "journal": base64.b64encode(raw).decode("ascii"),
+        }
+        quarantine._durable_store(fd, saved, name)
+    if (not isinstance(saved, dict) or set(saved) != {
+            "nodeId", "userId", "reservationId", "filename",
+            "firstSequence", "journal"}
+            or saved["nodeId"] != node or saved["userId"] != user
+            or saved["reservationId"] != reservation
+            or saved["filename"] != filename
+            or saved["firstSequence"] != sequence):
+        raise ValueError("foreign immutable WAL charge retry")
+    raw = wal_transport._b64(saved["journal"], BATCH_BYTES)
+    if (not remaining.startswith(raw) or not raw.endswith(b"\\n")
+            or len(raw) > BATCH_BYTES):
+        raise ValueError("original WAL charge request differs from current hash chain")
+    return raw
+
+
 def run(panel, node, state="/var/lib/xmesh-xray-sync"):
     if (os.geteuid() != 0 or
             os.environ.get("XMESH_QUOTA_V2_AUTO_RENEW_STAGING") != "1" or
@@ -210,10 +249,14 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync"):
                     lines, pinned, public)
                 if position == len(lines):
                     continue
-                remaining = b"".join(raw.splitlines(keepends=True)[position:])
-                for batch in _chunks(remaining):
+                all_lines = raw.splitlines(keepends=True)
+                while position < len(lines):
                     if submitted >= MAX_BATCHES_PER_POLL:
                         return submitted
+                    remaining = b"".join(all_lines[position:])
+                    batch = _durable_request(
+                        state_fd, key, node, user, grant["reservationId"],
+                        filename, remaining)
                     first = wal_transport.observed.strict_json(batch.splitlines()[0])
                     last = wal_transport.observed.strict_json(batch.splitlines()[-1])
                     request = {
@@ -243,6 +286,7 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync"):
                         state_fd, evidence,
                         f"wal-charge-{key}-s{last['sequence']}.json")
                     submitted += 1
+                    position = last["sequence"]
     finally:
         os.close(lock)
         os.close(state_fd)
