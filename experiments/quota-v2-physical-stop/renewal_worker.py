@@ -15,6 +15,7 @@ import secrets
 import subprocess
 import tempfile
 import time
+import uuid
 
 import first_cap_handoff as caps
 import genesis_reservation as lease
@@ -89,6 +90,10 @@ def latest_signed_cap(fd, names, node, user, pinned):
 
 def _candidate(fd, names, node, user, pinned, now):
     original = latest_signed_cap(fd, names, node, user, pinned)
+    if now >= original["validUntilMs"]:
+        if _successor_filename(user, original) not in names:
+            return user, 0, _successor_nonce(original)
+        return None
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
         return None
     revision = original["reservationRevision"]
@@ -215,6 +220,69 @@ def first_cap_challenge(genesis_challenge, user):
     return hashlib.sha256(message).hexdigest()
 
 
+def _successor_filename(user, previous):
+    predecessor = uuid.UUID(previous["reservationId"])
+    return f"calendar-successor-u{user}-{predecessor}.json"
+
+
+def _successor_nonce(previous):
+    raw = f"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_REQUEST_V1\0{uuid.UUID(previous['reservationId'])}"
+    return hashlib.sha256(raw.encode("ascii")).hexdigest()
+
+
+def _prepare_successor(panel, state, node, user, challenge):
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        names = os.listdir(fd)
+        pinned = wal_transport._panel_pin()
+        old = latest_signed_cap(fd, names, node, user, pinned)
+        now = time.time_ns() // 1_000_000
+        name = _successor_filename(user, old)
+        if name in names or now < old["validUntilMs"] or challenge != _successor_nonce(old):
+            return
+        active = quarantine._enrolled_activation(panel, node)
+        activation = active["activationReceiptSha256"]
+        if old["activationReceiptSha256"] != activation:
+            raise ValueError("successor is outside the enrolled Node")
+        response = wal_transport.observed.strict_json(quarantine._post_quarantined_desired({
+            "nodeId": node, "userId": user, "requestChallenge": challenge,
+            "calendarSuccessor": {"predecessorId": old["reservationId"]},
+        }, state, quarantine.CAP_DELIVERY_PATH))
+        if (not isinstance(response, dict)
+                or set(response) != {"status", "nodeId", "userId", "signedEnvelope"}
+                or response["status"] != "prepared_calendar_successor"
+                or response["nodeId"] != node or response["userId"] != user):
+            raise ValueError("unexpected successor response")
+        with tempfile.TemporaryDirectory(prefix="xmesh-successor-") as tmp:
+            public = os.path.join(tmp, "pinned.pem")
+            wal_transport._write_public(pinned, public)
+            envelope = wal_transport.observed.strict_json(response["signedEnvelope"].encode())
+            caps._signed(envelope, b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\x00", pinned, public)
+        payload = envelope["payload"]
+        expected = {
+            "schemaVersion": 1, "kind": "xmesh.quota-v2.calendar-successor-prepared",
+            "nodeId": node, "userId": user, "nonce": challenge,
+            "activationReceiptSha256": activation, "policySha256": old["policySha256"],
+            "predecessorRuntimeId": old["runtimeId"], "predecessorId": old["reservationId"],
+            "accountEpoch": old["accountEpoch"], "authorizedBytes": 0,
+            "canSpend": False, "canStart": False, "canResume": False,
+            "finalMeterVerified": False, "refundableBytes": 0,
+        }
+        for key, value in expected.items():
+            if type(payload.get(key)) is not type(value) or payload[key] != value:
+                raise ValueError("successor changes predecessor scope or authority")
+        if (set(payload) != set(expected) | {"meterEpoch", "reservationId", "issuedAtMs", "validUntilMs"}
+                or any(str(uuid.UUID(payload[k])) != payload[k] or payload[k] == old[k]
+                       for k in ("meterEpoch", "reservationId"))
+                or type(payload["issuedAtMs"]) is not int or type(payload["validUntilMs"]) is not int
+                or not old["validUntilMs"] <= payload["issuedAtMs"] < payload["validUntilMs"]):
+            raise ValueError("successor lacks a distinct valid meter identity")
+        quarantine._durable_store(fd, response, name)
+    finally:
+        os.close(lock)
+        os.close(fd)
+
+
 def activate_initial_cap(panel, node, state, socket_path):
     fd, lock = quarantine._locked_private_state(state)
     try:
@@ -321,6 +389,9 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
         if user in failed_users:
             continue
         try:
+            if revision == 0:
+                _prepare_successor(panel, state, node, user, challenge)
+                continue
             caps.fetch_and_install_renewal(
                 panel, node, user, state, socket_path,
                 executable, challenge, revision)

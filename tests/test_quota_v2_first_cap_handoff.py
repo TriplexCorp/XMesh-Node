@@ -7,6 +7,7 @@ The signed bytes are test fixtures, never authority to enable Quota V2.
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -124,6 +125,65 @@ class FirstCapHandoffTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 cap.verify_renewal(self.signed_grant(dict(claims, **{field: value})),
                                    prior, self.pub, nonce)
+
+    def test_calendar_prepare_retries_identical_request_and_never_installs(self):
+        if os.geteuid() != 0:
+            self.skipTest("root-owned Agent state")
+        state = self.fixture.root / "state"
+        state.mkdir(mode=0o700)
+        old = dict(self.claims, validUntilMs=self.now - 1)
+        existing = state / "genesis-positive-cap-u100.json"
+        existing.write_bytes(self.guard.canonical({
+            "status": "committed_first_cap", "nodeId": self.node, "userId": 100,
+            "signedEnvelope": self.signed_grant(old).decode(),
+        }))
+        existing.chmod(0o600)
+        challenge = renewal_worker._successor_nonce(old)
+        prepared = {
+            "schemaVersion": 1, "kind": "xmesh.quota-v2.calendar-successor-prepared",
+            "nodeId": self.node, "userId": 100, "nonce": challenge,
+            "activationReceiptSha256": self.fixture.activation, "policySha256": old["policySha256"],
+            "predecessorRuntimeId": old["runtimeId"], "predecessorId": old["reservationId"],
+            "accountEpoch": old["accountEpoch"], "meterEpoch": "55555555-5555-4555-8555-555555555555",
+            "reservationId": "66666666-6666-4666-8666-666666666666",
+            "issuedAtMs": self.now, "validUntilMs": self.now + 60_000,
+            "authorizedBytes": 0, "canSpend": False, "canStart": False, "canResume": False,
+            "finalMeterVerified": False, "refundableBytes": 0,
+        }
+
+        def reply(payload):
+            envelope = {"algorithm": "Ed25519", "payload": payload, "signature": self.sign(
+                b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\x00", payload)}
+            return self.guard.canonical({
+                "status": "prepared_calendar_successor", "nodeId": self.node, "userId": 100,
+                "signedEnvelope": self.guard.canonical(envelope).decode(),
+            })
+
+        exact = reply(prepared)
+        with (
+            mock.patch.object(cap.wal_transport, "_panel_pin", return_value=self.pub),
+            mock.patch.object(quarantine, "_enrolled_activation",
+                              return_value={"activationReceiptSha256": self.fixture.activation}),
+            mock.patch.object(quarantine, "_post_quarantined_desired", side_effect=[
+                TimeoutError("reply lost"), reply(dict(prepared, canSpend=True)), exact,
+            ]) as post,
+            mock.patch.object(cap.cap_install, "install_in_xray") as install,
+        ):
+            jobs = renewal_worker.pending_renewals(str(state), self.node, self.pub)
+            self.assertEqual(jobs, [(100, 0, challenge)])
+            args = ("https://isolated.test", str(state), self.node, 100, challenge)
+            marker = state / renewal_worker._successor_filename(100, old)
+            with self.assertRaises(TimeoutError):
+                renewal_worker._prepare_successor(*args)
+            with self.assertRaisesRegex(ValueError, "changes predecessor"):
+                renewal_worker._prepare_successor(*args)
+            self.assertFalse(marker.exists())
+            renewal_worker._prepare_successor(*args)
+            self.assertEqual(json.loads(marker.read_bytes()), json.loads(exact))
+            renewal_worker._prepare_successor(*args)
+            self.assertEqual(post.call_count, 3)
+            self.assertTrue(all(call == post.call_args for call in post.call_args_list))
+            install.assert_not_called()
 
     def verify(self, claims=None):
         return cap.verify_grant(
