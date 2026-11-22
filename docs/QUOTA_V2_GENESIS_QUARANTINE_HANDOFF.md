@@ -196,12 +196,15 @@ is a staging **stop identifier**, not an administrative revocation
 authorization. On lost Unix responses the identical Xray scope is retried.
 A forged/mismatched marker never grants access; it fails closed.
 
-For signed users who have **never started a VLESS session**, the
-instrumented Xray may derive the complete idle MAIN/CDN roster from its
-already installed Ed25519 first cap, but only with zero in-memory usage,
-no prior WAL inventory births for that user and no unexpected counters.
-It still writes only a nonfinal, zero-byte observation, never a positive
-permit.
+For any user with an actually **installed Ed25519 first or renewed
+cap**, the patched Xray now derives the complete original MAIN/CDN alias
+roster from that signed permit, not merely the subset observed in session
+tracking. An alias which has never carried traffic contributes zero only
+when its StatsService counter is absent AND the fsynced WAL audit confirms
+that no nonzero journal exists for it. Active MAIN with unused CDN, or
+fully dormant users, therefore produce a complete nonfinal old-epoch
+observation; foreign or uninstalled aliases and missing WAL fail closed.
+This never creates a new positive permit or refund.
 
 The Node regression covers lost IPC replies, marker tampering, unchanged
 Xray PID, idempotency and no positive install. The disposable patched
