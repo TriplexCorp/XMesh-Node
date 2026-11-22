@@ -419,3 +419,56 @@ authenticated off-host attestable measurement. No new
 positive Unix installation or post-period real-VLESS re-admission exists.
 The stage is deliberately disconnected from production quota enabling;
 hosted CI must PASS before it can be considered verified.
+
+
+## Draft positive successor Ed25519 pair, readmission and current blockers
+
+After a signed zero-spend calendar preparation, irreversible old Xray
+fence, independently checked original WAL, Nexus off-host registry and
+Nexus-signed final charge ACK for every old stream, \`successor_meter.py\`
+records a source-pinned distinct kernel/Docker runtime and truly empty
+private Xray WAL. With an EXPLICIT staging opt-in,
+\`renewal_worker.py\` may then call \`successor_positive.py\` over strict
+XSP/2 using one deterministic request nonce derived from the original
+reservation and fresh runtime. The new Nexus 0161 issuer returns two
+different, separately authenticated Nexus Ed25519 domains:
+
+- \`XMESH_XRAY_GENESIS_PREPARED_V1\0\`: strictly zero spend, bound
+  to the fresh process runtime, valid for only 120 seconds.
+- \`XMESH_QUOTA_V2_XRAY_CAP_ADMISSION_V1\0\`: positive bounded
+  reservation, with a new meter epoch, independent fresh WAL stream
+  identity, MAIN/CDN ceilings, signed aliases, a fresh expiration and
+  NO start/resume/refund entitlement.
+
+After verifying both domains, exact original user/Node/account/policy,
+predecessor WAL state and unchanged new kernel PID, the Agent sends both
+envelopes to the existing root-private \`/v1/quota-cap\` Xray socket.
+Xray verifies original signed Genesis/permit semantics and fsyncs
+\`positive-cap-u<user>.json\` before admitting any VLESS user packet;
+Agent independently rechecks the received runtime and exact grant
+SHA-256, then writes a root-only \`calendar-positive-u<user>-*.json\`
+receipt. After a lost SQL COMMIT/HTTP reply, a repeat uses the same
+request challenge and exact saved positive/grant signatures. Historical
+receipt replay by itself never creates new spend authority.
+
+The disposable source-pinned real Xray tests now include a
+\`calendar-positive\` case with fresh paired signatures and live
+MAIN/CDN VLESS traffic. Its WAL filename is derived from the NEW
+runtime; a subsequent identical install does not refill counters. Unit
+tests use actual OpenSSL Ed25519 signatures to reject changed epoch,
+runtime, policy, alias, monetary ceiling, nonce and unauthorizing fields.
+Nexus WAL charge selection also distinguishes the original signed
+first cap from the separately signed successor cap; old streams still
+select their old reservation.
+
+**Release is still blocked.** The existing single-per-Node off-host
+birth hash chain cannot yet merge a second Xray runtime's independent
+inventory as an append-only extension of the original external head.
+The staged second journal charge path explicitly refuses to charge
+against any unverifiable new birth prefix. The fresh Docker Xray is
+still network-isolated and the live public VLESS listener handoff is
+NOT automated. A second/further automatic calendar epoch, all-user
+onboarding to a running successor, real Postgres Docker 2-node
+SIGKILL/replay tests and queued GitHub Actions results are unfinished.
+Do NOT merge/enable production Quota V2 based on the signed install
+receipt alone. Keep draft, main/production untouched, feature flag 0.
