@@ -49,6 +49,10 @@ def _clean_mount(old_dir, candidate_dir):
         # independent PID and Unix-peer measurements check the live process.
         if "xray-instance.lock" not in names:
             raise ValueError("successor has no live Xray journal instance")
+        lock = os.stat("xray-instance.lock", dir_fd=candidate, follow_symlinks=False)
+        if (not stat.S_ISREG(lock.st_mode) or lock.st_uid != os.geteuid()
+                or stat.S_IMODE(lock.st_mode) != 0o600 or lock.st_nlink != 1):
+            raise ValueError("successor Xray runtime lock was replaced or linked")
     finally:
         os.close(candidate)
         os.close(old)
