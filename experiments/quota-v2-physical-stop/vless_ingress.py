@@ -4,6 +4,7 @@ import re
 import secrets
 import socket
 import struct
+import time
 import uuid
 
 import wal_transport
@@ -19,9 +20,32 @@ def publish(fd, payload, measured, predecessor=None):
     """Called under the Agent state lock after signed install and WAL evidence."""
     if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
         return
-    user = payload["userId"]
-    if type(user) is not int or user <= 0 or payload["runtimeId"] != measured[3]:
-        raise ValueError("foreign ingress grant")
+    # A route is NOT a new authorization. Only the already verified,
+    # currently spendable Nexus cap may be published. A stale or foreign
+    # permit must never resurrect a previously fenced user.
+    if (not isinstance(payload, dict) or type(measured) not in (tuple, list)
+            or len(measured) != 4):
+        raise ValueError("invalid independently measured ingress grant")
+    user = payload.get("userId")
+    now = time.time_ns() // 1_000_000
+    if (type(user) is not int or user <= 0
+            or type(payload.get("nodeId")) is not int or payload["nodeId"] <= 0
+            or payload.get("schemaVersion") != 1
+            or payload.get("kind") != "xmesh.quota-v2.xray-cap-admission"
+            or type(payload.get("validUntilMs")) is not int
+            or now >= payload["validUntilMs"]
+            or payload.get("canSpend") is not True
+            or payload.get("canStart") is not False
+            or payload.get("canResume") is not False
+            or payload.get("finalMeterVerified") is not False
+            or payload.get("refundableBytes") != 0
+            or payload.get("runtimeId") != measured[3]
+            or not isinstance(payload.get("aliasScopes"), list)
+            or not 1 <= len(payload["aliasScopes"]) <= 16
+            or any(not isinstance(payload.get(k), str)
+                   or str(uuid.UUID(payload[k])) != payload[k]
+                   for k in ("accountEpoch", "meterEpoch", "reservationId"))):
+        raise ValueError("expired, foreign or nonspending signed ingress cap")
     pid, runtime = measured[2:]
     destination = target(pid, runtime)
     link = f"ingress-u{user}"
@@ -33,9 +57,17 @@ def publish(fd, payload, measured, predecessor=None):
         raise ValueError("ingress route differs from signed predecessor")
     if wal_transport.runtime_identity.trusted_runtime_identity(pid) != runtime:
         raise ValueError("ingress peer no longer owns this grant")
+    previous_email = ""
     for alias in payload["aliasScopes"]:
-        tag = "vless-" + alias["class"]
-        if tag not in ("vless-main", "vless-cdn") or alias["email"] != f"xmesh-u{user}--{tag}":
+        if not isinstance(alias, dict) or set(alias) != {"email", "class"}:
+            raise ValueError("malformed signed VLESS inbound scope")
+        cls, email = alias["class"], alias["email"]
+        if (cls not in ("main", "cdn") or not isinstance(email, str)
+                or email <= previous_email):
+            raise ValueError("duplicate or unordered signed VLESS scope")
+        previous_email = email
+        tag = "vless-" + cls
+        if email != f"xmesh-u{user}--{tag}":
             raise ValueError("invalid ingress class")
         with socket.socket(socket.AF_UNIX) as probe:
             probe.settimeout(3)
@@ -60,10 +92,18 @@ def publish(fd, payload, measured, predecessor=None):
 
 def frontend(profile):
     """Build the loopback staging frontend from the measured VLESS roster."""
+    if not isinstance(profile, dict) or not isinstance(profile.get("inbounds"), list):
+        raise ValueError("signed Xray profile has no bounded inbounds")
     inbounds, rules = [], []
     outbounds = [{"tag": "deny", "protocol": "blackhole"}]
+    tags = set()
     for inbound in profile["inbounds"]:
-        tag = inbound["tag"]
+        if not isinstance(inbound, dict):
+            raise ValueError("malformed signed VLESS inbound")
+        tag = inbound.get("tag")
+        if tag in tags:
+            raise ValueError("duplicate signed VLESS inbound tag")
+        tags.add(tag)
         if (tag not in ("vless-main", "vless-cdn") or inbound["protocol"] != "vless"
                 or inbound.get("listen") != "127.0.0.1" or inbound.get("settings", {}).get("fallbacks")):
             raise ValueError("unsupported staging ingress")
@@ -97,6 +137,8 @@ def serve(panel, node, state, binary):
 
     if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
         raise ValueError("private ingress is not enabled for this fixture")
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        raise ValueError("unverified production ingress must remain disabled")
     fd, lock = quarantine._locked_private_state(state)
     try:
         enrollment = quarantine._enrolled_activation(panel, node)
@@ -129,7 +171,7 @@ def serve(panel, node, state, binary):
         os.close(lock)
         os.close(fd)
     os.execve(exe, [binary, "run", "-format", "json", "-config", f"/proc/self/fd/{config}"],
-              {"GITHUB_ACTIONS": "true", "XMESH_QUOTA_INGRESS_STATE": state})
+              {"GITHUB_ACTIONS": os.environ["GITHUB_ACTIONS"], "XMESH_QUOTA_INGRESS_STATE": state})
 
 
 if __name__ == "__main__":
