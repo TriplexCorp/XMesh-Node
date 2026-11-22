@@ -335,8 +335,44 @@ def run(binary, root, echo_port, processes):
                                         f"xmesh-u{USER_B}--vless-main") == {
             "uplink": 65536, "downlink": 65536,
         }
+        # Lost publication ACK: replaying the same signed runtime/route
+        # must NOT create a second lease, replace the symlink or reopen old
+        # WAL. A conflicting predecessor cannot steal an existing route.
+        link = f"ingress-u{USER_A}"
+        fd = os.open(ingress_state, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            before = os.stat(link, dir_fd=fd, follow_symlinks=False)
+            with mock.patch.dict(os.environ, {
+                "XMESH_QUOTA_V2_INGRESS_STAGING": "1",
+            }):
+                vless_ingress.publish(
+                    fd, a_new,
+                    ("b"*64, "unused", active[2][0], active[2][1]))
+                try:
+                    vless_ingress.publish(
+                        fd, a_old,
+                        ("a"*64, "unused", active[1][0], active[1][1]))
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("old signed epoch reclaimed new ingress")
+            after = os.stat(link, dir_fd=fd, follow_symlinks=False)
+            assert (before.st_dev,before.st_ino)==(after.st_dev,after.st_ino)
+        finally:
+            os.close(fd)
         assert first.poll() is None and second.poll() is None and front.poll() is None
-        print("PASS: real stable VLESS inlet moved only A to new signed private Xray, B's existing stream survived; old/new WAL separate")
+        # Terminating only A's new metering runtime must fail closed for A,
+        # while B's original stream continues under its first reservation.
+        second.kill()
+        assert second.wait(timeout=10)==-9
+        with connect(USER_A,"main") as denied:
+            assert not probe_echo(denied,1), "dead signed Xray granted A extra traffic"
+        echo_bytes(b, 16384)
+        assert query_direction_counters(binary, backend[1]["api"],
+                                        f"xmesh-u{USER_B}--vless-main") == {
+            "uplink":81920, "downlink":81920,
+        }
+        print("PASS: two-user stable VLESS A->new Xray, B live stream intact; replay idempotent, stale-generation hijack denied, SIGKILL of new A runtime fails closed without dropping B")
 
 
 def main():
