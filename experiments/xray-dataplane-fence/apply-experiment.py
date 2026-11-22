@@ -91,6 +91,14 @@ def run(root: Path):
         shared / "experimental_cap_socket.go",
     )
     shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_zero_meter_preflight.go.txt",
+        shared / "experimental_zero_meter_preflight.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_zero_meter_preflight_test.go.txt",
+        shared / "experimental_zero_meter_preflight_test.go",
+    )
+    shutil.copyfile(
         NODE_ROOT / "experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt",
         shared / "experimental_signed_cap_admission_test.go",
     )
