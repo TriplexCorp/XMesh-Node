@@ -133,6 +133,13 @@ def run(xray, root, target, processes, scenario):
     client = launch("client", os.environ)
     await_socket(sock_path, server)
     runtime = trusted_runtime_identity(server.pid)
+    # In the calendar-positive fixture this is a separately booted, empty
+    # Xray incarnation. The old user's original fenced process/WAL are
+    # tested by the independent calendar-fence scenario.
+    predecessor = str(uuid.uuid4())
+    successor_challenge = hashlib.sha256(
+        b"XMESH_QUOTA_V2_CALENDAR_POSITIVE_REQUEST_V1\0" +
+        predecessor.encode() + b"\0" + runtime.encode()).hexdigest()
     # This fresh, pre-admission process must prove its *entire* StatsService
     # and private byte-WAL namespace is pristine over the same measured
     # kernel PID / SO_PEERCRED private Unix socket. This is NEVER a grant.
@@ -159,7 +166,8 @@ def run(xray, root, target, processes, scenario):
     now = time.time_ns() // 1_000_000
     genesis = sign(root, key, b"XMESH_XRAY_GENESIS_PREPARED_V1\0", {
         "schemaVersion": 1, "kind": "xmesh.xray.genesis-prepared", "nodeId": node,
-        "activationReceiptSha256": activation, "candidateRuntimeId": runtime, "challenge": digest(),
+        "activationReceiptSha256": activation, "candidateRuntimeId": runtime,
+        "challenge": successor_challenge if scenario == "calendar-positive" else digest(),
         "preparedAtMs": now, "validUntilMs": now + 120_000,
         "authorizedBytes": 0, "canStart": False, "canResume": False,
     })
@@ -199,7 +207,8 @@ def run(xray, root, target, processes, scenario):
     staged = {"prepared": genesis_doc, "reply": response}
     scope = {"userId": user, "policySha256": policy, "accountEpoch": str(uuid.uuid4()),
              "meterEpoch": str(uuid.uuid4()), "reservationId": str(uuid.uuid4()), "revision": 1,
-             "nonce": digest(), "aliases": [{"email": alias[n], "class": n} for n in ("cdn", "main")]}
+             "nonce": successor_challenge if scenario == "calendar-positive" else digest(),
+             "aliases": [{"email": alias[n], "class": n} for n in ("cdn", "main")]}
     claims = {
         "schemaVersion": 1, "kind": "xmesh.quota-v2.xray-cap-admission",
         "nodeId": node, "userId": user, "activationReceiptSha256": activation,
@@ -240,6 +249,34 @@ def run(xray, root, target, processes, scenario):
         assert "refused zero-meter" in str(exc), str(exc)
     else:
         raise AssertionError("already provisioned Xray returned a fresh zero-meter proof")
+
+    if scenario == "calendar-positive":
+        # A dedicated fresh-process first permit consists of two distinct
+        # Nexus-domain Ed25519 signatures: zero-authority Genesis and an
+        # independent positive cap. It MUST not require recycling the old
+        # process's byte-WAL filename, runtime ID or old reservation.
+        assert g["challenge"] == successor_challenge
+        assert scope["nonce"] == successor_challenge
+        assert scope["reservationId"] != predecessor
+        with open_stream("main") as main, open_stream("cdn") as cdn:
+            echo_bytes(main, 16384)
+            echo_bytes(cdn, 16384)
+            raw = {p.name: p.read_bytes()
+                   for p in root.glob("meter-*.jsonl")}
+            assert len(raw) == 4, "new runtime did not create independent MAIN/CDN WAL"
+            for name in raw:
+                assert name.startswith("meter-")
+            assert query_direction_counters(xray, api_port, alias["main"]) == {
+                "uplink": 16384, "downlink": 16384}
+            assert query_direction_counters(xray, api_port, alias["cdn"]) == {
+                "uplink": 16384, "downlink": 16384}
+        install_in_xray(sock_path, server.pid, runtime, genesis, grant, scope)
+        assert {p.name: p.read_bytes() for p in root.glob("meter-*.jsonl")} == raw
+        # The same signed grant is an idempotent install acknowledgment,
+        # never a new or replenished 8 MiB/2 MiB allowance.
+        assert server.poll() is None and client.poll() is None
+        print("PASS: fresh-Xray paired Genesis+positive cap admitted real MAIN/CDN VLESS with independent WAL and exact replay")
+        return
 
     if scenario == "calendar-fence":
         # Genuine loopback VLESS from MAIN and CDN exists under ONE signed
@@ -517,6 +554,7 @@ if __name__ == "__main__":
     scenario("restart")
     scenario("expiry")
     scenario("calendar-fence")
+    scenario("calendar-positive")
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft != resource.RLIM_INFINITY and soft < 4096:
         assert hard == resource.RLIM_INFINITY or hard >= 4096
