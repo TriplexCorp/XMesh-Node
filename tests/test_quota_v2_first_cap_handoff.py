@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "experiments" / "quota-v2-physical-stop"))
 
 from test_quota_v2_quarantine_handoff import QuarantinePolicyTests
 import first_cap_handoff as cap
+import calendar_fence
 import quarantine_policy as quarantine
 import renewal_worker
 
@@ -220,6 +221,115 @@ class FirstCapHandoffTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "invalid clock"):
                         renewal_worker._prepare_successor(*args)
             install.assert_not_called()
+
+    def test_successor_fences_old_xray_and_replays_durable_nonfinal_wal(self):
+        # A zero-spend successor is only allowed to shut the OLD runtime
+        # down, not to grant a new period or reset the shared byte meter.
+        if os.geteuid() != 0:
+            self.skipTest("root-private Agent state and independent runtime measurement")
+        state = self.fixture.root / "calendar-fence-state"
+        state.mkdir(mode=0o700)
+        old = dict(self.claims, validUntilMs=self.now - 1)
+        prepared = {
+            "schemaVersion": 1, "kind": "xmesh.quota-v2.calendar-successor-prepared",
+            "nodeId": self.node, "userId": 100,
+            "nonce": renewal_worker._successor_nonce(old),
+            "activationReceiptSha256": self.fixture.activation,
+            "policySha256": old["policySha256"],
+            "predecessorRuntimeId": old["runtimeId"],
+            "predecessorId": old["reservationId"],
+            "accountEpoch": old["accountEpoch"],
+            "meterEpoch": "55555555-5555-4555-8555-555555555555",
+            "reservationId": "66666666-6666-4666-8666-666666666666",
+            "issuedAtMs": self.now, "validUntilMs": self.now + 60_000,
+            "authorizedBytes": 0, "canSpend": False, "canStart": False,
+            "canResume": False, "finalMeterVerified": False,
+            "refundableBytes": 0,
+        }
+        signed = {"algorithm": "Ed25519", "payload": prepared,
+                  "signature": self.sign(
+                      b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\\x00", prepared)}
+        response = {
+            "status": "prepared_calendar_successor", "nodeId": self.node,
+            "userId": 100, "signedEnvelope": self.guard.canonical(signed).decode(),
+        }
+        items = (
+            ("genesis-positive-cap-u100.json", {
+                "status": "committed_first_cap", "nodeId": self.node,
+                "userId": 100, "signedEnvelope": self.signed_grant(old).decode(),
+            }),
+            ("genesis-quarantine-envelope.json", self.evidence()),
+            (renewal_worker._successor_filename(100, old), response),
+        )
+        for name, data in items:
+            target = state / name
+            target.write_bytes(self.guard.canonical(data))
+            target.chmod(0o600)
+        runtime_measurement = ("f" * 64, "2026-11-21T00:00:00Z", 4321, self.runtime)
+        seen = []
+
+        def fenced(path, pid, runtime, scope):
+            seen.append((path, pid, runtime, scope.copy()))
+            if len(seen) == 1:
+                raise TimeoutError("reply lost after durable old-meter fence")
+            return {
+                "email": scope["email"], "fenced": True, "active": 0,
+                "drained": True, "finalMeterVerified": False,
+                "refundable": False,
+                "observedCheckpoint": {
+                    **scope, "runtimeId": runtime, "drained": True,
+                    "finalMeterVerified": False, "refundableBytes": 0,
+                },
+            }
+
+        path = "/private/isolated-xray.sock"
+        with (
+            mock.patch.object(cap.wal_transport, "_panel_pin", return_value=self.pub),
+            mock.patch.object(quarantine, "_enrolled_activation",
+                              return_value={"activationReceiptSha256": self.fixture.activation}),
+            mock.patch.object(cap.wal_transport, "_measure_quarantined_runtime",
+                              return_value=runtime_measurement),
+            mock.patch.object(cap.cap_install, "fence_calendar_in_xray",
+                              side_effect=fenced),
+            mock.patch.object(cap.cap_install, "install_in_xray") as positive,
+        ):
+            self.assertEqual(renewal_worker.pending_renewals(
+                str(state), self.node, self.pub),
+                [(100, 0, prepared["nonce"])])
+            with self.assertRaises(TimeoutError):
+                calendar_fence.fence_successor(
+                    "https://isolated.test", self.node, 100, str(state),
+                    path, "e" * 64)
+            marker = state / calendar_fence._fence_name(100, old["reservationId"])
+            self.assertFalse(marker.exists())
+            self.assertTrue(calendar_fence.fence_successor(
+                "https://isolated.test", self.node, 100, str(state),
+                path, "e" * 64))
+            self.assertTrue(marker.is_file())
+            self.assertEqual(
+                renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
+            self.assertFalse(calendar_fence.fence_successor(
+                "https://isolated.test", self.node, 100, str(state),
+                path, "e" * 64))
+            self.assertEqual(len(seen), 2)
+            self.assertEqual(seen[0], seen[1])
+            self.assertEqual(seen[0][1:3], (4321, self.runtime))
+            self.assertEqual(seen[0][3]["reservationId"], old["reservationId"])
+            self.assertEqual(seen[0][3]["meterEpoch"], old["meterEpoch"])
+            self.assertNotEqual(seen[0][3]["revocationId"], prepared["reservationId"])
+            positive.assert_not_called()
+            stored = self.guard.strict_json(marker.read_bytes())
+            self.assertFalse(stored["observedFence"]["finalMeterVerified"])
+            self.assertFalse(stored["observedFence"]["refundable"])
+            # Never treat tampered local Xray observation as successful
+            # fencing; the signed successor stays zero-spend.
+            stored["observedFence"]["observedCheckpoint"]["refundableBytes"] = 1
+            marker.write_bytes(self.guard.canonical(stored))
+            with self.assertRaisesRegex(ValueError, "nonfinal durable checkpoint"):
+                calendar_fence.fence_successor(
+                    "https://isolated.test", self.node, 100, str(state),
+                    path, "e" * 64)
+            positive.assert_not_called()
 
     def verify(self, claims=None):
         return cap.verify_grant(
