@@ -77,7 +77,7 @@ WAL_ROOT=/usr/local/libexec/xmesh-quota-wal
 for family in quota-v2-physical-stop xray-dataplane-fence; do
   install -d -o root -g root -m 0700 "$WAL_ROOT/$family"
 done
-for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,genesis_reservation,first_cap_handoff,cap_install,renewal_worker,calendar_fence,successor_meter,charge_worker,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
+for helper in quota-v2-physical-stop/{wal_transport,quarantine_policy,genesis_reservation,first_cap_handoff,cap_install,renewal_worker,calendar_fence,successor_meter,successor_positive,charge_worker,witness_inventory,verify_nexus_wal_anchor,journal_integrity,meter_inventory_audit} xray-dataplane-fence/{sign_observation,runtime_identity,meter_floor}; do
   python3 -m py_compile "$ROOT/experiments/$helper.py"
   install -o root -g root -m 0700 "$ROOT/experiments/$helper.py" "$WAL_ROOT/$helper.py"
 done
