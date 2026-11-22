@@ -357,6 +357,48 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     if u.lateCounterMutation {
         return empty,errors.New("unsafe Xray StatsService counter mutation or reset")
     }
+    // A signed user can expire without EVER opening a VLESS session.
+    // No observed email then exists in the transport ledger, yet the
+    // independently verified installed FIRST permit already binds the full
+    // MAIN/CDN alias roster. Allow a nonfinal, ZERO-BYTE fence checkpoint
+    // for this special case only: enforce that all real WAL history is
+    // present and no byte intent or StatsService alias has ever appeared.
+    // Do NOT generalize this fallback to active/previously metered users.
+    dormant:=len(seenEmails)==0
+    if dormant {
+        identity:=canonicalMeterUser(email)
+        cap:=experimentalByteCaps.users[identity]
+        if !experimentalByteCaps.strict || cap==nil ||
+            cap.runtimeID!=gate.runtimeID ||
+            cap.signedGrant.Kind!=signedCapKind ||
+            cap.signedGrant.NodeID!=scope.NodeID ||
+            cap.signedGrant.UserID!=scope.UserID ||
+            cap.signedGrant.AccountEpoch!=scope.Epoch ||
+            cap.signedGrant.MeterEpoch!=scope.MeterEpoch ||
+            cap.signedGrant.ReservationID!=scope.ReservationID ||
+            cap.signedGrant.ReservationRevision!=scope.Revision ||
+            cap.chargedAll!=0 || cap.chargedCDN!=0 ||
+            len(cap.aliases)==0 || len(cap.aliases)>16 {
+            return empty,errors.New("dormant calendar checkpoint requires an unchanged zero-byte signed cap")
+        }
+        if err:=verifyMeterJournalDirectory(gate.journalDir);err!=nil{return empty,err}
+        inventory,err:=readInventory(gate.journalDir)
+        if err!=nil{return empty,err}
+        for _,birth:=range inventory.steps {
+            if canonicalMeterUser(birth.Email)==identity {
+                return empty,errors.New("dormant calendar checkpoint found prior user WAL history")
+            }
+        }
+        for _,alias:=range cap.signedGrant.AliasScopes {
+            if canonicalMeterUser(alias.Email)!=identity {
+                return empty,errors.New("dormant calendar checkpoint saw foreign signed alias")
+            }
+            seenEmails=append(seenEmails,alias.Email)
+        }
+        if len(seenEmails)!=len(cap.aliases) {
+            return empty,errors.New("dormant calendar checkpoint aliases not fully pinned")
+        }
+    }
     if len(seenEmails)==0 || len(seenEmails)>16 {
         return empty,errors.New("missing or unbounded observed inbound identities")
     }
@@ -371,7 +413,10 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     // have not been proven quiescent.
     read := func(alias,direction string)(uint64,error) {
         counter:=observed.manager.GetCounter("user>>>"+alias+">>>traffic>>>"+direction)
-        if counter==nil { return 0,fmt.Errorf("missing %s counter for %s",direction,alias) }
+        if counter==nil {
+            if dormant {return 0,nil}
+            return 0,fmt.Errorf("missing %s counter for %s",direction,alias)
+        }
         n:=counter.Value()
         if n<0 { return 0,fmt.Errorf("negative %s counter for %s",direction,alias) }
         return uint64(n),nil
