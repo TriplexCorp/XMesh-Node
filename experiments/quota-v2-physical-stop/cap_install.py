@@ -160,6 +160,30 @@ def fence_calendar_in_xray(path, trusted_pid, runtime, scope):
         os.close(pidfd)
 
 
+def _verify_fresh_zero_meter_receipt(result, scope, runtime):
+    """Verify a read-only measured-Xray observation without confusing it
+    with signed Nexus positive admission or proof of off-host old WAL.
+    """
+    expected = {
+        **{k: scope[k] for k in (
+            "schemaVersion", "nodeId", "userId", "nonce",
+            "meterEpoch", "reservationId")},
+        "kind": "xmesh.quota-v2.fresh-meter-observed",
+        "runtimeId": runtime,
+        "inventorySha256":
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "zeroInitialRawCounters": True, "isolatedNewWalRoot": True,
+        "authorizedBytes": 0, "canSpend": False,
+        "canStart": False, "canResume": False,
+        "finalMeterVerified": False, "refundableBytes": 0,
+    }
+    if (not isinstance(result, dict) or set(result) != set(expected)
+            or any(type(result[k]) is not type(value) or result[k] != value
+                   for k, value in expected.items())):
+        raise ValueError("fresh Xray zero-meter observation is malformed or authorizing")
+    return result
+
+
 def observe_zero_meter_in_xray(path, trusted_pid, runtime, scope):
     """Read-only proof from the *fresh* quarantined Xray Unix peer.
 
@@ -226,22 +250,7 @@ def observe_zero_meter_in_xray(path, trusted_pid, runtime, scope):
             finally:
                 client.close()
         result = wal_transport.observed.strict_json(raw)
-        expected = {
-            **{k: scope[k] for k in required if k != "aliases"},
-            "kind": "xmesh.quota-v2.fresh-meter-observed",
-            "runtimeId": runtime,
-            "inventorySha256":
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "zeroInitialRawCounters": True,
-            "isolatedNewWalRoot": True,
-            "authorizedBytes": 0, "canSpend": False,
-            "canStart": False, "canResume": False,
-            "finalMeterVerified": False, "refundableBytes": 0,
-        }
-        if (not isinstance(result, dict) or set(result) != set(expected)
-                or any(type(result[k]) is not type(value) or result[k] != value
-                       for k, value in expected.items())):
-            raise ValueError("fresh Xray zero-meter observation is malformed or authorizing")
+        _verify_fresh_zero_meter_receipt(result, scope, runtime)
         check_runtime()
         return result
     finally:
