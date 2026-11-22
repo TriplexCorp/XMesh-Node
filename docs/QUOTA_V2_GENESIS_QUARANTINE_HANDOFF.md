@@ -173,3 +173,47 @@ VLESS. Only run on isolated disposable guests with explicit opt-in
 staging and immutable Nexus commit pin; no production flags or VPS
 were changed.
 
+
+## Draft automatic calendar handoff: signed preparation → irreversible old-Xray fence
+
+The 20-second `control-v6.0.27` staging renewal worker now separates
+three **different** states. A signed first/renewed cap is spendable only
+until its exact immutable `validUntilMs`. A signed
+`calendar-successor-prepared` object is **zero authority** and is
+persisted before the Agent attempts to fence the old process. Finally,
+`calendar-fence-u<user>-<old-reservation>.json` holds only a **nonfinal**
+checkpoint received from the original measured Xray PID over its
+UID-checked Unix socket.
+
+After Nexus confirms a real calendar boundary, the Agent authenticates
+the original signed quarantined roster and the successor Ed25519 domain,
+remeasures the original executable/config/runtime and invokes the
+existing `/v1/fence` control endpoint under the existing root flock.
+Xray fsyncs the scoped denial intent *before* cancelling all aliases,
+waits for its tracked sessions/readers/writers to drain and records the
+observed StatsService/WAL checkpoint. The deterministic local fence UUID
+is a staging **stop identifier**, not an administrative revocation
+authorization. On lost Unix responses the identical Xray scope is retried.
+A forged/mismatched marker never grants access; it fails closed.
+
+For signed users who have **never started a VLESS session**, the
+instrumented Xray may derive the complete idle MAIN/CDN roster from its
+already installed Ed25519 first cap, but only with zero in-memory usage,
+no prior WAL inventory births for that user and no unexpected counters.
+It still writes only a nonfinal, zero-byte observation, never a positive
+permit.
+
+The Node regression covers lost IPC replies, marker tampering, unchanged
+Xray PID, idempotency and no positive install. The disposable patched
+Xray test additionally opens genuine MAIN and CDN VLESS streams, fences
+the old user, checks both streams close, checks the WAL files are
+byte-for-byte unchanged on replay, and refuses new old-epoch sessions.
+
+**Not completed:** none of these records is a terminal meter or
+refundable balance. The old Xray remains fenced permanently. There is
+still **no verified independent successor WAL meter**, newly funded
+PostgreSQL lease, signed positive successor cap, or checked installation
+against that new meter. A preparation or fence receipt MUST NOT be
+accepted as authorization to restart, resume or reset any counter.
+Hosted Actions must execute the new tests before claiming PASS. Keep
+the production flag disabled and both PRs draft.
