@@ -261,7 +261,7 @@ def _verify_successor_reply(response, old, node, user, challenge, pinned, now):
     with tempfile.TemporaryDirectory(prefix="xmesh-successor-") as tmp:
         public = os.path.join(tmp, "pinned.pem")
         wal_transport._write_public(pinned, public)
-        caps._signed(envelope, b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\\x00", pinned, public)
+        caps._signed(envelope, b"XMESH_QUOTA_V2_CALENDAR_SUCCESSOR_V1\x00", pinned, public)
     payload = envelope["payload"]
     expected = {
         "schemaVersion": 1, "kind": "xmesh.quota-v2.calendar-successor-prepared",
