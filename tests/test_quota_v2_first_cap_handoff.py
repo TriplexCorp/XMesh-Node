@@ -339,6 +339,15 @@ class FirstCapHandoffTests(unittest.TestCase):
                               "verify_poststop_journal", return_value="7" * 64) as wal_audit,
             mock.patch.object(calendar_fence.wal_transport, "run",
                               side_effect=remote_sync_unlocked) as remote_sync,
+            mock.patch.object(calendar_fence,
+                              "_verified_old_wal_charge_heads",
+                              return_value={
+                                  "allOldStreamTailsNexusAcknowledged": True,
+                                  "verifiedStreamCount": 0,
+                                  "chargeHeadsSha256": "8" * 64,
+                                  "finalMeterVerified": False,
+                                  "refundableBytes": 0, "canResume": False,
+                              }) as charge_receipts,
             mock.patch.object(cap.cap_install, "install_in_xray") as positive,
         ):
             self.assertEqual(renewal_worker.pending_renewals(
@@ -369,6 +378,8 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertEqual(remote_sync.call_count, 2)
             self.assertEqual(remote_attempts, [
                 ("charge-sync", "https://isolated.test", self.node)] * 2)
+            charge_receipts.assert_called_once()
+            self.assertEqual(charge_receipts.call_args.args[1:3], (self.node, 100))
             self.assertEqual(
                 renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
             self.assertFalse(calendar_fence.fence_successor(
@@ -387,6 +398,8 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertEqual(record_original["independentJournalSha256"], "7" * 64)
             self.assertTrue(record_original["offhostBirthRegistry"][
                 "offhostBirthIndexVerified"])
+            self.assertTrue(record_original["oldWalChargeConfirmation"][
+                "allOldStreamTailsNexusAcknowledged"])
             self.assertFalse(stored["observedFence"]["finalMeterVerified"])
             self.assertFalse(stored["observedFence"]["refundable"])
             # Never treat tampered local Xray observation as successful
