@@ -7,6 +7,7 @@ Persistent per-revision challenges ensure lost responses retry the exact SQL
 transaction instead of silently creating a second issuance.
 """
 import argparse
+import bisect
 import os
 import re
 import secrets
@@ -25,6 +26,7 @@ BASE = re.compile(r"genesis-positive-cap-u([1-9][0-9]{0,18})\.json\Z")
 RENEW = re.compile(r"genesis-renewal-u([1-9][0-9]{0,18})-r([1-9][0-9]{0,18})\.json\Z")
 MAX_USERS = 2048
 MAX_PER_POLL = 16
+CURSOR_FILE = "genesis-renewal-scan-cursor.json"
 PIN_KEYS = ("nodeId", "userId", "activationReceiptSha256", "runtimeId",
             "policySha256", "accountEpoch", "meterEpoch", "reservationId",
             "aliasScopes", "validUntilMs")
@@ -103,6 +105,65 @@ def _candidate(fd, names, node, user, pinned, now):
     return (user, revision, challenge)
 
 
+
+def _durable_scan_cursor(state_fd, node, last_user):
+    """Advance a scheduling-only cursor; no quota entitlement lives here.
+
+    Atomic replacement and a parent fsync survive a service restart without
+    silently resetting the work queue to its first 16 users. The same root
+    lock protecting signed evidence also serializes competing worker ticks.
+    """
+    if (type(node) is not int or node <= 0 or
+            type(last_user) is not int or last_user <= 0):
+        raise ValueError("invalid quota renewal scan cursor")
+    raw = wal_transport.observed.canonical({
+        "nodeId": node, "lastUserId": last_user})
+    temporary = ".genesis-renewal-scan-" + secrets.token_hex(16)
+    output = os.open(temporary,
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                     os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=state_fd)
+    try:
+        with os.fdopen(output, "wb", closefd=True) as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, CURSOR_FILE,
+                   src_dir_fd=state_fd, dst_dir_fd=state_fd)
+        os.fsync(state_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=state_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _next_scan_batch(state_fd, users, node):
+    """Round-robin by persisted user ID, not by unreliable wall-clock slots.
+
+    A 20-second timer with a 16-user batch must advance by 16 users, not
+    move the window by one. User IDs remain ordered when users are created
+    or removed. A stale/malformed root-owned cursor fails closed.
+    """
+    if not users or users != sorted(set(users)):
+        raise ValueError("invalid ordered quota renewal work queue")
+    try:
+        saved = lease._identity_file(state_fd, CURSOR_FILE, 256)
+    except FileNotFoundError:
+        last_user = 0
+    else:
+        if (not isinstance(saved, dict) or set(saved) != {"nodeId", "lastUserId"}
+                or type(saved["nodeId"]) is not int or saved["nodeId"] != node
+                or type(saved["lastUserId"]) is not int
+                or saved["lastUserId"] <= 0):
+            raise ValueError("quota renewal scan cursor is corrupt or foreign")
+        last_user = saved["lastUserId"]
+    start = bisect.bisect_right(users, last_user) % len(users)
+    batch = (users[start:] + users[:start])[:MAX_PER_POLL]
+    _durable_scan_cursor(state_fd, node, batch[-1])
+    return batch
+
+
 def pending_renewals(state, node, pinned, now=None):
     """Read only immutable signed state under the synchronizer's root lock."""
     instant = time.time_ns() // 1_000_000 if now is None else now
@@ -119,10 +180,9 @@ def pending_renewals(state, node, pinned, now=None):
         selected = sorted(users)
         if not selected:
             return []
-        # Rotate the bounded work queue so an ineligible early user cannot
-        # indefinitely starve another user of a needed renewal.
-        start = (instant // 20000) % len(selected)
-        selected = (selected[start:] + selected[:start])[:MAX_PER_POLL]
+        # Durable round-robin: wall-clock slots can repeat or skip whenever
+        # a systemd run exceeds 20 seconds; neither case may starve users.
+        selected = _next_scan_batch(fd, selected, node)
         return [item for user in selected
                 if (item := _candidate(fd, names, node, user, pinned, instant)) is not None]
     finally:
