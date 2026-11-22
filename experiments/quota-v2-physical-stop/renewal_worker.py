@@ -21,8 +21,8 @@ import wal_transport
 STAGING_ENV = "XMESH_QUOTA_V2_AUTO_RENEW_STAGING"
 STATE = "/var/lib/xmesh-xray-sync"
 SOCKET = "/var/lib/xmesh-measured-lab/wal/drain.sock"
-BASE = re.compile(r"genesis-positive-cap-u([1-9][0-9]{0,18})\\.json\\Z")
-RENEW = re.compile(r"genesis-renewal-u([1-9][0-9]{0,18})-r([1-9][0-9]{0,18})\\.json\\Z")
+BASE = re.compile(r"genesis-positive-cap-u([1-9][0-9]{0,18})\.json\Z")
+RENEW = re.compile(r"genesis-renewal-u([1-9][0-9]{0,18})-r([1-9][0-9]{0,18})\.json\Z")
 MAX_USERS = 2048
 MAX_PER_POLL = 16
 PIN_KEYS = ("nodeId", "userId", "activationReceiptSha256", "runtimeId",
