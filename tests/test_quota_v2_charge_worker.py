@@ -23,6 +23,41 @@ def signed(doc):
 
 
 class ChargeWorkerTests(unittest.TestCase):
+    def test_historical_wal_selects_its_runtime_and_rejects_corrupt_evidence(self):
+        old, current = "a" * 64, "b" * 64
+        email = "xmesh-u42--vless-main"
+        legacy = "genesis-positive-cap-u42.json"
+        archive = f"wal-cap-u42-{old}.json"
+        cap = {"kind": "xmesh.quota-v2.xray-cap-admission", "nodeId": 7,
+               "userId": 42, "runtimeId": old, "reservationId": "old",
+               "aliasScopes": [{"email": email, "class": "main"}]}
+        birth = {"runtimeId": old, "email": email}
+        newer = dict(cap, runtimeId=current, reservationId="next")
+        for archived, fallback, accepted in (
+            (cap, newer, True),
+            (FileNotFoundError(), cap, True),
+            (FileNotFoundError(), newer, False),
+            (ValueError("corrupt archive"), cap, False),
+            (dict(cap, nodeId=8), cap, False),
+        ):
+            fixtures = {archive: archived, legacy: fallback}
+
+            def verify(fd, name, pin):
+                result = fixtures[name]
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            with mock.patch.object(worker.renewal_worker, "_verified_reply",
+                                   side_effect=verify) as verify_reply:
+                if accepted:
+                    self.assertEqual(worker._grant_for_birth(3, 7, 42, "c" * 64, birth), cap)
+                else:
+                    with self.assertRaises(ValueError):
+                        worker._grant_for_birth(3, 7, 42, "c" * 64, birth)
+                if not isinstance(archived, FileNotFoundError):
+                    verify_reply.assert_called_once_with(3, archive, "c" * 64)
+
     def test_wal_queue_reaches_every_stream_across_reopened_state(self):
         streams = [f"meter-{i:064x}.jsonl" for i in range(1, 1001)]
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 
+import first_cap_handoff as caps
 import genesis_reservation as lease
 import journal_integrity as journal
 import meter_inventory_audit as registry
@@ -219,12 +220,28 @@ def _next_charge_batch(fd, node, streams):
     return selected
 
 
-def _charge_stream(fd, state_fd, state_names, node, pinned, public, filename, birth, digest, user, allowance):
-    grant = renewal_worker.latest_signed_cap(
-        state_fd, state_names, node, user, pinned)
-    if (grant["runtimeId"] != birth["runtimeId"]
+def _grant_for_birth(fd, node, user, pinned, birth):
+    # Renewals retain the original reservation. Charging uses the proof tied
+    # to the birth, not the user's currently installed revision or runtime.
+    runtime = birth["runtimeId"]
+    try:
+        grant = renewal_worker._verified_reply(
+            fd, caps.wal_cap_filename(user, runtime), pinned)
+    except FileNotFoundError:
+        # Earlier installed Agents only persisted their original admission
+        # receipt. Never fall back when an existing archived proof is corrupt.
+        grant = renewal_worker._verified_reply(
+            fd, f"genesis-positive-cap-u{user}.json", pinned)
+    if (grant["kind"] != "xmesh.quota-v2.xray-cap-admission"
+            or grant["nodeId"] != node or grant["userId"] != user
+            or grant["runtimeId"] != runtime
             or not any(a["email"] == birth["email"] for a in grant["aliasScopes"])):
         raise ValueError("WAL witness refers to a foreign signed Xray permit")
+    return grant
+
+
+def _charge_stream(fd, state_fd, state_names, node, pinned, public, filename, birth, digest, user, allowance):
+    grant = _grant_for_birth(state_fd, node, user, pinned, birth)
     raw = _bytes_after_validation(fd, filename, digest)
     lines = [wal_transport.observed.strict_json(line)
              for line in raw.splitlines()]

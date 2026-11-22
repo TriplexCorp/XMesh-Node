@@ -370,8 +370,10 @@ class FirstCapHandoffTests(unittest.TestCase):
             mock.patch.object(cap, "install_staged_cap") as install,
         ):
             marker = state / "genesis-positive-cap-u100.json"
+            attribution = state / cap.wal_cap_filename(100, self.runtime)
             def lose_local_ack(*args):
                 self.assertFalse(marker.exists())
+                self.assertEqual(json.loads(attribution.read_bytes()), response)
                 raise OSError("Unix reply lost")
             install.side_effect = lose_local_ack
             args = ("https://isolated-ci.example", self.node, 100, str(state),
@@ -379,6 +381,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "reply lost"):
                 cap.fetch_and_install_rehearsal(*args)
             self.assertFalse(marker.exists())
+            self.assertEqual(json.loads(attribution.read_bytes()), response)
             install.side_effect = None
             install.return_value = {"runtimeId": self.runtime}
             cap.fetch_and_install_rehearsal(*args)

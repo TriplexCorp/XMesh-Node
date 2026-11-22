@@ -340,6 +340,10 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
                 or before != wal_transport._measure_quarantined_runtime(pins)
                 or identity != quarantine._enrolled_activation(panel,node_id)):
             raise ValueError("delivered cap or independently measured runtime changed")
+        # Charge attribution has to survive a crash after the Unix peer
+        # applies the grant, even before Agent records installation.
+        quarantine._durable_store(
+            state_fd, response, wal_cap_filename(user_id, before[3]))
     finally:
         os.close(lock)
         os.close(state_fd)
@@ -354,6 +358,13 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
         os.close(lock)
         os.close(state_fd)
     return receipt
+
+
+def wal_cap_filename(user_id, runtime_id):
+    if (not _int(user_id, 1, 2**63 - 1) or not isinstance(runtime_id, str)
+            or HEX64.fullmatch(runtime_id) is None):
+        raise ValueError("invalid WAL spending identity")
+    return f"wal-cap-u{user_id}-{runtime_id}.json"
 
 
 def _verify_cap_envelope(raw, pinned, public_file):
