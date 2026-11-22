@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -65,12 +66,31 @@ class ChargeWorkerTests(unittest.TestCase):
                 mock.patch.object(wal_transport, "_panel_pin", return_value="b"*64),
                 mock.patch.object(wal_transport, "_write_public"),
                 mock.patch.object(worker, "_charge_stream",
-                                  side_effect=[ValueError("invalid signed cursor"), 1]) as charge,
+                                  side_effect=[subprocess.TimeoutExpired("product", 30), 1]) as charge,
             ):
                 refused = set()
                 self.assertEqual(worker.run("https://isolated.test", 42, str(state), refused), 1)
                 self.assertEqual(refused, {1})
                 self.assertEqual([call.args[-2] for call in charge.call_args_list], [1, 2])
+
+    def test_old_wal_reconciles_before_failed_first_admission(self):
+        observed = mock.Mock()
+        observed.admission.side_effect = ValueError("invalid Genesis candidate")
+        with (
+            mock.patch.dict(os.environ, {
+                "XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
+                "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
+            }),
+            mock.patch.object(os, "geteuid", return_value=0),
+            mock.patch.object(worker, "run", observed.charge),
+            mock.patch.object(worker.renewal_worker, "activate_initial_cap", observed.admission),
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid Genesis candidate"):
+                worker.renewal_worker.run("https://isolated.test", 42, "/private/state", "/private/socket")
+        self.assertEqual(observed.mock_calls, [
+            mock.call.charge("https://isolated.test", 42, "/private/state", set()),
+            mock.call.admission("https://isolated.test", 42, "/private/state", "/private/socket"),
+        ])
 
     def test_batch_boundaries_never_split_durable_wal_lines(self):
         lines = [b'{"sequence":1}\n', b'{"sequence":2}\n',

@@ -4,9 +4,12 @@
 The signer here is disposable and serves only this IPC/dataplane regression.
 The production Nexus/XSP/2 issuance path is outside this test.
 """
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import hashlib
 import json
 import os
+import resource
 import socket
 import struct
 from pathlib import Path
@@ -258,6 +261,32 @@ def run(xray, root, target, processes, scenario):
         print("PASS: SIGKILL after 32768 accounted bytes preserved the WAL and denied reuse by new Xray")
         return
 
+    if scenario == "load":
+        echoed = 0
+        payload_size = 1024
+        for count in (100, 500):
+            with ExitStack() as active:
+                sockets = []
+                for _ in range(count):
+                    conn = active.enter_context(open_stream("main"))
+                    echo_bytes(conn, payload_size)
+                    sockets.append(conn)
+                # Every connection has already delivered bytes and remains
+                # open until the concurrent second transfer completes.
+                with ThreadPoolExecutor(max_workers=24) as traffic:
+                    list(traffic.map(lambda conn: echo_bytes(conn, payload_size), sockets))
+                echoed += count * payload_size * 2
+                assert query_direction_counters(xray, api_port, alias["main"]) == {
+                    "uplink": echoed, "downlink": echoed,
+                }
+                for direction in ("uplink", "downlink"):
+                    identity = f"{runtime}\0{alias['main']}\0{direction}".encode()
+                    path = root / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
+                    assert json.loads(path.read_bytes().splitlines()[-1])["nextBytes"] == echoed
+                print(f"PASS: {count} simultaneous VLESS streams confirmed by fsynced Xray WAL", flush=True)
+        assert server.poll() is None and client.poll() is None
+        return
+
     def renew(main_echoed, ceiling, revision, *, cdn_ceiling=2 * MIB,
               witnessed_wal=None, witnessed_cdn=None):
         index = (root / "xmesh-meter-inventory-v1.jsonl").read_bytes()
@@ -379,3 +408,8 @@ if __name__ == "__main__":
     scenario("renewal")
     scenario("restart")
     scenario("expiry")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft != resource.RLIM_INFINITY and soft < 4096:
+        assert hard == resource.RLIM_INFINITY or hard >= 4096
+        resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
+    scenario("load")

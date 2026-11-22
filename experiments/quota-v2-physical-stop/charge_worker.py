@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import tempfile
 
 import genesis_reservation as lease
@@ -320,7 +321,7 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None):
                     submitted += _charge_stream(
                         fd, state_fd, state_names, node, pinned, public, filename,
                         birth, verified[filename][1], user, per_stream + (offset < extra))
-                except (ValueError, OSError, KeyError, TypeError) as error:
+                except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
                     # A per-stream authority or ACK failure must not stall
                     # other streams. The verified inventory itself remains
                     # mandatory before we process any of them.

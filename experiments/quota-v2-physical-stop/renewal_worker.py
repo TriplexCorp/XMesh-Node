@@ -295,13 +295,13 @@ def run(panel, node, state=STATE, socket_path=SOCKET):
             or not isinstance(panel, str) or not panel.startswith("https://")
             or type(node) is not int or node <= 0):
         raise ValueError("automatic renewal is permitted only in explicit root staging")
-    installed = activate_initial_cap(panel, node, state, socket_path)
-    # First submit the actual fsynced byte-intent WAL, validate each Nexus
-    # Ed25519 charge receipt and persist a monotonic retry cursor. A signed
-    # birth-index head alone is NOT a PostgreSQL spending receipt.
+    # Reconcile fsynced debt before doing any admission work. An expired or
+    # malformed Genesis candidate must not stall charging for existing users.
+    # The charge worker verifies the remote head before processing streams.
     import charge_worker
     failed_users = set()
     charge_worker.run(panel, node, state, failed_users)
+    installed = activate_initial_cap(panel, node, state, socket_path)
     pinned = wal_transport._panel_pin()
     jobs = pending_renewals(state, node, pinned)
     if not jobs:
@@ -345,5 +345,5 @@ if __name__ == "__main__":
     try:
         count = run(args.panel, args.node_id, args.state, args.socket)
         print(f"Quota V2 staged automatic renewals installed: {count}")
-    except (ValueError, OSError, KeyError, TypeError) as error:
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Quota V2 automatic renewal refused: {error}\n")
