@@ -29,6 +29,32 @@ def _name(user, predecessor):
     return f"calendar-meter-u{user}-{predecessor}.json"
 
 
+def _verify_fresh_container_env(docker):
+    """Bind Xray's ACTUAL observed journal and strict-cap startup to the
+    independently inspected Docker WAL mount. A clean, unused Docker bind
+    is not proof if Xray secretly writes its bytes somewhere else.
+    """
+    import journal_integrity
+    config = docker.get("Config") if isinstance(docker, dict) else None
+    env = config.get("Env") if isinstance(config, dict) else None
+    if not isinstance(env, list) or not all(isinstance(x, str) for x in env):
+        raise ValueError("untrusted successor Xray process environment")
+    required = {
+        "GITHUB_ACTIONS": "true",
+        "XMESH_EXPERIMENTAL_DRAIN": "1",
+        "XMESH_EXPERIMENTAL_OBSERVED_DIR": journal_integrity.JOURNAL_DEST,
+    }
+    for name, value in required.items():
+        found = [entry.split("=", 1)[1] for entry in env
+                 if entry.startswith(name + "=")]
+        if found != [value]:
+            raise ValueError("successor Xray observed WAL environment differs from Docker bind")
+    bindings = [entry.split("=", 1)[1] for entry in env
+                if entry.startswith("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING=")]
+    if len(bindings) != 1 or not os.path.isabs(bindings[0]):
+        raise ValueError("new Xray must start with one absolute signed-cap binding")
+
+
 def _clean_mount(old_dir, candidate_dir):
     """Require a distinct root-owned, *empty* WAL namespace at both checks."""
     old = os.open(old_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -127,6 +153,7 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
             raise ValueError("old Xray WAL is not fully acknowledged")
         previous, old_root = wal_transport._bound_journal()
         fresh, fresh_root = wal_transport._bound_journal(SUCCESSOR)
+        _verify_fresh_container_env(fresh)
         measured = wal_transport._measure_quarantined_runtime(
             (executable_pin, config_pin), container_name=SUCCESSOR)
         original = wal_transport._measure_quarantined_runtime()
