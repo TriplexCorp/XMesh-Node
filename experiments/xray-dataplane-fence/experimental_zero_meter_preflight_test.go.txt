@@ -89,15 +89,15 @@ func TestQuotaV2FreshMeterFailsClosedForAliasMismatchAndHistoricState(t *testing
 
 func TestQuotaV2FreshMeterRejectsCountersAndExistingSignedCaps(t *testing.T) {
     req,_:=pristineFixture(t)
-    // Both a registered zero counter and nonzero byte usage prove that
-    // this is no longer a pristine, pre-admission successor process.
+    // A registered but zero-valued alias may be legitimate at Xray
+    // startup. A nonzero byte or any installed user cap is NOT.
     observed.Lock()
     manager:=observed.manager
     observed.Unlock()
     counter,err:=manager.RegisterCounter(rawMeterName(req.Aliases[0].Email,"uplink"))
     if err!=nil{t.Fatal(err)}
-    if _,err:=verifyPristineSuccessorMeter(req);err==nil{
-        t.Fatal("existing raw StatsService counter incorrectly treated as unobserved zero")
+    if _,err:=verifyPristineSuccessorMeter(req);err!=nil{
+        t.Fatalf("a genuinely registered but zero-valued user counter is safe: %v",err)
     }
     counter.Add(1)
     if _,err:=verifyPristineSuccessorMeter(req);err==nil {
