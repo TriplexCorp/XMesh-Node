@@ -234,7 +234,8 @@ def run(xray, root, target, processes, *, restart):
         print("PASS: SIGKILL after 32768 accounted bytes preserved the WAL and denied reuse by new Xray")
         return
 
-    def renew(main_echoed, ceiling, revision, *, cdn_ceiling=2 * MIB):
+    def renew(main_echoed, ceiling, revision, *, cdn_ceiling=2 * MIB,
+              witnessed_wal=None, witnessed_cdn=None):
         index = (root / "xmesh-meter-inventory-v1.jsonl").read_bytes()
         tail = json.loads(index.splitlines()[-1])["digest"]
         timestamp = time.time_ns() // 1_000_000
@@ -242,9 +243,10 @@ def run(xray, root, target, processes, *, restart):
         renewed = grant_for(dict(
             claims, kind="xmesh.quota-v2.xray-cap-renewal",
             nonce=next_scope["nonce"], reservationRevision=revision,
-            inventoryTailDigest=tail, witnessedWalBytes=2 * (main_echoed + MIB),
-            witnessedCdnBytes=2 * MIB, sharedCeilingBytes=ceiling, nodeCeilingBytes=ceiling,
-            cdnCeilingBytes=cdn_ceiling,
+            inventoryTailDigest=tail,
+            witnessedWalBytes=(2 * (main_echoed + MIB) if witnessed_wal is None else witnessed_wal),
+            witnessedCdnBytes=(2 * MIB if witnessed_cdn is None else witnessed_cdn),
+            sharedCeilingBytes=ceiling, nodeCeilingBytes=ceiling, cdnCeilingBytes=cdn_ceiling,
             issuedAtMs=timestamp, installBeforeMs=timestamp + 90_000,
             validUntilMs=timestamp + 180_000,
         ))
@@ -274,7 +276,7 @@ def run(xray, root, target, processes, *, restart):
     # revision, backed by a separately tested PostgreSQL top-up, explicitly
     # grants only 2MiB more CDN traffic. This must not reset previous WAL
     # or allow unlimited transfer simply because MAIN has refreshed.
-    renew(5 * MIB, 14 * MIB, 4, cdn_ceiling=4 * MIB)
+    renew(5 * MIB, 16 * MIB, 4, cdn_ceiling=4 * MIB)
     with open_stream("cdn") as sock:
         for _ in range(0, MIB, 16384):
             echo_bytes(sock, 16384)
@@ -286,12 +288,28 @@ def run(xray, root, target, processes, *, restart):
         wal = root / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
         assert json.loads(wal.read_bytes().splitlines()[-1])["nextBytes"] == 2 * MIB
 
+    # The shared MAIN allowance still has 2 MiB free. One independent
+    # signed CDN-only revision is installed with the SAME shared ceiling.
+    # The extra CDN bytes are finite and accumulate on the original WAL.
+    renew(5 * MIB, 16 * MIB, 5, cdn_ceiling=6 * MIB,
+          witnessed_wal=14 * MIB, witnessed_cdn=4 * MIB)
+    with open_stream("cdn") as sock:
+        for _ in range(0, MIB, 16384):
+            echo_bytes(sock, 16384)
+        assert not probe_echo(sock, 1), "CDN-only revision exceeded 6 MiB class ceiling"
+    updated = query_direction_counters(xray, api_port, alias["cdn"])
+    assert updated == dict(uplink=3 * MIB, downlink=3 * MIB), updated
+    for direction in ("uplink", "downlink"):
+        identity = f"{runtime}\0{alias['cdn']}\0{direction}".encode()
+        wal = root / f"meter-{hashlib.sha256(identity).hexdigest()}.jsonl"
+        assert json.loads(wal.read_bytes().splitlines()[-1])["nextBytes"] == 3 * MIB
+
     for name in ("main", "cdn"):
         with open_stream(name) as sock:
             assert not probe_echo(sock, 1), "new VLESS stream obtained extra budget"
     reject(sock_path, server.pid, runtime, genesis, grant, scope)
     assert server.poll() is None and client.poll() is None, "quota exhaustion killed Xray"
-    print("PASS: two MAIN renewals plus independent CDN refill on real live VLESS; 14 MiB shared, 4 MiB CDN; WAL/StatsService exact")
+    print("PASS: live mixed VLESS accepted independent CDN-only signed revision with unchanged 16MiB shared ceiling and 6MiB CDN, all WAL exact")
 
 
 def wait_for_peer(path, process):
