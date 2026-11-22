@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Stage-only irreversible fence of the PREDECESSOR epoch in an installed Xray.
+
+A Nexus-signed zero-byte calendar-successor PREPARATION is not a grant.
+This worker uses it only to deny the old user's sessions, preserve the
+predecessor WAL and obtain a nonfinal Xray checkpoint through the original
+same-PID Unix socket. It never creates, funds, installs or resumes a cap.
+
+Every invocation uses the Agent's already enrolled, pinned signer and exact
+original signed inbound roster. A stale/foreign process or lost response
+fails closed; a repeat uses the same stable fence scope and Xray durable
+denial. No response here is proof of terminal metering or a quota refund.
+"""
+import hashlib
+import os
+import time
+import uuid
+
+import cap_install
+import first_cap_handoff as caps
+import genesis_reservation as lease
+import quarantine_policy as quarantine
+import renewal_worker
+import wal_transport
+
+FENCE_NAMESPACE = uuid.UUID("becd936f-23a2-5a5a-92eb-c277f259f70a")
+
+
+def _fence_name(user, predecessor):
+    return f"calendar-fence-u{user}-{uuid.UUID(predecessor)}.json"
+
+
+def _fence_scope(old, predecessor):
+    aliases = old["aliasScopes"]
+    if not isinstance(aliases, list) or not aliases:
+        raise ValueError("calendar fence has no signed inbound alias")
+    primary = aliases[0]["email"]
+    if not isinstance(primary, str) or not primary.startswith(
+            f"xmesh-u{old['userId']}--"):
+        raise ValueError("foreign first alias in signed calendar fence")
+    request_id = str(uuid.uuid5(FENCE_NAMESPACE, predecessor))
+    # This field is a deterministic durable *stop scope* in the disposable
+    # Xray checkpoint schema, not proof of an administrative revocation.
+    return {
+        "email": primary, "nodeId": old["nodeId"], "userId": old["userId"],
+        "epoch": old["accountEpoch"], "meterEpoch": old["meterEpoch"],
+        "reservationId": predecessor,
+        "revision": old["reservationRevision"], "revocationId": request_id,
+    }
+
+
+def _original_signed_scope(fd, old, node, pinned):
+    stored = lease._identity_file(
+        fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)
+    if (not isinstance(stored, dict) or set(stored) != {"prepared", "reply"}
+            or not isinstance(stored["reply"], dict)):
+        raise ValueError("missing original signed quarantine policy")
+    original = stored["reply"]
+    policy = original.get("policy")
+    config = original.get("config")
+    if (not isinstance(policy, dict) or not isinstance(config, dict)
+            or original.get("nodeId") != node
+            or original.get("policyPublicKey") != pinned
+            or original.get("policySha256") != old["policySha256"]
+            or original.get("revision") != policy.get("configSha256")
+            or hashlib.sha256(wal_transport.observed.canonical(policy)).hexdigest()
+                != old["policySha256"]
+            or hashlib.sha256(wal_transport.observed.canonical(config)).hexdigest()
+                != original["revision"]):
+        raise ValueError("calendar fence original policy/profile hashes changed")
+    # Validate original signature without pretending that the 120-second
+    # GENESIS policy is still a fresh right to install a positive permit.
+    quarantine._guard().check_signature(policy, original["policySignature"], pinned)
+    aliases = caps._authorized_aliases(old, policy, config)
+    if aliases != old["aliasScopes"]:
+        raise ValueError("calendar fence aliases changed from signed policy")
+    return original["revision"]
+
+
+def _checked_saved(record, old, successor, runtime):
+    if (not isinstance(record, dict)
+            or set(record) != {
+                "nodeId", "userId", "predecessorId", "runtimeId",
+                "successorSha256", "scope", "observedFence"}
+            or record["nodeId"] != old["nodeId"]
+            or record["userId"] != old["userId"]
+            or record["predecessorId"] != old["reservationId"]
+            or record["runtimeId"] != runtime
+            or record["successorSha256"] != successor
+            or record["scope"] != _fence_scope(old, old["reservationId"])):
+        raise ValueError("calendar fence record does not match original signed scope")
+    observed = record["observedFence"]
+    scope = record["scope"]
+    checkpoint = observed.get("observedCheckpoint") if isinstance(observed, dict) else None
+    if (not isinstance(observed, dict)
+            or observed.get("email") != scope["email"]
+            or observed.get("fenced") is not True
+            or observed.get("drained") is not True
+            or observed.get("active") != 0
+            or observed.get("finalMeterVerified") is not False
+            or observed.get("refundable") is not False
+            or not isinstance(checkpoint, dict)
+            or checkpoint.get("runtimeId") != runtime
+            or checkpoint.get("finalMeterVerified") is not False
+            or checkpoint.get("refundableBytes") != 0
+            or checkpoint.get("drained") is not True
+            or any(checkpoint.get(key) != value for key, value in scope.items())):
+        raise ValueError("calendar fence is missing Xray's nonfinal durable checkpoint")
+    return record
+
+
+def fence_successor(panel, node, user, state, socket_path, executable_pin):
+    """Fence the old user's aliases; do NOT allocate or install a new cap."""
+    if (os.geteuid() != 0 or not isinstance(panel, str)
+            or not panel.startswith("https://")
+            or type(node) is not int or node <= 0
+            or type(user) is not int or user <= 0
+            or not isinstance(executable_pin, str)
+            or caps.HEX64.fullmatch(executable_pin) is None):
+        raise ValueError("calendar fencing requires root and original staged executable")
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        names = os.listdir(fd)
+        pinned = wal_transport._panel_pin()
+        old = renewal_worker.latest_signed_cap(fd, names, node, user, pinned)
+        now = time.time_ns() // 1_000_000
+        if now < old["validUntilMs"]:
+            raise ValueError("predecessor cap is not expired")
+        suffix = renewal_worker._successor_filename(user, old)
+        response = lease._identity_file(fd, suffix, 16384)
+        renewal_worker._verify_successor_reply(
+            response, old, node, user, renewal_worker._successor_nonce(old),
+            pinned, now)
+        exact = wal_transport.observed.canonical(response)
+        digest = hashlib.sha256(exact).hexdigest()
+        name = _fence_name(user, old["reservationId"])
+        if name in names:
+            saved = lease._identity_file(fd, name, 32768)
+            # Only a historical reference. This is NOT proof of completed
+            # remote settlement or permission to start another runtime.
+            _checked_saved(saved, old, digest, old["runtimeId"])
+            return False
+        config_pin = _original_signed_scope(fd, old, node, pinned)
+        enrolled = quarantine._enrolled_activation(panel, node)
+        if enrolled.get("activationReceiptSha256") != old["activationReceiptSha256"]:
+            raise ValueError("calendar fence enrolled Node activation changed")
+        pins = (executable_pin, config_pin)
+        observed_before = wal_transport._measure_quarantined_runtime(pins)
+        if observed_before[3] != old["runtimeId"]:
+            raise ValueError("calendar fence must target the old measured Xray PID")
+        scope = _fence_scope(old, old["reservationId"])
+        if (observed_before != wal_transport._measure_quarantined_runtime(pins)
+                or enrolled != quarantine._enrolled_activation(panel, node)):
+            raise ValueError("calendar fence process or activation changed")
+        snapshot = cap_install.fence_calendar_in_xray(
+            socket_path, observed_before[2], observed_before[3], scope)
+        if observed_before != wal_transport._measure_quarantined_runtime(pins):
+            raise ValueError("calendar fence runtime changed after IPC")
+        record = {
+            "nodeId": node, "userId": user,
+            "predecessorId": old["reservationId"],
+            "runtimeId": old["runtimeId"],
+            "successorSha256": digest, "scope": scope,
+            "observedFence": snapshot,
+        }
+        _checked_saved(record, old, digest, old["runtimeId"])
+        quarantine._durable_store(fd, record, name)
+        return True
+    finally:
+        os.close(lock)
+        os.close(fd)
