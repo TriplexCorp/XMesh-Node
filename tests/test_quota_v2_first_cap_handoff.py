@@ -184,6 +184,29 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertEqual(post.call_count, 3)
             self.assertTrue(all(call == post.call_args for call in post.call_args_list))
             install.assert_not_called()
+            # A durable filename is not proof of successful handoff. Verify
+            # the pinned signed contents on each scan/retry without issuing
+            # a new request or silently accepting a damaged local marker.
+            self.assertEqual(
+                renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
+            self.assertEqual(post.call_count, 3)
+            tampered = json.loads(exact)
+            tampered["signedEnvelope"] = tampered["signedEnvelope"].replace(
+                '"canSpend":false', '"canSpend":true')
+            marker.write_bytes(self.guard.canonical(tampered))
+            with self.assertRaises(ValueError):
+                renewal_worker._prepare_successor(*args)
+            with mock.patch("builtins.print") as log:
+                self.assertEqual(
+                    renewal_worker.pending_renewals(str(state), self.node, self.pub), [])
+                self.assertEqual(log.call_count, 1)
+            # A genuinely signed but already expired zero-authority receipt
+            # must also refuse a retry. The old WAL remains with its epoch.
+            expired = dict(prepared, validUntilMs=self.now)
+            marker.write_bytes(reply(expired))
+            with self.assertRaisesRegex(ValueError, "expired or has invalid clock"):
+                renewal_worker._prepare_successor(*args)
+            install.assert_not_called()
 
     def verify(self, claims=None):
         return cap.verify_grant(
