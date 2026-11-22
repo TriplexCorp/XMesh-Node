@@ -294,6 +294,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             }
 
         remote_attempts = []
+        measured_identity = [runtime_measurement]
         remote_answer = {
             "nexusOffhostSignatureVerified": True,
             "offhostFullBirthIndexHeadMatched": True,
@@ -318,6 +319,12 @@ class FirstCapHandoffTests(unittest.TestCase):
             remote_attempts.append((action, panel, node))
             if len(remote_attempts) == 1:
                 raise TimeoutError("Nexus committed the WAL head but reply was lost")
+            if len(remote_attempts) == 2:
+                # Simulate Docker replacing Xray while the state flock is
+                # released for an otherwise valid remote WAL head response.
+                measured_identity[0] = (
+                    runtime_measurement[0], runtime_measurement[1],
+                    runtime_measurement[2] + 1, runtime_measurement[3])
             return remote_answer
 
         path = "/private/isolated-xray.sock"
@@ -326,7 +333,7 @@ class FirstCapHandoffTests(unittest.TestCase):
             mock.patch.object(quarantine, "_enrolled_activation",
                               return_value={"activationReceiptSha256": self.fixture.activation}),
             mock.patch.object(cap.wal_transport, "_measure_quarantined_runtime",
-                              return_value=runtime_measurement),
+                              side_effect=lambda _pins: measured_identity[0]),
             mock.patch.object(cap.cap_install, "fence_calendar_in_xray",
                               side_effect=fenced),
             mock.patch.object(calendar_fence.wal_transport, "_bound_journal",
@@ -369,15 +376,24 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertEqual(
                 renewal_worker.pending_renewals(str(state), self.node, self.pub),
                 [(100, 0, prepared["nonce"])])
+            with self.assertRaisesRegex(ValueError, "process changed during remote"):
+                calendar_fence.fence_successor(
+                    "https://isolated.test", self.node, 100, str(state),
+                    path, "e" * 64)
+            self.assertFalse(marker.exists())
+            # The previous old PID was not silently accepted as a newly
+            # measured runtime. Recheck immutable original evidence after
+            # a temporary test-side process identity restoration.
+            measured_identity[0] = runtime_measurement
             self.assertTrue(calendar_fence.fence_successor(
                 "https://isolated.test", self.node, 100, str(state),
                 path, "e" * 64))
             self.assertTrue(marker.is_file())
-            self.assertEqual(wal_audit.call_count, 3)
+            self.assertEqual(wal_audit.call_count, 4)
             self.assertEqual(wal_audit.call_args.args[1], "/trusted/old-wal")
-            self.assertEqual(remote_sync.call_count, 2)
+            self.assertEqual(remote_sync.call_count, 3)
             self.assertEqual(remote_attempts, [
-                ("charge-sync", "https://isolated.test", self.node)] * 2)
+                ("charge-sync", "https://isolated.test", self.node)] * 3)
             charge_receipts.assert_called_once()
             self.assertEqual(charge_receipts.call_args.args[1:3], (self.node, 100))
             self.assertEqual(
@@ -385,9 +401,10 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertFalse(calendar_fence.fence_successor(
                 "https://isolated.test", self.node, 100, str(state),
                 path, "e" * 64))
-            self.assertEqual(len(seen), 3)
+            self.assertEqual(len(seen), 4)
             self.assertEqual(seen[0], seen[1])
             self.assertEqual(seen[1], seen[2])
+            self.assertEqual(seen[2], seen[3])
             self.assertEqual(seen[0][1:3], (4321, self.runtime))
             self.assertEqual(seen[0][3]["reservationId"], old["reservationId"])
             self.assertEqual(seen[0][3]["meterEpoch"], old["meterEpoch"])
