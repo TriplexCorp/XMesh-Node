@@ -517,6 +517,35 @@ func TestV2SignedMixedMainTopupKeepsCDNSubCapExhausted(t *testing.T) {
         t.Fatalf("mixed renewal changed CDN spending: %d/%d MAIN=%d CDN=%d",
             all, usedCDN, main.Value(), cdn.Value())
     }
+    // A later, *independently funded* CDN pool top-up can restore exactly
+    // five CDN bytes without ever resetting old class or global counters.
+    index, err := readInventory(dir)
+    if err != nil {
+        t.Fatal(err)
+    }
+    p.ReservationRevision++
+    expected.ReservationRevision = p.ReservationRevision
+    p.Nonce = strings.Repeat("e", 64)
+    p.InventoryTailDigest = index.tail.Digest
+    p.WitnessedWalBytes = 140
+    p.WitnessedCdnBytes = 20
+    p.SharedCeilingBytes = 180
+    p.NodeCeilingBytes = 180
+    p.CdnCeilingBytes = 25
+    if err := renewSignedCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal(err)
+    }
+    if !capAttempt(t, cdn, capCDN, "downlink", 5) ||
+        capAttempt(t, cdn, capCDN, "downlink", 1) ||
+        !capAttempt(t, main, capMain, "uplink", 35) ||
+        capAttempt(t, main, capMain, "uplink", 1) {
+        t.Fatal("separately signed CDN top-up failed class/global accounting")
+    }
+    all, usedCDN = capValues(t)
+    if all != 180 || usedCDN != 25 || main.Value() != 155 || cdn.Value() != 25 {
+        t.Fatalf("mixed CDN refill changed conserved meters: %d/%d MAIN=%d CDN=%d",
+            all, usedCDN, main.Value(), cdn.Value())
+    }
 }
 
 func TestV2SignedRenewalRejectsWALLossAndFreshRuntime(t *testing.T) {
