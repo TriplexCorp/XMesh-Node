@@ -158,3 +158,91 @@ def fence_calendar_in_xray(path, trusted_pid, runtime, scope):
         return result
     finally:
         os.close(pidfd)
+
+
+def observe_zero_meter_in_xray(path, trusted_pid, runtime, scope):
+    """Read-only proof from the *fresh* quarantined Xray Unix peer.
+
+    Only meaningful after the Agent verifies the Nexus-signed predecessor
+    preparation and independent new Docker/pidfd/WAL binding. This NEVER
+    creates a reservation, resets a counter or installs a spendable cap.
+    """
+    required = {
+        "schemaVersion", "nodeId", "userId", "nonce", "meterEpoch",
+        "reservationId", "aliases",
+    }
+    if (not isinstance(scope, dict) or set(scope) != required
+            or scope.get("schemaVersion") != 1
+            or type(scope.get("nodeId")) is not int or scope["nodeId"] <= 0
+            or type(scope.get("userId")) is not int or scope["userId"] <= 0
+            or not isinstance(scope.get("nonce"), str)
+            or len(scope["nonce"]) != 64
+            or not isinstance(scope.get("aliases"), list)
+            or not 1 <= len(scope["aliases"]) <= 16):
+        raise ValueError("invalid independently signed successor scope")
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError("fresh Xray socket must be absolute")
+    uid = os.geteuid()
+    parent, endpoint = path.parent.lstat(), path.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != uid
+            or parent.st_mode & 0o077
+            or not stat.S_ISSOCK(endpoint.st_mode) or endpoint.st_uid != uid
+            or endpoint.st_mode & 0o077):
+        raise ValueError("fresh Xray socket escaped the private process boundary")
+    body = json.dumps(scope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if not 0 < len(body) <= 4096:
+        raise ValueError("oversized fresh zero-meter request")
+    pidfd = os.pidfd_open(trusted_pid, 0)
+    try:
+        poll = select.poll()
+        poll.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+
+        def check_runtime():
+            if (poll.poll(0)
+                    or wal_transport.runtime_identity.trusted_runtime_identity(
+                        trusted_pid) != runtime):
+                raise ValueError("fresh Xray PID exited or changed")
+        check_runtime()
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(12)
+            conn.connect(str(path))
+            peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                   struct.calcsize("3i"))
+            peer_pid, peer_uid, _ = struct.unpack("3i", peer)
+            if peer_pid != trusted_pid or peer_uid != uid:
+                raise ValueError("fresh Xray Unix peer is not measured PID")
+            check_runtime()
+            client = http.client.HTTPConnection("localhost", timeout=12)
+            client.auto_open = False
+            client.sock = conn
+            try:
+                client.request("POST", "/v1/zero-meter", body=body,
+                               headers={"Connection": "close"})
+                response = client.getresponse()
+                raw = response.read(4097)
+                if response.status != 200 or len(raw) > 4096:
+                    raise ValueError("fresh Xray refused zero-meter read-only observation")
+            finally:
+                client.close()
+        result = wal_transport.observed.strict_json(raw)
+        expected = {
+            **{k: scope[k] for k in required if k != "aliases"},
+            "kind": "xmesh.quota-v2.fresh-meter-observed",
+            "runtimeId": runtime,
+            "inventorySha256":
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "zeroInitialRawCounters": True,
+            "isolatedNewWalRoot": True,
+            "authorizedBytes": 0, "canSpend": False,
+            "canStart": False, "canResume": False,
+            "finalMeterVerified": False, "refundableBytes": 0,
+        }
+        if (not isinstance(result, dict) or set(result) != set(expected)
+                or any(type(result[k]) is not type(value) or result[k] != value
+                       for k, value in expected.items())):
+            raise ValueError("fresh Xray zero-meter observation is malformed or authorizing")
+        check_runtime()
+        return result
+    finally:
+        os.close(pidfd)
