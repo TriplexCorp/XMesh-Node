@@ -206,7 +206,7 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync"):
         raise ValueError("WAL charging requires an explicit staged root Agent")
     # The off-host birth index precedes spending authorization. Keep its
     # existing independently verified signed XSP/2 checkpoint mechanism.
-    wal_transport.run("sync", panel, node)
+    wal_transport.run("charge-sync", panel, node)
     docker, local = wal_transport._bound_journal()
     journal._verify_mount(docker, local)
     fd = journal._validate_directory(local)

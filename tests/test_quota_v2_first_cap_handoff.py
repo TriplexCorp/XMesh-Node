@@ -311,12 +311,23 @@ class FirstCapHandoffTests(unittest.TestCase):
             mock.patch.object(cap.confirmed_lease, "_staged_original", return_value=self.evidence()),
             mock.patch.object(quarantine, "_post_quarantined_desired",
                               return_value=self.guard.canonical(response)) as posted,
-            mock.patch.object(cap, "install_staged_cap", return_value={"runtimeId": self.runtime}),
+            mock.patch.object(cap, "install_staged_cap") as install,
         ):
-            cap.fetch_and_install_rehearsal(
-                "https://isolated-ci.example", self.node, 100, str(state),
-                "/private/measured-xray.sock", "e"*64, self.claims["nonce"])
-        posted.assert_called_once_with({
+            marker = state / "genesis-positive-cap-u100.json"
+            def lose_local_ack(*args):
+                self.assertFalse(marker.exists())
+                raise OSError("Unix reply lost")
+            install.side_effect = lose_local_ack
+            args = ("https://isolated-ci.example", self.node, 100, str(state),
+                    "/private/measured-xray.sock", "e"*64, self.claims["nonce"])
+            with self.assertRaisesRegex(OSError, "reply lost"):
+                cap.fetch_and_install_rehearsal(*args)
+            self.assertFalse(marker.exists())
+            install.side_effect = None
+            install.return_value = {"runtimeId": self.runtime}
+            cap.fetch_and_install_rehearsal(*args)
+            self.assertEqual(posted.call_args_list[0], posted.call_args_list[1])
+        posted.assert_called_with({
             "nodeId": self.node, "userId": 100, "requestChallenge": self.claims["nonce"],
             "measurement": {"containerId": "f"*64, "hostPid": 4321, "runtimeId": self.runtime},
         }, str(state), quarantine.CAP_DELIVERY_PATH)

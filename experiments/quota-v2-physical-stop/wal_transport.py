@@ -75,6 +75,10 @@ def verify_bundle(raw, challenge, node, node_public, panel_public, local, expect
         receipt, witness, index, node, node_public, panel_public, head, local)
 
 
+class MissingCheckpoint(ValueError):
+    """Authenticated Nexus reports that this Node has no WAL anchor yet."""
+
+
 def _post(root, request):
     body, output, status = (root / name for name in ("request.json", "reply.json", "status"))
     body.write_bytes(observed.canonical(request))
@@ -82,12 +86,16 @@ def _post(root, request):
         PRODUCT, "request", "--path", PATH, "--body-file", str(body),
         "--output-file", str(output), "--status-file", str(status),
     ], check=True, timeout=30)
-    if status.read_text(encoding="ascii").strip() != "200":
-        raise ValueError("Nexus did not confirm WAL operation")
+    code = status.read_text(encoding="ascii").strip()
     with output.open("rb") as reply:
         raw = reply.read(544 * 1024 + 1)
     if len(raw) > 544 * 1024:
         raise ValueError("oversized WAL transport response")
+    if code == "404" and request["operation"] == "head":
+        if observed.strict_json(raw) == {"error": "No committed WAL checkpoint."}:
+            raise MissingCheckpoint("Nexus has no committed WAL checkpoint")
+    if code != "200":
+        raise ValueError("Nexus did not confirm WAL operation")
     return raw
 
 
@@ -325,19 +333,34 @@ def sync_checkpoint(action, node_id, runtime, local, node_pub, panel_pub, sign, 
         return proof, index
 
     prior = b""
-    if action in {"head", "sync"}:
-        proof, prior = current()
-        if action == "head":
-            return proof
-        fd = journal._validate_directory(local)
+    if action in {"head", "sync", "charge-sync"}:
         try:
-            local_index = registry._read_inventory(fd)
-        finally:
-            os.close(fd)
-        if local_index == prior:
-            return proof
-        if local_index is None or not local_index.startswith(prior):
-            raise ValueError("local WAL index changed after remote verification")
+            proof, prior = current()
+        except MissingCheckpoint:
+            # Only the charge worker can publish its first birth index, and
+            # the normal Nexus store and signed readback still verify it.
+            if action != "charge-sync":
+                raise
+            fd = journal._validate_directory(local)
+            try:
+                if registry._read_inventory(fd) is None:
+                    if any(name.startswith("meter-") for name in os.listdir(fd)):
+                        raise ValueError("unindexed local Xray WAL")
+                    return None
+            finally:
+                os.close(fd)
+        else:
+            if action == "head":
+                return proof
+            fd = journal._validate_directory(local)
+            try:
+                local_index = registry._read_inventory(fd)
+            finally:
+                os.close(fd)
+            if local_index == prior:
+                return proof
+            if local_index is None or not local_index.startswith(prior):
+                raise ValueError("local WAL index changed after remote verification")
 
     witness, inventory = producer.produce_witness(
         node_id, runtime, local, None, node_pub, sign=sign)

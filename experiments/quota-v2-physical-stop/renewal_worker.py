@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Opt-in, fail-closed Agent renewal poll for an ALREADY installed Genesis cap.
+"""Opt-in Agent poll for a measured, quarantined Genesis runtime.
 
-This staging worker cannot enroll, create the first lease, start Xray or
-unlock public ingress. All authority comes from signed Nexus XSP/2 replies.
+This staging worker starts after signed quarantine. The metered runtime
+and its network isolation are managed separately. All authority comes from signed Nexus XSP/2 replies.
 Persistent per-revision challenges ensure lost responses retry the exact SQL
 transaction instead of silently creating a second issuance.
 """
 import argparse
 import bisect
+import hashlib
 import os
 import re
 import secrets
@@ -203,12 +204,52 @@ def pending_renewals(state, node, pinned, now=None):
         os.close(fd)
 
 
+def first_cap_challenge(genesis_challenge, user):
+    # The immutable Genesis challenge survives a lost Nexus or Unix response.
+    message = f"XMESH_QUOTA_V2_FIRST_CAP_V1\0{genesis_challenge}\0{user}".encode("ascii")
+    return hashlib.sha256(message).hexdigest()
+
+
+def activate_initial_cap(panel, node, state, socket_path):
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        if any(BASE.fullmatch(name) for name in os.listdir(fd)):
+            return False
+        original = lease._identity_file(
+            fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)
+        users = original["reply"]["policy"]["users"]
+        # Nexus and Xray currently permit one first lease per pristine
+        # runtime. Refuse ambiguous enrollment before funding anything.
+        if not isinstance(users, list) or len(users) != 1:
+            raise ValueError("first admission requires one signed quarantine user")
+        user = users[0]["userId"]
+        if type(user) is not int or user <= 0:
+            raise ValueError("invalid signed quarantine user")
+        pinned = wal_transport._panel_pin()
+        active = quarantine._enrolled_activation(panel, node)
+        original = lease._staged_original(
+            fd, node, user, pinned, active["activationReceiptSha256"])
+        executable, _ = lease._original_measurement_pins(
+            fd, original, node, active["activationReceiptSha256"])
+        challenge = first_cap_challenge(original["prepared"]["payload"]["challenge"], user)
+    finally:
+        os.close(lock)
+        os.close(fd)
+    lease.run(panel, node, user, state, "prepare")
+    lease.run(panel, node, user, state, "confirm")
+    caps.fetch_and_install_rehearsal(
+        panel, node, user, state, socket_path, executable, challenge)
+    return True
+
+
 def run(panel, node, state=STATE, socket_path=SOCKET):
     if (os.geteuid() != 0 or os.environ.get(STAGING_ENV) != "1"
             or os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
             or not isinstance(panel, str) or not panel.startswith("https://")
             or type(node) is not int or node <= 0):
         raise ValueError("automatic renewal is permitted only in explicit root staging")
+    if activate_initial_cap(panel, node, state, socket_path):
+        return 1
     # First submit the actual fsynced byte-intent WAL, validate each Nexus
     # Ed25519 charge receipt and persist a monotonic retry cursor. A signed
     # birth-index head alone is NOT a PostgreSQL spending receipt.

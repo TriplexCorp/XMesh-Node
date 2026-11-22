@@ -245,21 +245,29 @@ func installSignedFirstGenesisCap(raw []byte, pinned ed25519.PublicKey,
     if !enabled || !experimentalByteCaps.strict ||
         gate.runtimeID=="" || gate.runtimeID!=payload.RuntimeID ||
         gate.journalDir=="" || !filepath.IsAbs(gate.journalDir) ||
-        gate.meterTails==nil || len(gate.meterTails)!=0 {
+        gate.meterTails==nil {
         return errors.New("signed Xray cap: no pristine measured runtime or strict gate")
     }
     identity:="xmesh-u"+strconv.FormatInt(payload.UserID,10)
     if expected.BeforeInstall!=nil {
         if err:=expected.BeforeInstall();err!=nil{return err}
     }
-    if experimentalByteCaps.users!=nil &&
-        experimentalByteCaps.users[identity]!=nil {
-        return errors.New("signed Xray cap: an installed reservation cannot be reissued")
+    u:=gate.users[identity]
+    if u!=nil && (u.historicDebtUnresolved || u.fenced || u.lateCounterMutation) {
+        return errors.New("signed Xray cap: fenced or tainted user history")
     }
-    if u:=gate.users[identity];u!=nil && (
-        u.historicDebtUnresolved || len(u.active)!=0 || u.writes!=0 ||
-        u.reads!=0 || u.fenced || u.lateCounterMutation) {
-        return errors.New("signed Xray cap: existing, fenced or tainted user history")
+    if running:=experimentalByteCaps.users[identity];running!=nil {
+        // Lost local acknowledgment is recoverable only against the same
+        // in-memory first revision. Do not touch its balance or deadline.
+        if running.expired || lockedAt<running.lastSeenMs ||
+            running.signedGrant.Kind!=signedCapKind ||
+            running.signedGrantDigest!=sha256.Sum256(raw) {
+            return errors.New("signed Xray cap: a newer or different live reservation exists")
+        }
+        return verifyRenewalWAL(payload,expected.Current)
+    }
+    if len(gate.meterTails)!=0 || (u!=nil && (len(u.active)!=0 || u.writes!=0 || u.reads!=0)) {
+        return errors.New("signed Xray cap: existing measured user traffic")
     }
     // For a first-ever Xray, there can be NO local counted WAL. An observed
     // index alone does not prove history; the independent Nexus first

@@ -171,9 +171,12 @@ func TestV2SignedFirstGenesisCapBindsExistingReservationAndRealWAL(t *testing.T)
     if up.Value()!=20 || down.Value()!=30 || cdn.Value()!=20 {
         t.Fatal("Xray raw byte counters differ from signed cap spend")
     }
-    // Prior signed candidate cannot be installed a second time or be
-    // extended after partial spend by a new but validly signed revision.
-    if err:=installSignedFirstGenesisCap(raw,pub,expected);err==nil {
+    // A lost local acknowledgment can be recovered without refilling the
+    // exhausted permit, even after it has written WAL.
+    if err:=installSignedFirstGenesisCap(raw,pub,expected);err!=nil {
+        t.Fatalf("exact first-cap replay could not recover acknowledgment: %v",err)
+    }
+    if capAttempt(t,up,capMain,"uplink",1) {
         t.Fatal("signed cap replay reopened exhausted reservation")
     }
     if st,err:=os.Stat(meterTestFile(t,dir,capMain,"uplink"));err!=nil||st.Size()==0{
@@ -289,7 +292,7 @@ func TestV2SignedCapRequiresIndependentGenesisAndEmptyHonestMeterHistory(t *test
 }
 
 func TestV2SignedCapConcurrentReplayExactlyOnceNoDebtReset(t *testing.T){
-    dir,_,p,ctx,pub,priv:=signedCapTestFixture(t)
+    dir,manager,p,ctx,pub,priv:=signedCapTestFixture(t)
     raw:=signedCapTestEnvelope(t,p,priv)
     result:=make(chan error,24)
     var wg sync.WaitGroup
@@ -302,9 +305,16 @@ func TestV2SignedCapConcurrentReplayExactlyOnceNoDebtReset(t *testing.T){
     }
     wg.Wait()
     close(result)
-    accepted:=0
-    for err:=range result{if err==nil{accepted++}}
-    if accepted!=1{t.Fatalf("concurrent signed cap minted %d grants",accepted)}
+    for err:=range result{if err!=nil{t.Fatalf("exact retry refused: %v",err)}}
+    meter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,meter,capMain,"uplink",70)||capAttempt(t,meter,capMain,"uplink",1){
+        t.Fatal("concurrent exact retries changed the 70-byte ceiling")
+    }
+    conflicting:=p
+    conflicting.Nonce=strings.Repeat("a",64)
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,conflicting,priv),pub,ctx);err==nil{
+        t.Fatal("different signed bytes replaced the installed grant")
+    }
     contents,err:=os.ReadFile(filepath.Join(dir,"positive-cap-u101.json"))
     if err!=nil||!bytes.Equal(contents,raw){t.Fatal("lost exact signed grant on retry")}
 }

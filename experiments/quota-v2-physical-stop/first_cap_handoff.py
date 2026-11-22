@@ -340,16 +340,20 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
                 or before != wal_transport._measure_quarantined_runtime(pins)
                 or identity != quarantine._enrolled_activation(panel,node_id)):
             raise ValueError("delivered cap or independently measured runtime changed")
-        # Preserve the EXACT original cap bytes as a string in this root-only
-        # evidence file. This is not permission to start/restart Xray.
+    finally:
+        os.close(lock)
+        os.close(state_fd)
+    # The scheduler treats this record as evidence of installation. Publish
+    # it only after the measured Unix peer acknowledges the exact envelope.
+    receipt = install_staged_cap(panel,node_id,state,socket_path,grant,executable_pin)
+    state_fd,lock = quarantine._locked_private_state(state)
+    try:
         quarantine._durable_store(state_fd,response,
                                   f"genesis-positive-cap-u{user_id}.json")
     finally:
         os.close(lock)
         os.close(state_fd)
-    # Reacquire the same flock and independently recheck BOTH signed lease
-    # receipts, original policy, pins and live PID and private Unix peer.
-    return install_staged_cap(panel,node_id,state,socket_path,grant,executable_pin)
+    return receipt
 
 
 def _verify_cap_envelope(raw, pinned, public_file):

@@ -329,7 +329,7 @@ Description=XMesh staged strict-PQ signed Xray WAL charge and cap renewal
 After=network-online.target docker.service
 Wants=network-online.target docker.service
 ConditionPathExists=/var/lib/xmesh-agent/product/active.json
-ConditionPathExistsGlob=/var/lib/xmesh-xray-sync/genesis-positive-cap-u*.json
+ConditionPathExists=/var/lib/xmesh-xray-sync/genesis-quarantine-envelope.json
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/xmesh-node-metrics.env
