@@ -123,6 +123,43 @@ def _verify_positive_reply(reply, old, prepared, marker, node, user, pinned, now
     }
 
 
+def _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned):
+    """Validate an immutable historical installation even after cap expiry.
+
+    A past signed installation is NOT a new permission to spend or to
+    re-admit traffic in a later process. Current admission still needs
+    live Xray and current cap checks.
+    """
+    if (not isinstance(saved, dict) or set(saved) != {
+            "nodeId", "userId", "predecessorId", "freshRuntimeId",
+            "grantSha256", "xrayReceipt", "response"}
+            or saved.get("nodeId") != node or saved.get("userId") != user
+            or saved.get("predecessorId") != old["reservationId"]
+            or saved.get("freshRuntimeId") != fresh["freshRuntimeId"]):
+        raise ValueError("saved successor installation is outside signed epoch")
+    response = saved["response"]
+    if not isinstance(response, dict):
+        raise ValueError("saved successor installation response is corrupt")
+    raw = response.get("signedEnvelope")
+    if not isinstance(raw, str):
+        raise ValueError("missing saved positive successor grant")
+    envelope = wal_transport.observed.strict_json(raw.encode("utf-8"))
+    payload = envelope.get("payload") if isinstance(envelope, dict) else None
+    if (not isinstance(payload, dict)
+            or not caps._int(payload.get("issuedAtMs"), 1)):
+        raise ValueError("invalid historical signed cap clock")
+    grant, genesis, scope = _verify_positive_reply(
+        response, old, prepared, fresh, node, user, pinned,
+        payload["issuedAtMs"] + 1)
+    digest = hashlib.sha256(grant).hexdigest()
+    if (saved["grantSha256"] != digest
+            or saved["xrayReceipt"] != {
+                "runtimeId": fresh["freshRuntimeId"],
+                "grantSha256": digest}):
+        raise ValueError("unmatched original Xray cap-installation receipt")
+    return saved
+
+
 def _read_evidence(fd, node, user, pinned):
     names = os.listdir(fd)
     old = renewal_worker.latest_signed_cap(fd, names, node, user, pinned)
@@ -176,13 +213,8 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             # Recheck installed receipt against saved signed grant; a
             # filename alone is not evidence of successful new admission.
             saved = lease._identity_file(fd, name, 32768)
-            _verify_positive_reply(
-                saved["response"], old, prepared, fresh, node, user, pinned,
-                time.time_ns() // 1_000_000)
-            if (saved.get("freshRuntimeId") != measured[3]
-                    or saved.get("grantSha256") !=
-                        hashlib.sha256(saved["response"]["signedEnvelope"].encode()).hexdigest()):
-                raise ValueError("saved new-Xray grant receipt is corrupt")
+            _verified_saved_receipt(
+                saved, old, prepared, fresh, node, user, pinned)
             return False
         challenge = _challenge(old["reservationId"], measured[3])
         activation = quarantine._enrolled_activation(panel, node)
