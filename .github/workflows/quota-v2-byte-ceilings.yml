@@ -24,6 +24,10 @@ on:
       - 'experiments/quota-v2-physical-stop/cap_install.py'
       - 'experiments/xray-dataplane-fence/durable_meter_intent.go.txt'
       - 'experiments/xray-dataplane-fence/apply-experiment.py'
+      - 'experiments/xray-dataplane-fence/experimental_ingress.go.txt'
+      - 'experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py'
+      - 'experiments/quota-v2-physical-stop/vless_ingress.py'
+      - 'tests/test_quota_v2_vless_ingress.py'
       - '.github/workflows/quota-v2-byte-ceilings.yml'
 permissions:
   contents: read
@@ -77,3 +81,10 @@ jobs:
           binary="$RUNNER_TEMP/xmesh-xray-signed-cap"
           (cd "$XMESH_PINNED_XRAY_SOURCE" && go build -trimpath -o "$binary" ./main)
           python3 experiments/xray-dataplane-fence/test_xray_live_signed_cap.py "$binary"
+      - name: Real two-user stable VLESS ingress switches A without dropping B
+        env:
+          XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: '1'
+        run: |
+          set -euo pipefail
+          python3 -m py_compile experiments/quota-v2-physical-stop/vless_ingress.py experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py
+          python3 experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py "$RUNNER_TEMP/xmesh-xray-signed-cap"
