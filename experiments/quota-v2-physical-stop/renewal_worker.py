@@ -97,7 +97,7 @@ def _candidate(fd, names, node, user, pinned, now):
             # Keep scheduling until the measured Xray has durably fenced its
             # old user and returned a nonfinal WAL checkpoint.
             saved = lease._identity_file(fd, successor_name, 16384)
-            _verify_successor_reply(
+            prepared = _verify_successor_reply(
                 saved, original, node, user, _successor_nonce(original),
                 pinned, now)
             import calendar_fence
@@ -112,8 +112,18 @@ def _candidate(fd, names, node, user, pinned, now):
                 # respond, and it must have an empty private WAL namespace.
                 if os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1":
                     import successor_meter
-                    if successor_meter._name(user, original["reservationId"]) not in names:
+                    zero_name = successor_meter._name(user, original["reservationId"])
+                    if zero_name not in names:
                         return user, -1, _successor_nonce(original)
+                    # Never treat a filename as proof that a separately
+                    # measured Xray supplied a valid zero-spend receipt.
+                    evidence = lease._identity_file(fd, zero_name, 16384)
+                    measured = (evidence.get("freshContainerId"),
+                                evidence.get("freshStartedAt"),
+                                evidence.get("freshHostPid"),
+                                evidence.get("freshRuntimeId"))
+                    successor_meter._checked_marker(
+                        evidence, original, digest, measured, prepared)
                 return None
         return user, 0, _successor_nonce(original)
     if not original["issuedAtMs"] <= now < original["validUntilMs"]:
