@@ -270,7 +270,13 @@ def _checked_saved(record, old, successor, runtime):
 
 
 def fence_successor(panel, node, user, state, socket_path, executable_pin):
-    """Fence the old user's aliases; do NOT allocate or install a new cap."""
+    """Close the old Xray, confirm WAL off-host, then fsync a NONFINAL marker.
+
+    Never hold the root-state flock during an outbound Nexus round trip.
+    Both local phases re-validate the exact original signed cap, zero-spend
+    preparation, managed Docker PID and all old-WAL bytes; a changed
+    process or late mutation after the network call prevents publication.
+    """
     if (os.geteuid() != 0 or not isinstance(panel, str)
             or not panel.startswith("https://")
             or type(node) is not int or node <= 0
@@ -278,6 +284,9 @@ def fence_successor(panel, node, user, state, socket_path, executable_pin):
             or not isinstance(executable_pin, str)
             or caps.HEX64.fullmatch(executable_pin) is None):
         raise ValueError("calendar fencing requires root and original staged executable")
+
+    # PHASE 1: under the normal synchronizer's root flock, prove the
+    # original Xray and fsync the irreversible OLD-reservation denial.
     fd, lock = quarantine._locked_private_state(state)
     try:
         names = os.listdir(fd)
@@ -286,63 +295,93 @@ def fence_successor(panel, node, user, state, socket_path, executable_pin):
         now = time.time_ns() // 1_000_000
         if now < old["validUntilMs"]:
             raise ValueError("predecessor cap is not expired")
-        suffix = renewal_worker._successor_filename(user, old)
-        response = lease._identity_file(fd, suffix, 16384)
+        successor_name = renewal_worker._successor_filename(user, old)
+        response = lease._identity_file(fd, successor_name, 16384)
         renewal_worker._verify_successor_reply(
-            response, old, node, user, renewal_worker._successor_nonce(old),
-            pinned, now)
-        exact = wal_transport.observed.canonical(response)
-        digest = hashlib.sha256(exact).hexdigest()
+            response, old, node, user,
+            renewal_worker._successor_nonce(old), pinned, now)
+        preparation_sha = hashlib.sha256(
+            wal_transport.observed.canonical(response)).hexdigest()
         name = _fence_name(user, old["reservationId"])
         if name in names:
             saved = lease._identity_file(fd, name, 32768)
-            # Only a historical reference. This is NOT proof of completed
-            # remote settlement or permission to start another runtime.
-            _checked_saved(saved, old, digest, old["runtimeId"])
+            _checked_saved(saved, old, preparation_sha, old["runtimeId"])
             return False
         config_pin = _original_signed_scope(fd, old, node, pinned)
         enrolled = quarantine._enrolled_activation(panel, node)
         if enrolled.get("activationReceiptSha256") != old["activationReceiptSha256"]:
             raise ValueError("calendar fence enrolled Node activation changed")
         pins = (executable_pin, config_pin)
-        observed_before = wal_transport._measure_quarantined_runtime(pins)
-        if observed_before[3] != old["runtimeId"]:
+        measured = wal_transport._measure_quarantined_runtime(pins)
+        if measured[3] != old["runtimeId"]:
             raise ValueError("calendar fence must target the old measured Xray PID")
-        scope = _fence_scope(old, old["reservationId"])
-        if (observed_before != wal_transport._measure_quarantined_runtime(pins)
+        if (measured != wal_transport._measure_quarantined_runtime(pins)
                 or enrolled != quarantine._enrolled_activation(panel, node)):
             raise ValueError("calendar fence process or activation changed")
+        scope = _fence_scope(old, old["reservationId"])
         snapshot = cap_install.fence_calendar_in_xray(
-            socket_path, observed_before[2], observed_before[3], scope)
-        if observed_before != wal_transport._measure_quarantined_runtime(pins):
+            socket_path, measured[2], measured[3], scope)
+        if measured != wal_transport._measure_quarantined_runtime(pins):
             raise ValueError("calendar fence runtime changed after IPC")
-        record = {
-            "nodeId": node, "userId": user,
-            "predecessorId": old["reservationId"],
-            "runtimeId": old["runtimeId"],
-            "successorSha256": digest, "scope": scope,
-            "observedFence": snapshot,
-        }
         checkpoint = (snapshot.get("observedCheckpoint")
                       if isinstance(snapshot, dict) else None)
         if not isinstance(checkpoint, dict):
             raise ValueError("old Xray did not return an auditable calendar WAL checkpoint")
-        journal_digest = _independent_journal_digest(
-            checkpoint, observed_before)
-        if observed_before != wal_transport._measure_quarantined_runtime(pins):
-            raise ValueError("Xray process changed during independent WAL audit")
-        remote = _offhost_birth_registry_proof(panel, node, checkpoint)
-        # Source Xray may have advanced during the remote checkpoint. Only
-        # the unchanged ORIGINAL old user's fsynced WAL can become a
-        # committed nonfinal local calendar marker.
-        if _independent_journal_digest(checkpoint, observed_before) != journal_digest:
+        journal_sha = _independent_journal_digest(checkpoint, measured)
+        if measured != wal_transport._measure_quarantined_runtime(pins):
+            raise ValueError("old Xray changed during independent local WAL audit")
+    finally:
+        os.close(lock)
+        os.close(fd)
+
+    # PHASE 2: XSP/2 and the durable *full* off-host WAL registry can take
+    # seconds or lose a reply. Do not block unrelated user locks or normal
+    # panel reconciliation while awaiting Nexus. A retry uses the same
+    # source-pinned old Xray deny and never recreates spend authority.
+    remote = _offhost_birth_registry_proof(panel, node, checkpoint)
+
+    # PHASE 3: reacquire the lock and compare EVERYTHING to phase 1.
+    # The first observation is a nonfinal floor, not a time-of-check token
+    # that can be replayed after a process change or later raw WAL write.
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        names = os.listdir(fd)
+        if wal_transport._panel_pin() != pinned:
+            raise ValueError("Nexus signer changed during calendar WAL publication")
+        again = renewal_worker.latest_signed_cap(fd, names, node, user, pinned)
+        if again != old:
+            raise ValueError("predecessor signed cap changed during WAL publication")
+        candidate = lease._identity_file(fd, successor_name, 16384)
+        renewal_worker._verify_successor_reply(
+            candidate, again, node, user,
+            renewal_worker._successor_nonce(again), pinned,
+            time.time_ns() // 1_000_000)
+        if hashlib.sha256(wal_transport.observed.canonical(candidate)).hexdigest() != preparation_sha:
+            raise ValueError("signed calendar preparation changed during WAL publication")
+        if name in names:
+            saved = lease._identity_file(fd, name, 32768)
+            _checked_saved(saved, old, preparation_sha, old["runtimeId"])
+            return False
+        if _original_signed_scope(fd, old, node, pinned) != config_pin:
+            raise ValueError("Xray signed policy changed during remote WAL publication")
+        if quarantine._enrolled_activation(panel, node) != enrolled:
+            raise ValueError("Node activation changed while off-host WAL was committed")
+        if wal_transport._measure_quarantined_runtime(pins) != measured:
+            raise ValueError("Xray process changed during remote WAL publication")
+        if _independent_journal_digest(checkpoint, measured) != journal_sha:
             raise ValueError("old Xray WAL changed during remote registry publication")
-        if (observed_before != wal_transport._measure_quarantined_runtime(pins)
-                or enrolled != quarantine._enrolled_activation(panel, node)):
-            raise ValueError("Xray process or Node activation changed after remote WAL proof")
-        record["independentJournalSha256"] = journal_digest
-        record["offhostBirthRegistry"] = remote
-        _checked_saved(record, old, digest, old["runtimeId"])
+        if (wal_transport._measure_quarantined_runtime(pins) != measured
+                or quarantine._enrolled_activation(panel, node) != enrolled):
+            raise ValueError("old Xray or Node activation changed after WAL audit")
+        record = {
+            "nodeId": node, "userId": user,
+            "predecessorId": old["reservationId"], "runtimeId": old["runtimeId"],
+            "successorSha256": preparation_sha, "scope": scope,
+            "observedFence": snapshot,
+            "independentJournalSha256": journal_sha,
+            "offhostBirthRegistry": remote,
+        }
+        _checked_saved(record, old, preparation_sha, old["runtimeId"])
         quarantine._durable_store(fd, record, name)
         return True
     finally:
