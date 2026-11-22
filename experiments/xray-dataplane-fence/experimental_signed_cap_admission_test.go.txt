@@ -529,8 +529,8 @@ func TestV2SignedMixedMainTopupKeepsCDNSubCapExhausted(t *testing.T) {
     p.InventoryTailDigest = index.tail.Digest
     p.WitnessedWalBytes = 140
     p.WitnessedCdnBytes = 20
-    p.SharedCeilingBytes = 180
-    p.NodeCeilingBytes = 180
+    p.SharedCeilingBytes = 220
+    p.NodeCeilingBytes = 220
     p.CdnCeilingBytes = 25
     if err := renewSignedCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
         t.Fatal(err)
@@ -538,12 +538,41 @@ func TestV2SignedMixedMainTopupKeepsCDNSubCapExhausted(t *testing.T) {
     if !capAttempt(t, cdn, capCDN, "downlink", 5) ||
         capAttempt(t, cdn, capCDN, "downlink", 1) ||
         !capAttempt(t, main, capMain, "uplink", 35) ||
-        capAttempt(t, main, capMain, "uplink", 1) {
+        capAttempt(t, main, capMain, "uplink", 41) {
         t.Fatal("separately signed CDN top-up failed class/global accounting")
     }
     all, usedCDN = capValues(t)
     if all != 180 || usedCDN != 25 || main.Value() != 155 || cdn.Value() != 25 {
         t.Fatalf("mixed CDN refill changed conserved meters: %d/%d MAIN=%d CDN=%d",
+            all, usedCDN, main.Value(), cdn.Value())
+    }
+    // CDN can obtain a new independently funded class revision while the
+    // shared/MAIN 220-byte grant remains exactly unchanged. No artificial
+    // MAIN usage or shared-account expansion is required for this CDN-only
+    // renewal, but the additional CDN bytes must still fit inside shared.
+    last, err := readInventory(dir)
+    if err != nil {
+        t.Fatal(err)
+    }
+    p.ReservationRevision++
+    expected.ReservationRevision = p.ReservationRevision
+    p.Nonce = strings.Repeat("f", 64)
+    p.InventoryTailDigest = last.tail.Digest
+    p.WitnessedWalBytes = 180
+    p.WitnessedCdnBytes = 25
+    p.CdnCeilingBytes = 30
+    if err := renewSignedCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal("CDN-only signed renewal with unchanged MAIN ceiling was denied", err)
+    }
+    if !capAttempt(t, cdn, capCDN, "downlink", 5) ||
+        capAttempt(t, cdn, capCDN, "downlink", 1) ||
+        !capAttempt(t, main, capMain, "uplink", 35) ||
+        capAttempt(t, main, capMain, "uplink", 1) {
+        t.Fatal("class-only CDN top-up bypassed the original shared budget")
+    }
+    all, usedCDN = capValues(t)
+    if all != 220 || usedCDN != 30 || main.Value() != 190 || cdn.Value() != 30 {
+        t.Fatalf("CDN-only revision changed accounted MAIN/WAL: %d/%d MAIN=%d CDN=%d",
             all, usedCDN, main.Value(), cdn.Value())
     }
 }
