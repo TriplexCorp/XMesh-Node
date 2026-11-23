@@ -153,6 +153,57 @@ class VlessIngressTests(unittest.TestCase):
                 f"ingress-u{USER}", "xray-a", "xray-b",
             ]))
 
+    def test_three_calendar_routes_are_atomic_and_replay_safe(self):
+        # 1 -> 2 -> 3 uses distinct measured Xray processes and signed
+        # reservation epochs. An old receipt cannot roll back the route.
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(
+            os.environ, {"XMESH_QUOTA_V2_INGRESS_STAGING": "1"}
+        ):
+            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            self.addCleanup(os.close, fd)
+            paths = []
+            for index in range(3):
+                path = str(Path(folder) / f"calendar-{index+1}")
+                Path(path).mkdir(mode=0o700)
+                paths.append(path)
+            runtimes = ["a" * 64, "b" * 64, "c" * 64]
+            pids = [os.getpid() + index for index in range(3)]
+            measurements = [
+                ("d" * 64, f"2026-11-{20+i:02d}T00:00:00Z",
+                 pids[i], runtimes[i]) for i in range(3)
+            ]
+            claims = []
+            for index, runtime in enumerate(runtimes):
+                payload = signed_claims(runtime)
+                payload["reservationId"] = f"44444444-4444-4444-8444-{index+1:012d}"
+                claims.append(payload)
+            with (mock.patch.object(ingress, "target",
+                                    side_effect=lambda pid, runtime:
+                                    paths[runtimes.index(runtime)]),
+                  mock.patch.object(ingress.wal_transport.runtime_identity,
+                                    "trusted_runtime_identity",
+                                    side_effect=lambda pid: runtimes[pids.index(pid)]),
+                  mock.patch.object(ingress.socket, "socket") as conn):
+                peer = conn.return_value.__enter__.return_value
+                peer.getsockopt.side_effect = lambda *_: struct.pack(
+                    "3i", current_pid[0], os.geteuid(), os.getegid())
+                current_pid = [pids[0]]
+                ingress.publish(fd, claims[0], measurements[0])
+                self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), paths[0])
+                for index in (1, 2):
+                    current_pid[0] = pids[index]
+                    ingress.publish(fd, claims[index], measurements[index],
+                                    ingress.target(*measurements[index-1][2:]))
+                    self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd),
+                                     paths[index])
+                with self.assertRaisesRegex(ValueError, "predecessor"):
+                    current_pid[0] = pids[1]
+                    ingress.publish(fd, claims[1], measurements[1], paths[0])
+                self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), paths[2])
+                current_pid[0] = pids[2]
+                ingress.publish(fd, claims[2], measurements[2], paths[1])
+                self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), paths[2])
+
     def test_installed_staging_marker_requires_private_root_file(self):
         if os.geteuid() != 0:
             self.skipTest("staging marker must belong to real root")
