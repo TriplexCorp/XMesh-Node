@@ -262,6 +262,18 @@ class Updater:
                 except BlockingIOError:
                     if time.monotonic()>=deadline: raise Failure('prepare_failed')
                     time.sleep(.2)
+            # The official-image updater cannot install a signed permit for a
+            # replacement runtime. Even recovery of an interrupted update
+            # must stay away from a quarantined or funded generation.
+            quota_evidence = (
+                "genesis-quarantine-envelope.json", "genesis-positive-cap-u*.json",
+                "calendar-delivery-u*.json", "calendar-positive-u*.json", "wal-cap-u*.json",
+            )
+            if any(next(self.state.glob(pattern), None) is not None for pattern in quota_evidence):
+                result = self.error_result(Failure("prepare_failed"), "unchanged")
+                result["detail"] = "Quota V2 runtime state present. Official-image update and rollback are blocked."
+                self.emit(result)
+                return result
             self.recover_pending()
             self.prune_private_logs()
             if self.journal.exists():
