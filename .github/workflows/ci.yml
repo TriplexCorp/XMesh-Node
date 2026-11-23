@@ -35,7 +35,7 @@ jobs:
       - run: sudo python3 tests/test_quota_v2_renewal_request_nonce.py
       - run: python3 -m py_compile experiments/quota-v2-physical-stop/vless_ingress.py tests/test_quota_v2_vless_ingress.py
       - name: Per-user VLESS ingress rejects stale routes and preserves isolation
-        run: sudo python3 tests/test_quota_v2_vless_ingress.py -v
+        run: sudo env XMESH_REQUIRE_REAL_UNIX=1 python3 tests/test_quota_v2_vless_ingress.py -v
       - run: sudo python3 tests/test_quota_v2_charge_worker.py
       - run: bash -n bootstrap.sh deploy/install-v6-strict-operational-agents.sh
       - run: python3 deploy/test-xmesh-policy-independent-credentials.py

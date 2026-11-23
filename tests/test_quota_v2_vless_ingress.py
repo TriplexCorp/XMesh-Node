@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import stat
+import subprocess
 import struct
 import sys
 import tempfile
@@ -203,6 +204,41 @@ class VlessIngressTests(unittest.TestCase):
                 current_pid[0] = pids[2]
                 ingress.publish(fd, claims[2], measurements[2], paths[1])
                 self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), paths[2])
+
+    def test_unix_socket_checks_real_peer_pid_and_permissions(self):
+        try:
+            first = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        except PermissionError:
+            if os.environ.get("XMESH_REQUIRE_REAL_UNIX") == "1":
+                raise
+            self.skipTest("local executor denies AF_UNIX")
+        with (first, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second,
+              tempfile.TemporaryDirectory() as tmp,
+              mock.patch.dict(os.environ, {"XMESH_QUOTA_V2_INGRESS_STAGING": "1"}),
+              mock.patch.object(ingress, "target", return_value=tmp)):
+            self.assertEqual(stat.S_IMODE(os.stat(tmp).st_mode), 0o700)
+            for listener, tag in ((first, "vless-cdn"), (second, "vless-main")):
+                path = Path(tmp) / tag
+                listener.bind(str(path))
+                path.chmod(0o600)
+                listener.listen(4)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+            identity = ingress.wal_transport.runtime_identity.trusted_runtime_identity
+            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+            self.addCleanup(os.close, fd)
+            with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as foreign:
+                try:
+                    foreign_runtime = identity(foreign.pid)
+                    with self.assertRaisesRegex(ValueError, "different owner"):
+                        ingress.publish(fd, signed_claims(foreign_runtime),
+                                        ("c" * 64, "start", foreign.pid, foreign_runtime))
+                    self.assertFalse(Path(tmp, f"ingress-u{USER}").is_symlink())
+                finally:
+                    foreign.terminate()
+            runtime = identity(os.getpid())
+            ingress.publish(fd, signed_claims(runtime), ("c" * 64, "start", os.getpid(), runtime))
+            self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), tmp)
 
     def test_installed_staging_marker_requires_private_root_file(self):
         if os.geteuid() != 0:
