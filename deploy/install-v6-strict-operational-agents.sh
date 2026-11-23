@@ -30,6 +30,14 @@ fi
 if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.27 ) ]]; then
   echo "Automatic quota renewal requires the exact opt-in WAL staging Agent." >&2; exit 2
 fi
+if [[ "$WAL_AUTO_RENEW" == 0 ]]; then
+  for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-positive-cap-u*,calendar-delivery-u*,calendar-positive-u*,wal-cap-u*}.json; do
+    if [[ -e "$quota_evidence" || -L "$quota_evidence" ]]; then
+      echo "Quota V2 spending state exists; refusing to replace installed renewal services." >&2
+      exit 2
+    fi
+  done
+fi
 NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
 [[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
   echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;

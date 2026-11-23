@@ -40,6 +40,15 @@ fi
 }
 NODE_PORT="$((10#$NODE_PORT))"
 
+# A cold install replaces systemd units and re-enrolls the Node. With a
+# signed spending ledger that operation needs an explicit migration path.
+for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-positive-cap-u*,calendar-delivery-u*,calendar-positive-u*,wal-cap-u*}.json; do
+  if [[ -e "$quota_evidence" || -L "$quota_evidence" ]]; then
+    echo "Quota V2 spending state exists; cold bootstrap is blocked before changing the installed Agent." >&2
+    exit 2
+  fi
+done
+
 apt_get() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"; }
 command -v apt-get >/dev/null 2>&1 || { echo "Automatic bootstrap supports Ubuntu with apt only." >&2; exit 1; }
 [[ -r /etc/os-release ]] || { echo "Cannot detect host OS." >&2; exit 1; }
