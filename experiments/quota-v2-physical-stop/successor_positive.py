@@ -299,6 +299,12 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned)
             if saved["response"] != response:
                 raise ValueError("concurrent successor delivery differs from committed grant")
+            if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
+                original_now = wal_transport._measure_quarantined_runtime()
+                if original_now[3] != old["runtimeId"]:
+                    raise ValueError("predecessor changed before replaying ingress route")
+                vless_ingress.publish(fd, grant, candidate,
+                                      vless_ingress.target(original_now[2], original_now[3]))
             return False
         receipt = cap_install.install_in_xray(
             socket_path, candidate[2], candidate[3], genesis, grant, scope)
@@ -314,8 +320,12 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             "xrayReceipt": receipt, "response": response,
         }
         quarantine._durable_store(fd, record, _filename(user,old["reservationId"]))
-        vless_ingress.publish(fd, wal_transport.observed.strict_json(grant)["payload"],
-                              candidate, vless_ingress.target(original[2], original[3]))
+        if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
+            original_now = wal_transport._measure_quarantined_runtime()
+            if original_now[3] != old["runtimeId"]:
+                raise ValueError("predecessor changed before publishing ingress route")
+            vless_ingress.publish(fd, wal_transport.observed.strict_json(grant)["payload"],
+                                  candidate, vless_ingress.target(original_now[2], original_now[3]))
         return True
     finally:
         os.close(lock)
