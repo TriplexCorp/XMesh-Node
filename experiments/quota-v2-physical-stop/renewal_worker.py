@@ -456,7 +456,7 @@ def _prepare_successor(panel, state, node, user, challenge, *, predecessor=None)
         os.close(fd)
 
 
-def activate_initial_cap(panel, node, state, socket_path):
+def activate_initial_cap(panel, node, state, socket_path, blocked_users=None):
     fd, lock = quarantine._locked_private_state(state)
     try:
         original = lease._identity_file(
@@ -470,8 +470,13 @@ def activate_initial_cap(panel, node, state, socket_path):
                 or len(set(ids)) != len(ids)):
             raise ValueError("invalid or duplicate quarantine user identity")
         names = set(os.listdir(fd))
+        # A per-stream WAL charge failure remains assigned to this user.
+        # Do not mint its first spending cap until that debt is verified;
+        # unrelated users may continue through their own durable cursor.
+        blocked = blocked_users if blocked_users is not None else set()
         pending = sorted(user for user in ids
-                         if f"genesis-positive-cap-u{user}.json" not in names)
+                         if user not in blocked
+                         and f"genesis-positive-cap-u{user}.json" not in names)
         # Only setup within the signed Genesis window. Expiry of this
         # first-admission proof cannot stall already installed renewals.
         if not pending or time.time_ns() // 1_000_000 >= original["prepared"]["payload"]["validUntilMs"]:
@@ -675,7 +680,8 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
         if not vless_ingress._staging_permitted():
             print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
             return 0
-        installed = activate_initial_cap(panel, node, state, socket_path)
+        installed = activate_initial_cap(
+            panel, node, state, socket_path, blocked_users=failed_users)
         return installed + _poll_generations(
             panel, node, state, socket_path, failed_users, genesis_wal_ok)
     charge_worker.run(panel, node, state, failed_users)
@@ -693,7 +699,8 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
     if not vless_ingress._staging_permitted():
         print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
         return 0
-    installed = activate_initial_cap(panel, node, state, socket_path)
+    installed = activate_initial_cap(
+        panel, node, state, socket_path, blocked_users=failed_users)
     pinned = wal_transport._panel_pin()
     jobs = pending_renewals(state, node, pinned)
     if not jobs:
