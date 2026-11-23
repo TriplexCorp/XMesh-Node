@@ -201,9 +201,15 @@ def _durable_request(fd, key, node, user, reservation, filename, remaining):
     return raw
 
 
-def _next_charge_batch(fd, node, streams):
+def _next_charge_batch(fd, node, streams, *, runtime_id=None):
+    # Two disjoint WAL inventories can continually reset each other's
+    # position when they share a cursor. Preserve progress per runtime.
+    if runtime_id is not None and not caps.HEX64.fullmatch(runtime_id):
+        raise ValueError("invalid runtime WAL charging cursor scope")
+    filename = (CURSOR_FILE if runtime_id is None else
+                f"wal-charge-scan-cursor-{runtime_id}.json")
     try:
-        cursor = lease._identity_file(fd, CURSOR_FILE, 256)
+        cursor = lease._identity_file(fd, filename, 256)
     except FileNotFoundError:
         previous = ""
     else:
@@ -215,7 +221,7 @@ def _next_charge_batch(fd, node, streams):
         previous = cursor["lastStream"]
     start = bisect.bisect_right(streams, previous) % len(streams)
     selected = (streams[start:] + streams[:start])[:MAX_BATCHES_PER_POLL]
-    renewal_worker.store_scan_cursor(fd, CURSOR_FILE,
+    renewal_worker.store_scan_cursor(fd, filename,
                                     {"nodeId": node, "lastStream": selected[-1]})
     return selected
 
@@ -324,12 +330,14 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
     # existing independently verified signed XSP/2 checkpoint mechanism.
     if container_name not in ("xmesh-managed-xray","xmesh-successor-quarantine"):
         raise ValueError("untrusted Xray charge journal selection")
+    runtime_id = None
     if container_name == "xmesh-managed-xray":
         wal_transport.run("charge-sync", panel, node)
         docker, local = wal_transport._bound_journal()
     else:
         wal_transport.run("charge-sync", panel, node, container_name)
         docker, local = wal_transport._bound_journal(container_name)
+        runtime_id = wal_transport.runtime_identity.trusted_runtime_identity(docker["State"]["Pid"])
     journal._verify_mount(docker, local)
     fd = journal._validate_directory(local)
     try:
@@ -351,7 +359,10 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
         with tempfile.TemporaryDirectory(prefix="xmesh-charge-key-") as tmp:
             public = Path(tmp) / "panel.pem"
             wal_transport._write_public(pinned, public)
-            selected = _next_charge_batch(state_fd, node, sorted(entries))
+            if runtime_id is not None and any(
+                    entry["runtimeId"] != runtime_id for entry in entries.values()):
+                raise ValueError("successor charge inventory changed runtime")
+            selected = _next_charge_batch(state_fd, node, sorted(entries), runtime_id=runtime_id)
             per_stream, extra = divmod(MAX_BATCHES_PER_POLL, len(selected))
             for offset, filename in enumerate(selected):
                 birth = entries[filename]

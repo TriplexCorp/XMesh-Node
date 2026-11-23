@@ -77,6 +77,24 @@ class ChargeWorkerTests(unittest.TestCase):
             self.assertEqual(scanned, streams)
             self.assertEqual(poll(), streams[:worker.MAX_BATCHES_PER_POLL])
 
+    def test_alternating_runtime_polls_preserve_both_positions(self):
+        batch = worker.MAX_BATCHES_PER_POLL
+        ledgers = {
+            None: [f"meter-{i:064x}.jsonl" for i in range(batch * 2)],
+            "a" * 64: [f"meter-{i:064x}.jsonl" for i in range(batch * 2, batch * 4)],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for start in (0, batch, 0):
+                for runtime, streams in ledgers.items():
+                    fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        self.assertEqual(
+                            worker._next_charge_batch(fd, 42, streams, runtime_id=runtime),
+                            streams[start:start + batch],
+                        )
+                    finally:
+                        os.close(fd)
+
     def test_failed_user_charge_does_not_starve_the_other_stream(self):
         if os.geteuid() != 0:
             self.skipTest("root-owned WAL and Agent state")
