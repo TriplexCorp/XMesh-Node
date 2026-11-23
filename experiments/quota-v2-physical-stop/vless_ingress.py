@@ -210,7 +210,14 @@ def serve(panel, node, state, binary):
             stream.write(wal_transport.observed.canonical(frontend(profile)))
         fcntl.fcntl(config, fcntl.F_ADD_SEALS,
                     fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SEAL)
-        os.set_inheritable(config, True)
+        # Xray's normal file loader requires a recognized filename suffix.
+        # Its explicit stdin loader consumes the same sealed, anonymous bytes.
+        os.lseek(config, 0, os.SEEK_SET)
+        if config == 0:
+            os.set_inheritable(0, True)
+        else:
+            os.dup2(config, 0, inheritable=True)
+            os.close(config)
     finally:
         os.close(lock)
         os.close(fd)
@@ -219,7 +226,7 @@ def serve(panel, node, state, binary):
         runtime_env["GITHUB_ACTIONS"] = "true"
     else:
         runtime_env["XMESH_QUOTA_INGRESS_STAGING"] = "1"
-    os.execve(exe, [binary, "run", "-format", "json", "-config", f"/proc/self/fd/{config}"],
+    os.execve(exe, [binary, "run", "-format", "json", "-config", "stdin:"],
               runtime_env)
 
 
