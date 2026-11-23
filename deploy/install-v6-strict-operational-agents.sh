@@ -327,7 +327,10 @@ cat > /etc/systemd/system/xmesh-quota-v2-ingress.service <<EOF
 [Unit]
 Description=XMesh isolated per-user VLESS ingress
 After=docker.service
-ConditionPathExists=/etc/xmesh-quota-ingress-staging
+# This is an explicit root-owned 0600 operator-controlled STAGING marker.
+# The Python worker additionally verifies ownership, nlink, pinned Xray
+# executable, enrolled signed policy and private user-specific routes.
+ConditionPathExists=/etc/xmesh-quota-v2-staging
 [Service]
 Type=simple
 Environment=XMESH_QUOTA_V2_INGRESS_STAGING=1
