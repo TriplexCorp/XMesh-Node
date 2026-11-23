@@ -131,6 +131,7 @@ class DurableRenewalNonce(unittest.TestCase):
         with mock.patch.dict(os.environ, env), \
                 mock.patch.object(charge_worker, "run"), \
                 mock.patch.object(renewal_worker, "activate_initial_cap", return_value=0), \
+                mock.patch.object(vless_ingress, "_staging_permitted", return_value=True), \
                 mock.patch.object(renewal_worker, "pending_renewals", return_value=jobs), \
                 mock.patch.object(renewal_worker.wal_transport, "_panel_pin", return_value="a"*64), \
                 mock.patch.object(renewal_worker.lease, "_identity_file", return_value=intent), \
@@ -145,6 +146,34 @@ class DurableRenewalNonce(unittest.TestCase):
         self.assertEqual([row[:2] for row in observed], [
             (101, "/private/successor-0/drain.sock"),
             (102, "/private/successor-1/drain.sock")])
+
+    def test_missing_staging_marker_pauses_new_caps_but_preserves_wal_accounting(self):
+        # A revoked or absent root-only staging marker must stop all new
+        # positive permits. Already-committed WAL debit must still reach
+        # Nexus, even when the operator has suspended new admissions.
+        import charge_worker
+        env = {
+            "XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
+            "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
+            "XMESH_QUOTA_V2_INGRESS_STAGING": "1",
+            "XMESH_QUOTA_V2_AUTO_SUCCESSOR_POSITIVE": "0",
+        }
+        for managed in ("0", "1"):
+            with self.subTest(managed=managed), \
+                    mock.patch.dict(os.environ, dict(
+                        env, XMESH_QUOTA_V2_MANAGED_GENERATIONS_STAGING=managed)), \
+                    mock.patch.object(vless_ingress, "_staging_permitted",
+                                      return_value=False), \
+                    mock.patch.object(charge_worker, "run") as charge, \
+                    mock.patch.object(renewal_worker, "activate_initial_cap") as activate, \
+                    mock.patch.object(renewal_worker, "pending_renewals") as renew, \
+                    mock.patch.object(renewal_worker, "_poll_generations") as rotate:
+                self.assertEqual(renewal_worker.run(
+                    "https://staging.example.invalid", 7, self.state), 0)
+                charge.assert_called_once()
+                activate.assert_not_called()
+                renew.assert_not_called()
+                rotate.assert_not_called()
 
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()
