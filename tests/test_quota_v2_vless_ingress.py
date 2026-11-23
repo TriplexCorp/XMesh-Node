@@ -6,6 +6,7 @@ the dataplane separately. These fixtures prevent route publication defects
 that previously escaped Node CI entirely.
 """
 import copy
+import fcntl
 import os
 from pathlib import Path
 import socket
@@ -21,6 +22,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments" / "quota-v2-physical-stop"))
 import vless_ingress as ingress
+import quarantine_policy as quarantine
 
 RUNTIME_A = "a" * 64
 RUNTIME_B = "b" * 64
@@ -239,6 +241,34 @@ class VlessIngressTests(unittest.TestCase):
             runtime = identity(os.getpid())
             ingress.publish(fd, signed_claims(runtime), ("c" * 64, "start", os.getpid(), runtime))
             self.assertEqual(os.readlink(f"ingress-u{USER}", dir_fd=fd), tmp)
+
+    def test_ingress_uses_existing_lock_without_write_access(self):
+        if os.geteuid() != 0:
+            self.skipTest("installed state belongs to root")
+        with tempfile.TemporaryDirectory() as state:
+            path = Path(state) / "lock"
+            with self.assertRaises(FileNotFoundError):
+                quarantine._locked_private_state(state, read_only=True)
+            self.assertFalse(path.exists())
+
+            directory, writer = quarantine._locked_private_state(state)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    quarantine._locked_private_state(state, read_only=True)
+                original = os.fstat(writer)
+            finally:
+                os.close(writer)
+                os.close(directory)
+
+            directory, reader = quarantine._locked_private_state(state, read_only=True)
+            try:
+                self.assertEqual(fcntl.fcntl(reader, fcntl.F_GETFL) & os.O_ACCMODE, os.O_RDONLY)
+                self.assertEqual(os.fstat(reader).st_ino, original.st_ino)
+                with self.assertRaises(BlockingIOError):
+                    quarantine._locked_private_state(state)
+            finally:
+                os.close(reader)
+                os.close(directory)
 
     def test_installed_staging_marker_requires_private_root_file(self):
         if os.geteuid() != 0:

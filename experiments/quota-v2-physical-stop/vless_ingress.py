@@ -183,7 +183,7 @@ def serve(panel, node, state, binary):
         raise ValueError("private ingress is not enabled for this fixture")
     if not _staging_permitted():
         raise ValueError("unverified production ingress: missing root-only staging marker")
-    fd, lock = quarantine._locked_private_state(state)
+    fd, lock = quarantine._locked_private_state(state, read_only=True)
     try:
         enrollment = quarantine._enrolled_activation(panel, node)
         original = lease._identity_file(fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)

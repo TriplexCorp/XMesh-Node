@@ -331,6 +331,7 @@ After=docker.service
 # The Python worker additionally verifies ownership, nlink, pinned Xray
 # executable, enrolled signed policy and private user-specific routes.
 ConditionPathExists=/etc/xmesh-quota-v2-staging
+ConditionPathExists=/var/lib/xmesh-xray-sync/genesis-quarantine-envelope.json
 [Service]
 Type=simple
 Environment=XMESH_QUOTA_V2_INGRESS_STAGING=1

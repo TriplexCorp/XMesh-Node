@@ -121,7 +121,7 @@ def validate_response(raw, node_id, prepared, pinned, now_ms=None):
     return doc
 
 
-def _locked_private_state(directory):
+def _locked_private_state(directory, *, read_only=False):
     if os.geteuid() != 0:
         raise ValueError("quarantine handoff requires root-owned installed Agent")
     path = Path(directory)
@@ -136,9 +136,11 @@ def _locked_private_state(directory):
     try:
         # Use the SAME root-owned lock as xmesh-xray-sync.sh. A normal
         # reconciler must never change the measured Xray during staging.
-        lock = os.open("lock",
-            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-            dir_fd=fd)
+        # Linux flock works on a read-only descriptor for this local file.
+        # The ingress sandbox only reads an already initialized state.
+        access = os.O_RDONLY if read_only else os.O_WRONLY | os.O_CREAT
+        lock = os.open("lock", access | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                       dir_fd=fd)
         info = os.fstat(lock)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
             raise ValueError("unsafe quarantine lock")
