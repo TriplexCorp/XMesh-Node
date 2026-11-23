@@ -303,7 +303,9 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
                 original_now = wal_transport._measure_quarantined_runtime()
                 if original_now[3] != old["runtimeId"]:
                     raise ValueError("predecessor changed before replaying ingress route")
-                vless_ingress.publish(fd, wal_transport.observed.strict_json(grant)["payload"], candidate,
+                verified_grant = wal_transport.observed.strict_json(
+                    saved["response"]["signedEnvelope"].encode())
+                vless_ingress.publish(fd, verified_grant["payload"], candidate,
                                       vless_ingress.target(original_now[2], original_now[3]))
             return False
         receipt = cap_install.install_in_xray(
