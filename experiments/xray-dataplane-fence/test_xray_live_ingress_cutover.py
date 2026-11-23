@@ -295,7 +295,8 @@ def run(binary, root, echo_port, processes, netns=None):
     b_meter, b_reservation = str(uuid.uuid4()), str(uuid.uuid4())
 
     def install(generation, user, meter, reservation):
-        proc = {1: first, 2: second, 3: third}[generation]
+        # Only the measured, already-started runtime is valid here. Resolving
+        # future process locals eagerly would fail before successor startup.
         pid, runtime = active[generation]
         genesis, grant, scope, claims = signed_pair(
             root, key, runtime, policy_sha, user, epoch, meter, reservation)
