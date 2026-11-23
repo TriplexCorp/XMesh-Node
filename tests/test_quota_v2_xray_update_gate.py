@@ -13,7 +13,12 @@ spec.loader.exec_module(updater)
 
 class XrayUpdateGateTest(unittest.TestCase):
     def test_quota_state_blocks_update_before_recovering_interrupted_switch(self):
-        for name in ("genesis-quarantine-envelope.json", "genesis-positive-cap-u42.json",
+        for name in ("genesis-quarantine-envelope.json",
+                     "genesis-reservation-prepared-u42.json",
+                     "genesis-reservation-confirmed-u42.json",
+                     "genesis-positive-cap-u42.json",
+                     "calendar-successor-u42-test.json",
+                     "calendar-fence-u42-test.json", "calendar-meter-u42-test.json",
                      "calendar-delivery-u42-test.json", "calendar-positive-u42-test.json",
                      "wal-cap-u42-test.json"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
