@@ -20,8 +20,9 @@ def _staging_permitted():
     executable pin, signed-cap and Xray's private Unix peer all remain
     independently mandatory.
     """
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        return True
+    # GITHUB_ACTIONS is a user-settable environment string, not an
+    # attestation of a trusted runner. Even disposable CI must explicitly
+    # install the same root-owned opt-in marker as an operator staging node.
     if os.geteuid() != 0:
         return False
     try:
