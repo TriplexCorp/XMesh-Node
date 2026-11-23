@@ -230,7 +230,7 @@ def run(binary, root, echo_port, processes, netns=None):
     ingress_state = root/"ingress-state"
     ingress_state.mkdir(mode=0o700)
     backend = {}
-    for generation in (1, 2):
+    for generation in (1, 2, 3):
         ledger = root/f"ledger-{generation}"
         ledger.mkdir(mode=0o700)
         private = json.loads(json.dumps(profile))
@@ -295,7 +295,7 @@ def run(binary, root, echo_port, processes, netns=None):
     b_meter, b_reservation = str(uuid.uuid4()), str(uuid.uuid4())
 
     def install(generation, user, meter, reservation):
-        proc = first if generation==1 else second
+        proc = {1: first, 2: second, 3: third}[generation]
         pid, runtime = active[generation]
         genesis, grant, scope, claims = signed_pair(
             root, key, runtime, policy_sha, user, epoch, meter, reservation)
@@ -406,6 +406,60 @@ def run(binary, root, echo_port, processes, netns=None):
         assert query_direction_counters(binary, backend[1]["api"],
                                         f"xmesh-u{USER_B}--vless-main") == {
             "uplink": 65536, "downlink": 65536,
+        }
+        # Calendar 2 -> 3: a THIRD independently metered Xray is admitted.
+        # The original B stream must survive both of A's transitions.
+        third = launch("backend-3", backend[3]["env"])
+        await_socket(backend[3]["socket"], third)
+        active[3] = (third.pid, trusted_runtime_identity(third.pid))
+        for cls in CLASSES:
+            assert not (root/f"unbound-3-vless-{cls}.sock").exists()
+        second_scope = {
+            "email": aliases(USER_A)[0]["email"],
+            "nodeId": NODE, "userId": USER_A, "epoch": epoch,
+            "meterEpoch": a_new["meterEpoch"],
+            "reservationId": a_new["reservationId"],
+            "revision": 1,
+            "revocationId": str(uuid.uuid5(
+                uuid.UUID("becd936f-23a2-5a5a-92eb-c277f259f70a"),
+                a_new["reservationId"])),
+        }
+        second_fence = fence_calendar_in_xray(
+            str(backend[2]["socket"]), active[2][0],
+            active[2][1], second_scope)
+        assert second_fence["fenced"] is True and second_fence["drained"] is True
+        second_wal = {name:(backend[2]["ledger"]/name).read_bytes()
+                      for name in new_a_names}
+        a_third = install(3, USER_A, str(uuid.uuid4()), str(uuid.uuid4()))
+        fd = os.open(ingress_state, os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            with mock.patch.dict(os.environ, {
+                "XMESH_QUOTA_V2_INGRESS_STAGING":"1",
+            }):
+                vless_ingress.publish(
+                    fd, a_third,
+                    ("c"*64, "unused", active[3][0], active[3][1]),
+                    vless_ingress.target(active[2][0],active[2][1]))
+        finally:
+            os.close(fd)
+        with connect(USER_A, "main") as third_a:
+            echo_bytes(third_a, 16384)
+        echo_bytes(b, 16384)
+        assert {name:(backend[2]["ledger"]/name).read_bytes()
+                for name in new_a_names} == second_wal, (
+                    "second calendar WAL changed after its fence")
+        third_inventory = backend[3]["ledger"]/"xmesh-meter-inventory-v1.jsonl"
+        third_names = {
+            json.loads(line)["filename"]
+            for line in third_inventory.read_bytes().splitlines()
+        }
+        assert len(third_names)==2 and third_names.isdisjoint(new_a_names|a_names)
+        for name in third_names:
+            last = json.loads((backend[3]["ledger"]/name).read_bytes().splitlines()[-1])
+            assert last["nextBytes"]==16384 and last["runtimeId"]==active[3][1]
+        assert query_direction_counters(binary, backend[1]["api"],
+                                        f"xmesh-u{USER_B}--vless-main") == {
+            "uplink": 81920, "downlink": 81920,
         }
         # Lost publication ACK: replaying the same signed runtime/route
         # must NOT create a second lease, replace the symlink or reopen old
