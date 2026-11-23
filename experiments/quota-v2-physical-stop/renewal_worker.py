@@ -563,11 +563,16 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
     for user, revision, challenge in jobs:
         if user in failed_users:
             continue
+        # A discovered successor socket/pin belongs only to this iteration.
+        # Never retain another user's auto-discovered runtime across jobs.
+        user_fresh_socket = fresh_socket
+        user_fresh_executable = fresh_executable
+        user_fresh_config = fresh_config
         try:
             if revision == -3:
                 installed += int(_restore_initial_ingress(panel, node, user, state))
                 continue
-            if (revision in (-1, -2) and fresh_socket is None
+            if (revision in (-1, -2) and user_fresh_socket is None
                     and os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"
                     and os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1"):
                 from successor_meter import SUCCESSOR
@@ -575,24 +580,24 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
                 if not any(m.get("Destination") == wal_transport.journal.RUNTIME_DEST
                            for m in mount["Mounts"]):
                     raise ValueError("private successor control socket requires a measured runtime mount")
-                fresh_socket = os.path.join(os.path.dirname(ledger), "drain.sock")
-                fresh_executable = executable
-                fresh_config = intent["configSha256"]
+                user_fresh_socket = os.path.join(os.path.dirname(ledger), "drain.sock")
+                user_fresh_executable = executable
+                user_fresh_config = intent["configSha256"]
             if revision == -2:
                 if os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") != "1" or not (
-                        fresh_socket and fresh_executable and fresh_config):
+                        user_fresh_socket and user_fresh_executable and user_fresh_config):
                     raise ValueError("positive successor requires a separately pinned fresh Xray")
                 import successor_positive
                 successor_positive.install_successor(
-                    panel, node, user, state, fresh_socket,
-                    fresh_executable, fresh_config)
+                    panel, node, user, state, user_fresh_socket,
+                    user_fresh_executable, user_fresh_config)
                 continue
             if revision == -1:
-                if not (fresh_socket and fresh_executable and fresh_config):
+                if not (user_fresh_socket and user_fresh_executable and user_fresh_config):
                     raise ValueError("fresh Xray staging requires independent Unix socket and two SHA-256 pins")
                 import successor_meter
                 successor_meter.observe_successor_meter(
-                    node, user, state, fresh_socket, fresh_executable, fresh_config)
+                    node, user, state, user_fresh_socket, user_fresh_executable, user_fresh_config)
                 continue
             if revision == 0:
                 _prepare_successor(panel, state, node, user, challenge)
