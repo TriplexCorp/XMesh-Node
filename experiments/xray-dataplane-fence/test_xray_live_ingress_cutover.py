@@ -472,12 +472,12 @@ def run(binary, root, echo_port, processes, netns=None):
                 "XMESH_QUOTA_V2_INGRESS_STAGING": "1",
             }):
                 vless_ingress.publish(
-                    fd, a_new,
-                    ("b"*64, "unused", active[2][0], active[2][1]))
+                    fd, a_third,
+                    ("c"*64, "unused", active[3][0], active[3][1]))
                 try:
                     vless_ingress.publish(
-                        fd, a_old,
-                        ("a"*64, "unused", active[1][0], active[1][1]))
+                        fd, a_new,
+                        ("b"*64, "unused", active[2][0], active[2][1]))
                 except ValueError:
                     pass
                 else:
@@ -486,24 +486,20 @@ def run(binary, root, echo_port, processes, netns=None):
             assert (before.st_dev,before.st_ino)==(after.st_dev,after.st_ino)
         finally:
             os.close(fd)
-        assert first.poll() is None and second.poll() is None and front.poll() is None
+        assert first.poll() is None and second.poll() is None and third.poll() is None and front.poll() is None
         # Terminating only A's new metering runtime must fail closed for A,
         # while B's original stream continues under its first reservation.
-        if netns:
-            os.kill(active[2][0], signal.SIGKILL)
-            second.wait(timeout=10)
-        else:
-            second.kill()
-            assert second.wait(timeout=10)==-9
+        third.kill()
+        assert third.wait(timeout=10)==-9
         with connect(USER_A,"main") as denied:
             assert not probe_echo(denied,1), "dead signed Xray granted A extra traffic"
         echo_bytes(b, 16384)
         assert query_direction_counters(binary, backend[1]["api"],
                                         f"xmesh-u{USER_B}--vless-main") == {
-            "uplink":81920, "downlink":81920,
+            "uplink":98304, "downlink":98304,
         }
-        print("PASS: two-user stable VLESS A->new Xray, B live stream intact; "
-              "stale-generation hijack denied, second runtime SIGKILL fails closed; "
+        print("PASS: two-user real VLESS A calendar 1->2->3, B live stream intact; "
+              "stale-generation hijack denied, third runtime SIGKILL fails closed; "
               f"successor in separate network namespace={bool(netns)}")
 
 
