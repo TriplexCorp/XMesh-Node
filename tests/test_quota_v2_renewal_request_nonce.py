@@ -128,14 +128,14 @@ class DurableRenewalNonce(unittest.TestCase):
                "XMESH_QUOTA_V2_AUTO_SUCCESSOR_POSITIVE": "0",
                "XMESH_QUOTA_V2_FRESH_METER_STAGING": "1",
                "XMESH_QUOTA_V2_INGRESS_STAGING": "1"}
-        with mock.patch.dict(os.environ, env), \\
-                mock.patch.object(charge_worker, "run"), \\
-                mock.patch.object(renewal_worker, "activate_initial_cap", return_value=0), \\
-                mock.patch.object(renewal_worker, "pending_renewals", return_value=jobs), \\
-                mock.patch.object(renewal_worker.wal_transport, "_panel_pin", return_value="a"*64), \\
-                mock.patch.object(renewal_worker.lease, "_identity_file", return_value=intent), \\
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(charge_worker, "run"), \
+                mock.patch.object(renewal_worker, "activate_initial_cap", return_value=0), \
+                mock.patch.object(renewal_worker, "pending_renewals", return_value=jobs), \
+                mock.patch.object(renewal_worker.wal_transport, "_panel_pin", return_value="a"*64), \
+                mock.patch.object(renewal_worker.lease, "_identity_file", return_value=intent), \
                 mock.patch.object(renewal_worker.wal_transport, "_bound_journal",
-                                  side_effect=bound_journal) as bound, \\
+                                  side_effect=bound_journal) as bound, \
                 mock.patch("successor_meter.observe_successor_meter",
                            side_effect=observe):
             self.assertEqual(renewal_worker.run(
