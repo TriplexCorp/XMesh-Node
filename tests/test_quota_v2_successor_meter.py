@@ -152,7 +152,12 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             "XMESH_EXPERIMENTAL_OBSERVED_DIR=" + journal_integrity.JOURNAL_DEST,
             "XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING=/run/xmesh/positive-cap-binding.json",
         ]
-        docker = {"Config": {"Env": base + ["XMESH_QUOTA_V2_STAGING_RUNTIME=1"]}}
+        marker = "/etc/xmesh-quota-v2-staging"
+        docker = {
+            "Mounts": [{"Source": marker, "Destination": marker,
+                        "Type": "bind", "RW": False}],
+            "Config": {"Env": base + ["XMESH_QUOTA_V2_STAGING_RUNTIME=1"]},
+        }
         with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), \
                 mock.patch.object(vless_ingress, "_staging_permitted", return_value=False):
             with self.assertRaisesRegex(ValueError, "staging marker"):
@@ -160,6 +165,14 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), \
                 mock.patch.object(vless_ingress, "_staging_permitted", return_value=True):
             self.assertIsNone(successor_meter._verify_fresh_container_env(docker))
+            for invalid in (
+                    dict(docker, Mounts=[]),
+                    dict(docker, Mounts=[dict(docker["Mounts"][0], RW=True)]),
+                    dict(docker, Mounts=[dict(docker["Mounts"][0], Source="/tmp/foreign")]),
+                    dict(docker, Mounts=docker["Mounts"] * 2)):
+                with self.subTest(mount=invalid["Mounts"]), self.assertRaisesRegex(
+                        ValueError, "staging marker"):
+                    successor_meter._verify_fresh_container_env(invalid)
             with self.assertRaisesRegex(ValueError, "staging marker"):
                 successor_meter._verify_fresh_container_env({
                     "Config": {"Env": base + ["GITHUB_ACTIONS=true"]},
