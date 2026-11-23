@@ -87,4 +87,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile experiments/quota-v2-physical-stop/vless_ingress.py experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py
+          # First preserve the independently established same-namespace case.
           python3 experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py "$RUNNER_TEMP/xmesh-xray-signed-cap"
+          # Then put ONLY A's successor metering Xray and echo endpoint in
+          # their own real network namespace. The public frontend, A's UUID
+          # and port, and B's existing connection stay on the host.
+          if ! command -v ip >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq iproute2
+          fi
+          XMESH_QUOTA_V2_CROSS_NETNS=1 python3 experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py "$RUNNER_TEMP/xmesh-xray-signed-cap"
