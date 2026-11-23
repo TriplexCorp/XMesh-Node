@@ -1082,6 +1082,25 @@ class FirstCapHandoffTests(unittest.TestCase):
                 "https://isolated.test", self.node, str(state), "/private/xray.sock"), 2)
         self.assertEqual(visited, [10, 11, 12, 13])
 
+    def test_initial_cap_skips_users_with_unacknowledged_wal_charges(self):
+        if os.geteuid() != 0:
+            self.skipTest("root-owned staged Genesis evidence")
+        state = self.fixture.root / "debit-blocked-state"
+        state.mkdir(mode=0o700)
+        self.reply["policy"]["users"] = [{"userId": user} for user in range(10, 14)]
+        document = state / "genesis-quarantine-envelope.json"
+        document.write_bytes(self.guard.canonical(self.evidence()))
+        document.chmod(0o600)
+        seen = []
+        with (mock.patch.object(renewal_worker, "MAX_PER_POLL", 16),
+              mock.patch.object(renewal_worker, "_activate_user",
+                                side_effect=lambda panel, node, user, state, sock:
+                                seen.append(user) or True)):
+            self.assertEqual(renewal_worker.activate_initial_cap(
+                "https://isolated.test", self.node, str(state), "/private/xray.sock",
+                blocked_users={10, 12}), 2)
+        self.assertEqual(seen, [11, 13])
+
     def test_first_issuance_sends_the_measured_runtime_over_the_product_client(self):
         import os
 
