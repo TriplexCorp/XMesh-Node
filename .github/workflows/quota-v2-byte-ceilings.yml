@@ -51,7 +51,11 @@ jobs:
         run: |
           set -euo pipefail
           # Bytecode has no place in reviewed signed-Agent source trees.
-          if git ls-files | grep -Eq '(^|/)__pycache__/|\\.py[co]
+          if git ls-files | grep -E '(^|/)__pycache__/|[.]py[co]'; then
+            echo "Generated Python bytecode is tracked in the release source" >&2
+            exit 1
+          fi
+          python3 -m py_compile experiments/xray-dataplane-fence/apply-experiment.py
           test -n "${GITHUB_ACTIONS:-}"
           test "$XMESH_EXPERIMENTAL_DRAIN" = '0'
       - name: Fetch exact reviewed upstream Xray and inject all experiment modules
