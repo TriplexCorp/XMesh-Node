@@ -138,8 +138,9 @@ class DurableRenewalNonce(unittest.TestCase):
                                   side_effect=bound_journal) as bound, \
                 mock.patch("successor_meter.observe_successor_meter",
                            side_effect=observe):
+            # Staging observation does not count as a newly installed cap.
             self.assertEqual(renewal_worker.run(
-                "https://staging.example.invalid", 7, self.state), 2)
+                "https://staging.example.invalid", 7, self.state), 0)
         self.assertEqual(bound.call_count, 2)
         self.assertEqual([row[:2] for row in observed], [
             (101, "/private/successor-0/drain.sock"),
