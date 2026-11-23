@@ -118,6 +118,13 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
         ci_env = mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"})
         ci_env.start()
         self.addCleanup(ci_env.stop)
+        # The CI label is not authority: even a real runner must have
+        # the local root-only staging marker before trusting Docker env.
+        import vless_ingress
+        marker_guard = mock.patch.object(vless_ingress, "_staging_permitted",
+                                         return_value=True)
+        marker_check = marker_guard.start()
+        self.addCleanup(marker_guard.stop)
         expected = [
             "GITHUB_ACTIONS=true",
             "XMESH_EXPERIMENTAL_DRAIN=1",
@@ -126,6 +133,10 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
         ]
         container = {"Config": {"Env": list(expected)}}
         self.assertIsNone(successor_meter._verify_fresh_container_env(container))
+        marker_check.return_value = False
+        with self.assertRaisesRegex(ValueError, "staging marker"):
+            successor_meter._verify_fresh_container_env(container)
+        marker_check.return_value = True
         for changed in (
             {"Config": {}},
             {"Config": {"Env": None}},
