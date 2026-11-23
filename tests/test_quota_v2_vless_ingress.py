@@ -153,6 +153,26 @@ class VlessIngressTests(unittest.TestCase):
                 f"ingress-u{USER}", "xray-a", "xray-b",
             ]))
 
+    def test_installed_staging_marker_requires_private_root_file(self):
+        if os.geteuid() != 0:
+            self.skipTest("staging marker must belong to real root")
+        with tempfile.TemporaryDirectory() as folder:
+            marker = Path(folder) / "xmesh-quota-v2-staging"
+            marker.write_text("disposable-staging-only\n")
+            marker.chmod(0o600)
+            with mock.patch.object(ingress, "STAGING_MARKER", str(marker)), \
+                    mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
+                self.assertTrue(ingress._staging_permitted())
+                marker.chmod(0o644)
+                self.assertFalse(ingress._staging_permitted())
+                marker.chmod(0o600)
+                marker.rename(Path(folder) / "saved")
+                marker.symlink_to(Path(folder) / "saved")
+                self.assertFalse(ingress._staging_permitted())
+                marker.unlink()
+                os.link(Path(folder) / "saved", marker)
+                self.assertFalse(ingress._staging_permitted())
+
     def test_non_ci_frontend_must_not_spoof_github_runner(self):
         with mock.patch.dict(os.environ, {
                 "XMESH_QUOTA_V2_INGRESS_STAGING":"1",
