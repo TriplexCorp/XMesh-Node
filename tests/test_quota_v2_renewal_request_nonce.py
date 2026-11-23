@@ -199,6 +199,35 @@ class DurableRenewalNonce(unittest.TestCase):
             activate.assert_not_called()
             rotate.assert_not_called()
 
+    def test_unverified_separate_successor_wal_denies_new_positive_caps(self):
+        # Charge the existing Genesis WAL first, then simulate a foreign,
+        # unavailable or broken successor WAL/remote signed ACK. No new
+        # signed first cap or renewal may be minted from a stale meter.
+        import charge_worker
+        env = {
+            "XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
+            "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
+            "XMESH_QUOTA_V2_AUTO_SUCCESSOR_POSITIVE": "1",
+            "XMESH_QUOTA_V2_FRESH_METER_STAGING": "1",
+            "XMESH_QUOTA_V2_MANAGED_GENERATIONS_STAGING": "0",
+        }
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(charge_worker, "run",
+                                  side_effect=[0, ValueError("unverified successor WAL")]) as charge, \
+                mock.patch.object(vless_ingress, "_staging_permitted") as staging, \
+                mock.patch.object(renewal_worker, "activate_initial_cap") as activate, \
+                mock.patch.object(renewal_worker, "pending_renewals") as renew:
+            self.assertEqual(renewal_worker.run(
+                "https://staging.example.invalid", 7, self.state), 0)
+            self.assertEqual(charge.call_count, 2)
+            self.assertEqual(charge.call_args_list[0].args[:3],
+                             ("https://staging.example.invalid", 7, self.state))
+            self.assertEqual(charge.call_args_list[1].kwargs.get("container_name"),
+                             "xmesh-successor-quarantine")
+            staging.assert_not_called()
+            activate.assert_not_called()
+            renew.assert_not_called()
+
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()
         try:
