@@ -112,6 +112,12 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
 
     def test_fresh_container_environment_is_bound_to_actual_wal_mount(self):
         import journal_integrity
+        # sudo strips GITHUB_ACTIONS in Node CI. Model an actual host CI
+        # explicitly here, instead of treating Docker's CI claim alone as
+        # authorization outside the runner.
+        ci_env = mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"})
+        ci_env.start()
+        self.addCleanup(ci_env.stop)
         expected = [
             "GITHUB_ACTIONS=true",
             "XMESH_EXPERIMENTAL_DRAIN=1",
