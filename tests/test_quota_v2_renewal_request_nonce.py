@@ -102,6 +102,49 @@ class DurableRenewalNonce(unittest.TestCase):
                 "https://staging.example.invalid", node, user, self.state))
             publish.assert_called_once()
 
+    def test_successor_auto_discovery_does_not_reuse_prior_user_socket(self):
+        # Two successor jobs in one tick must independently inspect the
+        # successor runtime. Never carry a socket discovered for user 101
+        # into user 102 merely because the previous job succeeded.
+        import charge_worker
+        from successor_meter import SUCCESSOR
+        jobs = [(101, -1, "a" * 64), (102, -1, "b" * 64)]
+        intent = {"nodeId": 7, "executableSha256": "a" * 64,
+                  "configSha256": "b" * 64}
+        observed = []
+
+        def bound_journal(container_name):
+            self.assertEqual(container_name, SUCCESSOR)
+            index = len(observed)
+            return ({"Mounts": [{"Destination":
+                     renewal_worker.wal_transport.journal.RUNTIME_DEST}]},
+                    f"/private/successor-{index}/ledger")
+
+        def observe(node, user, state, socket, executable, config):
+            observed.append((user, socket, executable, config))
+
+        env = {"XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
+               "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
+               "XMESH_QUOTA_V2_AUTO_SUCCESSOR_POSITIVE": "0",
+               "XMESH_QUOTA_V2_FRESH_METER_STAGING": "1",
+               "XMESH_QUOTA_V2_INGRESS_STAGING": "1"}
+        with mock.patch.dict(os.environ, env), \\
+                mock.patch.object(charge_worker, "run"), \\
+                mock.patch.object(renewal_worker, "activate_initial_cap", return_value=0), \\
+                mock.patch.object(renewal_worker, "pending_renewals", return_value=jobs), \\
+                mock.patch.object(renewal_worker.wal_transport, "_panel_pin", return_value="a"*64), \\
+                mock.patch.object(renewal_worker.lease, "_identity_file", return_value=intent), \\
+                mock.patch.object(renewal_worker.wal_transport, "_bound_journal",
+                                  side_effect=bound_journal) as bound, \\
+                mock.patch("successor_meter.observe_successor_meter",
+                           side_effect=observe):
+            self.assertEqual(renewal_worker.run(
+                "https://staging.example.invalid", 7, self.state), 2)
+        self.assertEqual(bound.call_count, 2)
+        self.assertEqual([row[:2] for row in observed], [
+            (101, "/private/successor-0/drain.sock"),
+            (102, "/private/successor-1/drain.sock")])
+
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()
         try:
