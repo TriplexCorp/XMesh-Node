@@ -696,6 +696,11 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             print(f"Quota V2 successor WAL ledger not independently anchored: "
                   f"{type(error).__name__}", flush=True)
+            # The separately funded successor may already have delivered
+            # real bytes. Refuse ALL new positive caps on this tick until
+            # its WAL and signed off-host charge checkpoint can be verified.
+            # Do not turn an unverified meter into additional authority.
+            return 0
     if not vless_ingress._staging_permitted():
         print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
         return 0
