@@ -42,12 +42,24 @@ def _verify_fresh_container_env(docker):
         raise ValueError("untrusted successor Xray process environment")
     runtime_layout = any(m.get("Destination") == journal_integrity.RUNTIME_DEST
                          for m in docker.get("Mounts", []) if isinstance(m, dict))
+    # A Docker self-report of GITHUB_ACTIONS=true is not sufficient to
+    # authorize a production-host experimental Xray. The installed Agent
+    # must itself be running in CI OR verify an explicit root-owned staging
+    # marker before accepting a separately signed-cap isolated runtime.
+    host_ci = os.environ.get("GITHUB_ACTIONS") == "true"
+    if not host_ci:
+        import vless_ingress
+        if (not vless_ingress._staging_permitted()
+                or "XMESH_QUOTA_V2_STAGING_RUNTIME=1" not in env
+                or "GITHUB_ACTIONS=true" in env):
+            raise ValueError("installed successor requires the explicit root-only staging marker")
     required = {
-        "GITHUB_ACTIONS": "true",
         "XMESH_EXPERIMENTAL_DRAIN": "1",
         "XMESH_EXPERIMENTAL_OBSERVED_DIR": (journal_integrity.RUNTIME_DEST + "/ledger"
                                            if runtime_layout else journal_integrity.JOURNAL_DEST),
     }
+    required["GITHUB_ACTIONS" if host_ci else "XMESH_QUOTA_V2_STAGING_RUNTIME"] = (
+        "true" if host_ci else "1")
     if runtime_layout:
         required.update({
             "XMESH_EXPERIMENTAL_DRAIN_SOCKET": journal_integrity.RUNTIME_DEST + "/drain.sock",
