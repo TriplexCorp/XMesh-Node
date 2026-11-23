@@ -270,6 +270,22 @@ class VlessIngressTests(unittest.TestCase):
                 os.close(reader)
                 os.close(directory)
 
+    def test_runner_environment_cannot_bypass_staging_marker(self):
+        # CI is not a privileged identity. A manually supplied
+        # GITHUB_ACTIONS=true must never permit unsigned/unmarked ingress.
+        with tempfile.TemporaryDirectory() as folder:
+            marker = Path(folder) / "staging-permit"
+            with mock.patch.object(ingress, "STAGING_MARKER", str(marker)), \
+                    mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                self.assertFalse(ingress._staging_permitted())
+                marker.write_text("not-secret\n")
+                marker.chmod(0o644)
+                self.assertFalse(ingress._staging_permitted())
+                marker.chmod(0o600)
+                self.assertEqual(ingress._staging_permitted(), os.geteuid() == 0)
+                marker.unlink()
+                self.assertFalse(ingress._staging_permitted())
+
     def test_installed_staging_marker_requires_private_root_file(self):
         if os.geteuid() != 0:
             self.skipTest("staging marker must belong to real root")
