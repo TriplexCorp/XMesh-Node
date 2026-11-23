@@ -161,9 +161,9 @@ def _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned):
     return saved
 
 
-def _read_evidence(fd, node, user, pinned):
-    names = os.listdir(fd)
-    old = renewal_worker.latest_signed_cap(fd, names, node, user, pinned)
+def _read_evidence(fd, node, user, pinned, *, old=None):
+    if old is None:
+        old = renewal_worker.latest_signed_cap(fd, os.listdir(fd), node, user, pinned)
     now = time.time_ns() // 1_000_000
     if now < old["validUntilMs"]:
         raise ValueError("old Xray quota period has not expired")
@@ -190,7 +190,40 @@ def _read_evidence(fd, node, user, pinned):
     return old, prepared, closed, fresh, digest, measured
 
 
-def install_successor(panel, node, user, state, socket_path, executable_pin, config_pin):
+def verified_chain(fd, names, node, user, pinned):
+    """Return the historical chain, rooted in the verified Genesis revisions.
+
+    An installed receipt identifies a generation. The caller still needs
+    to measure a live runtime before operating on it or publishing a route.
+    """
+    old = renewal_worker.latest_signed_cap(fd, names, node, user, pinned)
+    remaining = {name for name in names
+                 if name.startswith(f"calendar-positive-u{user}-")}
+    chain = [(old, None)]
+    identities = {key: {old[key]} for key in ("runtimeId", "reservationId", "meterEpoch")}
+    while remaining:
+        name = _filename(user, old["reservationId"])
+        if name not in remaining:
+            raise ValueError("disconnected successor receipt chain")
+        _, prepared, _, fresh, _, measured = _read_evidence(
+            fd, node, user, pinned, old=old)
+        saved = lease._identity_file(fd, name, 32768)
+        _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned)
+        new = wal_transport.observed.strict_json(
+            saved["response"]["signedEnvelope"].encode())["payload"]
+        if any(new[key] in values for key, values in identities.items()):
+            raise ValueError("reused successor meter identity")
+        for key, values in identities.items():
+            values.add(new[key])
+        chain.append((new, measured))
+        remaining.remove(name)
+        old = new
+    return chain
+
+
+def install_successor(panel, node, user, state, socket_path, executable_pin, config_pin,
+                      *, predecessor=None, old_container=None,
+                      candidate_container=successor_meter.SUCCESSOR):
     """Send one deterministic positive request, install ONLY in new Xray."""
     if (os.geteuid() != 0 or not isinstance(panel, str)
             or not panel.startswith("https://") or type(node) is not int
@@ -199,13 +232,23 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
                        for v in (executable_pin, config_pin))):
         raise ValueError("successor admission requires root and pinned isolated Xray")
 
+    old_args = (old_container,) if old_container else ()
+
+    def evidence(fd, pinned):
+        if predecessor is None:
+            return _read_evidence(fd, node, user, pinned)
+        chain = verified_chain(fd, os.listdir(fd), node, user, pinned)
+        tail = [grant for grant, _ in chain[-2:]]
+        if predecessor not in tail:
+            raise ValueError("positive grant targets a retired generation")
+        return _read_evidence(fd, node, user, pinned, old=predecessor)
+
     # First root-locked phase: identify the signed predecessor and EXACT
     # fresh process/zero-counter proof. No network I/O while holding flock.
     fd, lock = quarantine._locked_private_state(state)
     try:
         pinned = wal_transport._panel_pin()
-        old, prepared, closed, fresh, digest, measured = _read_evidence(
-            fd, node, user, pinned)
+        old, prepared, closed, fresh, digest, measured = evidence(fd, pinned)
         if fresh["freshExecutableSha256"] != executable_pin or \
                 fresh["freshConfigSha256"] != config_pin:
             raise ValueError("new executable/config pins differ from immutable marker")
@@ -214,13 +257,19 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             saved = lease._identity_file(fd, name, 32768)
             _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned)
             if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
-                before = wal_transport._measure_quarantined_runtime((executable_pin, config_pin))
+                active = quarantine._enrolled_activation(panel, node)
+                if active["activationReceiptSha256"] != old["activationReceiptSha256"]:
+                    raise ValueError("enrolled Node changed before recovering successor ingress")
+                if calendar_fence._original_signed_scope(fd, old, node, pinned) != config_pin:
+                    raise ValueError("signed policy changed before recovering successor ingress")
+                before = wal_transport._measure_quarantined_runtime((executable_pin, config_pin), *old_args)
                 after = wal_transport._measure_quarantined_runtime(
-                    (executable_pin, config_pin), container_name=successor_meter.SUCCESSOR)
+                    (executable_pin, config_pin), container_name=candidate_container)
                 if before[3] != old["runtimeId"] or after != measured:
                     raise ValueError("saved ingress route targets a replaced Xray")
                 grant = wal_transport.observed.strict_json(saved["response"]["signedEnvelope"].encode())
-                vless_ingress.publish(fd, grant["payload"], after, vless_ingress.target(before[2], before[3]))
+                vless_ingress.publish(fd, grant["payload"], after, vless_ingress.target(before[2], before[3]),
+                                      restore_missing=predecessor is not None)
             return False
         pending_name = f"calendar-delivery-u{user}-{old['reservationId']}.json"
         response = (lease._identity_file(fd, pending_name, 32768)
@@ -235,13 +284,13 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
         # config hash must be independently pinned for this exact PID.
         if original_config_sha != config_pin:
             raise ValueError("successor Xray does not use signed original config")
-        original = wal_transport._measure_quarantined_runtime()
+        original = wal_transport._measure_quarantined_runtime(None, *old_args)
         candidate = wal_transport._measure_quarantined_runtime(
-            (executable_pin, config_pin), container_name=successor_meter.SUCCESSOR)
+            (executable_pin, config_pin), container_name=candidate_container)
         if candidate != measured or original[3] != old["runtimeId"]:
             raise ValueError("positive request no longer targets the signed clean process")
-        _, old_root = wal_transport._bound_journal()
-        _, new_root = wal_transport._bound_journal(successor_meter.SUCCESSOR)
+        _, old_root = wal_transport._bound_journal(*old_args)
+        _, new_root = wal_transport._bound_journal(candidate_container)
         successor_meter._clean_mount(old_root, new_root, candidate[3])
     finally:
         os.close(lock)
@@ -278,18 +327,21 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
     # check, then use the measured new Xray peer and fsync its receipt.
     fd, lock = quarantine._locked_private_state(state)
     try:
-        again = _read_evidence(fd, node, user, pinned)
+        again = evidence(fd, pinned)
         if again != (old, prepared, closed, fresh, digest, measured):
             raise ValueError("old WAL or successor changed during positive XSP request")
         active = quarantine._enrolled_activation(panel, node)
         if active != activation or wal_transport._panel_pin() != pinned:
             raise ValueError("Node identity changed while positive cap was committed")
         candidate = wal_transport._measure_quarantined_runtime(
-            (executable_pin, config_pin), container_name=successor_meter.SUCCESSOR)
+            (executable_pin, config_pin), container_name=candidate_container)
         if candidate != measured:
             raise ValueError("new Xray PID changed during signed-positive request")
-        _, old_root = wal_transport._bound_journal()
-        _, new_root = wal_transport._bound_journal(successor_meter.SUCCESSOR)
+        if wal_transport._measure_quarantined_runtime(
+                (executable_pin, config_pin), *old_args) != original:
+            raise ValueError("predecessor changed during signed-positive request")
+        _, old_root = wal_transport._bound_journal(*old_args)
+        _, new_root = wal_transport._bound_journal(candidate_container)
         successor_meter._clean_mount(old_root, new_root, candidate[3])
         # Persist the exact verified pair before IPC. A crash here can retry
         # on this measured process without asking Nexus for another reserve.
@@ -300,13 +352,14 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             if saved["response"] != response:
                 raise ValueError("concurrent successor delivery differs from committed grant")
             if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
-                original_now = wal_transport._measure_quarantined_runtime()
+                original_now = wal_transport._measure_quarantined_runtime(None, *old_args)
                 if original_now[3] != old["runtimeId"]:
                     raise ValueError("predecessor changed before replaying ingress route")
                 verified_grant = wal_transport.observed.strict_json(
                     saved["response"]["signedEnvelope"].encode())
                 vless_ingress.publish(fd, verified_grant["payload"], candidate,
-                                      vless_ingress.target(original_now[2], original_now[3]))
+                                      vless_ingress.target(original_now[2], original_now[3]),
+                                      restore_missing=predecessor is not None)
             return False
         # A crash immediately after IPC can leave byte WAL before the
         # installation receipt exists. Attribute it to this exact signed
@@ -318,7 +371,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             socket_path, candidate[2], candidate[3], genesis, grant, scope)
         if wal_transport._measure_quarantined_runtime(
                 (executable_pin, config_pin),
-                container_name=successor_meter.SUCCESSOR) != measured:
+                container_name=candidate_container) != measured:
             raise ValueError("new Xray changed during positive cap installation")
         record = {
             "nodeId": node, "userId": user,
@@ -329,11 +382,12 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
         }
         quarantine._durable_store(fd, record, _filename(user,old["reservationId"]))
         if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
-            original_now = wal_transport._measure_quarantined_runtime()
+            original_now = wal_transport._measure_quarantined_runtime(None, *old_args)
             if original_now[3] != old["runtimeId"]:
                 raise ValueError("predecessor changed before publishing ingress route")
             vless_ingress.publish(fd, wal_transport.observed.strict_json(grant)["payload"],
-                                  candidate, vless_ingress.target(original_now[2], original_now[3]))
+                                  candidate, vless_ingress.target(original_now[2], original_now[3]),
+                                      restore_missing=predecessor is not None)
         return True
     finally:
         os.close(lock)

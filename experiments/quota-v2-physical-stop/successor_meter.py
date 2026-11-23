@@ -9,11 +9,13 @@ This does NOT allocate, sign, install or activate a positive cap, and cannot
 refund, reset, or move an old byte. It is not remote hardware attestation.
 """
 import hashlib
+import subprocess
 import os
 from pathlib import Path
 import re
 import stat
 import time
+import uuid
 
 import cap_install
 import calendar_fence
@@ -165,7 +167,8 @@ def _checked_marker(record, old, digest, measured, prep):
     return record
 
 
-def observe_successor_meter(node, user, state, socket_path, executable_pin, config_pin):
+def observe_successor_meter(node, user, state, socket_path, executable_pin, config_pin,
+                            *, predecessor=None, old_container=None, candidate_container=SUCCESSOR):
     """Capture the original signed scope and verify a separately pristine PID."""
     if (os.geteuid() != 0 or type(node) is not int or node <= 0
             or type(user) is not int or user <= 0
@@ -174,11 +177,18 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
             or any(calendar_fence.caps.HEX64.fullmatch(pin) is None
                    for pin in (executable_pin, config_pin))):
         raise ValueError("successor proof requires root and pinned fresh Xray files")
+    old_args = (old_container,) if old_container else ()
     fd, lock = quarantine._locked_private_state(state)
     try:
         names = os.listdir(fd)
         pinned = wal_transport._panel_pin()
-        old = renewal_worker.latest_signed_cap(fd, names, node, user, pinned)
+        if predecessor is None:
+            old = renewal_worker.latest_signed_cap(fd, names, node, user, pinned)
+        else:
+            import successor_positive
+            old = successor_positive.verified_chain(fd, names, node, user, pinned)[-1][0]
+            if old != predecessor:
+                raise ValueError("successor zero proof targets an obsolete predecessor")
         now = time.time_ns() // 1_000_000
         if now < old["validUntilMs"]:
             raise ValueError("predecessor is not expired")
@@ -196,12 +206,12 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
         if (closed["oldWalChargeConfirmation"][
                 "allOldStreamTailsNexusAcknowledged"] is not True):
             raise ValueError("old Xray WAL is not fully acknowledged")
-        previous, old_root = wal_transport._bound_journal()
-        fresh, fresh_root = wal_transport._bound_journal(SUCCESSOR)
+        previous, old_root = wal_transport._bound_journal(*old_args)
+        fresh, fresh_root = wal_transport._bound_journal(candidate_container)
         _verify_fresh_container_env(fresh)
         measured = wal_transport._measure_quarantined_runtime(
-            (executable_pin, config_pin), container_name=SUCCESSOR)
-        original = wal_transport._measure_quarantined_runtime()
+            (executable_pin, config_pin), container_name=candidate_container)
+        original = wal_transport._measure_quarantined_runtime(None, *old_args)
         if (measured[0] == original[0] or measured[2] == original[2]
                 or measured[3] == original[3] or measured[3] == old["runtimeId"]
                 or measured[0] != fresh.get("Id")
@@ -222,7 +232,7 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
             socket_path, measured[2], measured[3], scope)
         _clean_mount(old_root, fresh_root, measured[3])
         if wal_transport._measure_quarantined_runtime(
-                (executable_pin, config_pin), container_name=SUCCESSOR) != measured:
+                (executable_pin, config_pin), container_name=candidate_container) != measured:
             raise ValueError("fresh Xray changed during zero-counter proof")
         marker = {
             "nodeId": node, "userId": user,
@@ -250,6 +260,123 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
             return False
         quarantine._durable_store(fd, marker, name)
         return True
+    finally:
+        os.close(lock)
+        os.close(fd)
+
+
+def container_for(user, predecessor):
+    reservation = uuid.UUID(predecessor)
+    if type(user) is not int or not 0 < user < 2**63 or str(reservation) != predecessor:
+        raise ValueError("invalid managed generation identity")
+    return f"xmesh-quota-u{user}-{reservation.hex}"
+
+
+def control_socket(container):
+    inspect, ledger = wal_transport._bound_journal(container)
+    _verify_fresh_container_env(inspect)
+    if not any(m.get("Destination") == wal_transport.journal.RUNTIME_DEST
+               for m in inspect["Mounts"]):
+        raise ValueError("generation requires a private runtime mount")
+    return os.path.join(os.path.dirname(ledger), "drain.sock")
+
+
+def start_generation(state, node, user, old, old_container, executable, config):
+    """Provision only the deterministic empty candidate of a fenced reservation."""
+    import vless_ingress
+
+    if not vless_ingress._staging_permitted():
+        raise ValueError("automatic generation launch requires isolated staging")
+    name = container_for(user, old["reservationId"])
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        names = os.listdir(fd)
+        pin = wal_transport._panel_pin()
+        import successor_positive
+        if successor_positive.verified_chain(fd, names, node, user, pin)[-1][0] != old:
+            raise ValueError("generation predecessor changed before launch")
+        prep = lease._identity_file(fd, renewal_worker._successor_filename(user, old), 16384)
+        renewal_worker._verify_successor_reply(
+            prep, old, node, user, renewal_worker._successor_nonce(old), pin,
+            time.time_ns() // 1_000_000)
+        digest = hashlib.sha256(wal_transport.observed.canonical(prep)).hexdigest()
+        closed = lease._identity_file(fd, calendar_fence._fence_name(user, old["reservationId"]), 32768)
+        calendar_fence._checked_saved(closed, old, digest, old["runtimeId"])
+        if not closed["oldWalChargeConfirmation"]["allOldStreamTailsNexusAcknowledged"]:
+            raise ValueError("generation cannot start before old WAL settlement")
+        existing = subprocess.check_output([
+            "docker", "ps", "-a", "--filter", f"name=^/{name}$", "--format", "{{.Names}}",
+        ], timeout=10).decode().splitlines()
+        if existing:
+            if existing != [name]:
+                raise ValueError("ambiguous managed generation container")
+            return name
+        if _name(user, old["reservationId"]) in names:
+            raise ValueError("measured generation vanished after zero-WAL proof")
+        before = wal_transport._measure_quarantined_runtime((executable, config), old_container)
+        if before[3] != old["runtimeId"]:
+            raise ValueError("generation launch requires live fenced predecessor")
+        container, _ = wal_transport._bound_journal(old_container)
+        _verify_fresh_container_env(container)
+        image = container.get("Image")
+        if not isinstance(image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+            raise ValueError("generation requires an immutable Xray image")
+        config_source = next(m["Source"] for m in container["Mounts"]
+                             if m["Destination"] == "/etc/xray/config.json")
+        root = Path(state) / name
+        root.mkdir(mode=0o700, exist_ok=True)
+        os.close(wal_transport.journal._validate_directory(root))
+        ledger = root / "ledger"
+        ledger.mkdir(mode=0o700, exist_ok=True)
+        os.close(wal_transport.journal._validate_directory(ledger))
+        if list(ledger.iterdir()):
+            raise ValueError("unowned prior generation WAL requires recovery")
+        binding = {
+            "nodeId": node, "activationReceiptSha256": old["activationReceiptSha256"],
+            "policyPublicKey": pin,
+        }
+        path = root / "cap-binding.json"
+        raw = wal_transport.observed.canonical(binding)
+        if path.exists():
+            binding_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(binding_fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                        or stream.read(len(raw) + 1) != raw):
+                    raise ValueError("generation binding changed on disk")
+        else:
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+        root_fd = wal_transport.journal._validate_directory(root)
+        try:
+            os.fsync(root_fd)
+            os.fsync(fd)
+        finally:
+            os.close(root_fd)
+        dest = wal_transport.journal.RUNTIME_DEST
+        allowed = sorted(alias["email"].split("--", 1)[1] for alias in old["aliasScopes"])
+        if not allowed or any(tag not in ("vless-main", "vless-cdn") for tag in allowed):
+            raise ValueError("generation has unsupported signed inbound scope")
+        args = ["docker", "run", "-d", "--name", name, "--network", "none",
+                "--restart=no", "--read-only", "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges", "--user", "0:0",
+                "-v", f"{config_source}:/etc/xray/config.json:ro",
+                "-v", f"{root}:{dest}:rw", "-e", "XMESH_EXPERIMENTAL_DRAIN=1",
+                "-e", "XMESH_QUOTA_PRIVATE_VLESS=1",
+                "-e", f"XMESH_EXPERIMENTAL_DRAIN_SOCKET={dest}/drain.sock",
+                "-e", f"XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING={dest}/cap-binding.json",
+                "-e", f"XMESH_EXPERIMENTAL_OBSERVED_DIR={dest}/ledger",
+                "-e", f"XMESH_EXPERIMENTAL_SCOPED_INBOUNDS={','.join(allowed)}"]
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            args.extend(["-e", "GITHUB_ACTIONS=true"])
+        else:
+            marker = vless_ingress.STAGING_MARKER
+            args.extend(["-e", "XMESH_QUOTA_V2_STAGING_RUNTIME=1", "-v", f"{marker}:{marker}:ro"])
+        subprocess.check_output(args + [image, "run", "-config", "/etc/xray/config.json"], timeout=30)
+        return name
     finally:
         os.close(lock)
         os.close(fd)

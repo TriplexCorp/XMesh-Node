@@ -355,6 +355,7 @@ Type=oneshot
 EnvironmentFile=/etc/xmesh-node-metrics.env
 Environment=XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY=1
 Environment=XMESH_QUOTA_V2_AUTO_RENEW_STAGING=1
+EnvironmentFile=-/etc/xmesh-quota-generations-staging.env
 Environment="PATH=$STRICT_PATH"
 ExecStart=/usr/bin/python3 $WAL_ROOT/quota-v2-physical-stop/renewal_worker.py --panel $PANEL --node-id $NODE
 User=root

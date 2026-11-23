@@ -76,6 +76,43 @@ class ChargeWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exact WAL runtime"):
                 verify._verified_reply(3, "genesis-positive-cap-u42.json", "pin")
 
+    def test_generation_chain_selects_second_successor_and_refuses_forks(self):
+        def grant(i):
+            return {"reservationId": f"reserve-{i}", "meterEpoch": f"meter-{i}",
+                    "runtimeId": f"runtime-{i}"}
+
+        user = 42
+        original, second, third = map(grant, (1, 2, 3))
+        first_name = successor_positive._filename(user, original["reservationId"])
+        second_name = successor_positive._filename(user, second["reservationId"])
+        foreign_name = successor_positive._filename(43, original["reservationId"])
+
+        def saved(_, name, __):
+            result = second if name == first_name else third
+            return {"response": {"signedEnvelope": wal_transport.observed.canonical(
+                {"payload": result}).decode()}}
+
+        with (mock.patch.object(worker.renewal_worker, "latest_signed_cap", return_value=original),
+              mock.patch.object(successor_positive, "_read_evidence",
+                                return_value=(None, None, None, None, None, ("measurement",))) as read,
+              mock.patch.object(successor_positive, "_verified_saved_receipt") as verify,
+              mock.patch.object(successor_positive.lease, "_identity_file", side_effect=saved)):
+            chain = successor_positive.verified_chain(
+                3, [second_name, foreign_name, first_name], 7, user, "pin")
+            self.assertEqual([cap for cap, _ in chain], [original, second, third])
+            self.assertEqual([call.kwargs["old"] for call in read.call_args_list],
+                             [original, second])
+            self.assertEqual(verify.call_count, 2)
+            with self.assertRaisesRegex(ValueError, "disconnected"):
+                successor_positive.verified_chain(3, [second_name], 7, user, "pin")
+            with self.assertRaisesRegex(ValueError, "disconnected"):
+                successor_positive.verified_chain(
+                    3, [first_name, second_name, successor_positive._filename(user, "fork")],
+                    7, user, "pin")
+            third["runtimeId"] = original["runtimeId"]
+            with self.assertRaisesRegex(ValueError, "reused"):
+                successor_positive.verified_chain(3, [first_name, second_name], 7, user, "pin")
+
     def test_wal_queue_reaches_every_stream_across_reopened_state(self):
         streams = [f"meter-{i:064x}.jsonl" for i in range(1, 1001)]
         with tempfile.TemporaryDirectory() as tmp:

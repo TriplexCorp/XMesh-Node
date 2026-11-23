@@ -130,6 +130,11 @@ def verify_quarantined_files(host_pid, executable_sha256, config_sha256):
                 raise ValueError("managed Xray executable or configuration pin mismatch")
 
 
+def managed_container_name(name):
+    return (name in ("xmesh-managed-xray", "xmesh-successor-quarantine")
+            or re.fullmatch(r"xmesh-quota-u[1-9][0-9]{0,18}-[0-9a-f]{32}", name) is not None)
+
+
 def inspect_managed_xray(container_name="xmesh-managed-xray"):
     """Independently obtain the currently RUNNING container's host PID.
 
@@ -137,10 +142,7 @@ def inspect_managed_xray(container_name="xmesh-managed-xray"):
     checkpoint. Docker is authoritative only for process discovery here; it
     is NOT a kernel byte-drain/physical-stop attestation.
     """
-    # Only the long-lived quarantined Xray and the second, completely
-    # isolated successor quarantine may be independently measured.
-    # This is a fixed allowlist, never a caller-selected Docker target.
-    if container_name not in ("xmesh-managed-xray", "xmesh-successor-quarantine"):
+    if not managed_container_name(container_name):
         raise ValueError("untrusted Xray runtime container selection")
     try:
         result = subprocess.run(

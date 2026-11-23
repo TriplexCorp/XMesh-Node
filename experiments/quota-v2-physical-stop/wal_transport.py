@@ -169,7 +169,7 @@ def _panel_pin():
 
 
 def _bound_journal(container_name="xmesh-managed-xray"):
-    if container_name not in ("xmesh-managed-xray", "xmesh-successor-quarantine"):
+    if not runtime_identity.managed_container_name(container_name):
         raise ValueError("unknown measured Xray candidate")
     raw = subprocess.check_output([
         "docker", "inspect", "--type", "container", "--format", "{{json .}}",
@@ -270,7 +270,11 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
         isinstance(mounts, list) and 2 <= len(mounts) <= 4 and
         len(mounts_by_dest) == len(mounts) and
         required_mounts <= mounts_by_dest.keys() and
-        set(mounts_by_dest) <= required_mounts | image_volumes and
+        set(mounts_by_dest) <= required_mounts | image_volumes | {"/etc/xmesh-quota-v2-staging"} and
+        ("/etc/xmesh-quota-v2-staging" not in mounts_by_dest or
+         mounts_by_dest["/etc/xmesh-quota-v2-staging"].get("Source") == "/etc/xmesh-quota-v2-staging" and
+         mounts_by_dest["/etc/xmesh-quota-v2-staging"].get("Type") == "bind" and
+         mounts_by_dest["/etc/xmesh-quota-v2-staging"].get("RW") is False) and
         all(mounts_by_dest[dest].get("Type") == "bind"
             for dest in required_mounts) and
         all(mounts_by_dest[dest].get("Type") == "volume" and
@@ -347,7 +351,7 @@ def prepare_measured_genesis(panel, node_id, challenge, pins=None):
 
 
 def run(action, panel, node_id, container_name="xmesh-managed-xray"):
-    if container_name not in ("xmesh-managed-xray", "xmesh-successor-quarantine"):
+    if not runtime_identity.managed_container_name(container_name):
         raise ValueError("unknown independently managed Xray WAL container")
     if os.geteuid() != 0:
         raise ValueError("WAL evidence requires the installed root-owned agent")
@@ -355,7 +359,7 @@ def run(action, panel, node_id, container_name="xmesh-managed-xray"):
     runtime, local = (_bound_journal() if container_name=="xmesh-managed-xray"
                       else _bound_journal(container_name))
     runtime_id = None
-    if container_name == "xmesh-successor-quarantine":
+    if container_name != "xmesh-managed-xray":
         pid = runtime.get("State", {}).get("Pid")
         runtime_id = runtime_identity.trusted_runtime_identity(pid)
     with tempfile.TemporaryDirectory(prefix="xmesh-wal-transport-") as temp:

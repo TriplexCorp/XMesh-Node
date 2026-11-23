@@ -43,7 +43,7 @@ def target(pid, runtime):
     return f"/proc/{pid}/root/dev/shm/xmesh-{runtime}"
 
 
-def publish(fd, payload, measured, predecessor=None):
+def publish(fd, payload, measured, predecessor=None, *, restore_missing=False):
     """Called under the Agent state lock after signed install and WAL evidence."""
     if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
         return
@@ -80,7 +80,7 @@ def publish(fd, payload, measured, predecessor=None):
         current = os.readlink(link, dir_fd=fd)
     except FileNotFoundError:
         current = None
-    if current not in (predecessor, destination):
+    if current not in (predecessor, destination) and not (restore_missing and current is None):
         raise ValueError("ingress route differs from signed predecessor")
     if wal_transport.runtime_identity.trusted_runtime_identity(pid) != runtime:
         raise ValueError("ingress peer no longer owns this grant")

@@ -421,12 +421,17 @@ def _verify_successor_reply(response, old, node, user, challenge, pinned, now):
     return payload
 
 
-def _prepare_successor(panel, state, node, user, challenge):
+def _prepare_successor(panel, state, node, user, challenge, *, predecessor=None):
     fd, lock = quarantine._locked_private_state(state)
     try:
         names = os.listdir(fd)
         pinned = wal_transport._panel_pin()
         old = latest_signed_cap(fd, names, node, user, pinned)
+        if predecessor is not None:
+            import successor_positive
+            old = successor_positive.verified_chain(fd, names, node, user, pinned)[-1][0]
+            if old != predecessor:
+                raise ValueError("calendar preparation targets an obsolete predecessor")
         now = time.time_ns() // 1_000_000
         name = _successor_filename(user, old)
         if now < old["validUntilMs"] or challenge != _successor_nonce(old):
@@ -443,7 +448,8 @@ def _prepare_successor(panel, state, node, user, challenge):
             "nodeId": node, "userId": user, "requestChallenge": challenge,
             "calendarSuccessor": {"predecessorId": old["reservationId"]},
         }, state, quarantine.CAP_DELIVERY_PATH))
-        _verify_successor_reply(response, old, node, user, challenge, pinned, now)
+        _verify_successor_reply(response, old, node, user, challenge, pinned,
+                                time.time_ns() // 1_000_000)
         quarantine._durable_store(fd, response, name)
     finally:
         os.close(lock)
@@ -524,6 +530,119 @@ def _activate_user(panel, node, user, state, socket_path):
     return True
 
 
+def _run_generation(panel, node, user, state, socket_path, failed_users, genesis_wal_ok):
+    import calendar_fence
+    import charge_worker
+    import successor_meter
+    import successor_positive
+    import vless_ingress
+
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        names = os.listdir(fd)
+        pinned = wal_transport._panel_pin()
+        chain = successor_positive.verified_chain(fd, names, node, user, pinned)
+        old, measured = chain[-1]
+        intent = lease._identity_file(fd, quarantine.INTENT_FILE, 4096)
+        executable = intent["executableSha256"]
+        config = calendar_fence._original_signed_scope(fd, old, node, pinned)
+        if intent["nodeId"] != node or intent["configSha256"] != config:
+            raise ValueError("calendar generation policy pins changed")
+        repair = False
+        if measured is not None:
+            try:
+                route = os.readlink(f"ingress-u{user}", dir_fd=fd)
+            except FileNotFoundError:
+                route = None
+            repair = route != vless_ingress.target(*measured[2:])
+        position = len(chain) - (2 if repair else 1)
+        if repair:
+            old = chain[position][0]
+        container = ("xmesh-managed-xray" if position == 0 else
+                     successor_meter.container_for(user, chain[position - 1][0]["reservationId"]))
+        candidate = successor_meter.container_for(user, old["reservationId"])
+        now = time.time_ns() // 1_000_000
+        ready = calendar_fence._fence_name(user, old["reservationId"]) in names
+        proved = successor_meter._name(user, old["reservationId"]) in names
+    finally:
+        os.close(lock)
+        os.close(fd)
+    if position == 0 and not genesis_wal_ok:
+        return False
+    live = wal_transport._measure_quarantined_runtime((executable, config), container)
+    if live[3] != old["runtimeId"]:
+        raise ValueError("measured predecessor no longer matches the signed chain")
+    if repair:
+        return successor_positive.install_successor(
+            panel, node, user, state, successor_meter.control_socket(candidate), executable, config,
+            predecessor=old, old_container=container, candidate_container=candidate)
+    if position:
+        charge_worker.run(panel, node, state, failed_users, container_name=container)
+    if user in failed_users:
+        return False
+    if now < old["validUntilMs"]:
+        if position:
+            return False
+        # Retain first-generation signed refill and initial route recovery.
+        fd, lock = quarantine._locked_private_state(state)
+        try:
+            job = _candidate(fd, os.listdir(fd), node, user, pinned, now)
+        finally:
+            os.close(lock)
+            os.close(fd)
+        if job is None:
+            return False
+        _, revision, challenge = job
+        if revision == -3:
+            return _restore_initial_ingress(panel, node, user, state)
+        if revision > 0:
+            caps.fetch_and_install_renewal(
+                panel, node, user, state, socket_path, executable, challenge, revision)
+            return True
+        return False
+    if not ready:
+        _prepare_successor(panel, state, node, user, _successor_nonce(old), predecessor=old)
+        predecessor_socket = successor_meter.control_socket(container) if position else socket_path
+        calendar_fence.fence_successor(
+            panel, node, user, state, predecessor_socket, executable,
+            predecessor=old, container=container)
+        return False
+    if not proved:
+        successor_meter.start_generation(state, node, user, old, container, executable, config)
+        successor_meter.observe_successor_meter(
+            node, user, state, successor_meter.control_socket(candidate), executable, config,
+            predecessor=old, old_container=container, candidate_container=candidate)
+        return False
+    return successor_positive.install_successor(
+        panel, node, user, state, successor_meter.control_socket(candidate), executable, config,
+        predecessor=old, old_container=container, candidate_container=candidate)
+
+
+def _poll_generations(panel, node, state, socket_path, failed_users, genesis_wal_ok):
+    import vless_ingress
+    if (os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1"
+            or not vless_ingress._staging_permitted()):
+        raise ValueError("automatic calendar generations require signed staging ingress")
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        users = sorted(int(match.group(1)) for name in os.listdir(fd)
+                       if (match := BASE.fullmatch(name)))
+        if len(users) > MAX_USERS:
+            raise ValueError("too many users for calendar generation polling")
+        selected = _next_scan_batch(fd, users, node) if users else []
+    finally:
+        os.close(lock)
+        os.close(fd)
+    installed = 0
+    for user in selected:
+        try:
+            installed += int(_run_generation(panel, node, user, state, socket_path,
+                                            failed_users, genesis_wal_ok))
+        except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            print(f"Quota V2 calendar transition refused for user {user}: {type(exc).__name__}", flush=True)
+    return installed
+
+
 def run(panel, node, state=STATE, socket_path=SOCKET,
         fresh_socket=None, fresh_executable=None, fresh_config=None):
     if (os.geteuid() != 0 or os.environ.get(STAGING_ENV) != "1"
@@ -536,6 +655,17 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
     # The charge worker verifies the remote head before processing streams.
     import charge_worker
     failed_users = set()
+    if os.environ.get("XMESH_QUOTA_V2_MANAGED_GENERATIONS_STAGING") == "1":
+        genesis_wal_ok = True
+        try:
+            charge_worker.run(panel, node, state, failed_users)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            print(f"Quota V2 Genesis WAL ledger unavailable: {type(exc).__name__}", flush=True)
+            # Never rotate a Genesis user when its WAL check failed.
+            genesis_wal_ok = False
+        installed = activate_initial_cap(panel, node, state, socket_path)
+        return installed + _poll_generations(
+            panel, node, state, socket_path, failed_users, genesis_wal_ok)
     charge_worker.run(panel, node, state, failed_users)
     # In opt-in staging, keep the successor journal separate and submit
     # only its own signed birth/charge intents against its runtime checkpoint.

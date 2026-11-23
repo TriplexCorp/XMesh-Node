@@ -328,7 +328,7 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
         raise ValueError("WAL charging requires an explicit staged root Agent")
     # The off-host birth index precedes spending authorization. Keep its
     # existing independently verified signed XSP/2 checkpoint mechanism.
-    if container_name not in ("xmesh-managed-xray","xmesh-successor-quarantine"):
+    if not wal_transport.runtime_identity.managed_container_name(container_name):
         raise ValueError("untrusted Xray charge journal selection")
     runtime_id = None
     if container_name == "xmesh-managed-xray":
