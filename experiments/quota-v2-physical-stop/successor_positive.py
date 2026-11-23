@@ -308,6 +308,12 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
                 vless_ingress.publish(fd, verified_grant["payload"], candidate,
                                       vless_ingress.target(original_now[2], original_now[3]))
             return False
+        # A crash immediately after IPC can leave byte WAL before the
+        # installation receipt exists. Attribute it to this exact signed
+        # reservation without depending on which epoch the scheduler sees.
+        quarantine._durable_store(
+            fd, {k: response[k] for k in ("status", "nodeId", "userId", "signedEnvelope")},
+            caps.wal_cap_filename(user, candidate[3]))
         receipt = cap_install.install_in_xray(
             socket_path, candidate[2], candidate[3], genesis, grant, scope)
         if wal_transport._measure_quarantined_runtime(

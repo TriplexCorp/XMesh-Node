@@ -50,7 +50,11 @@ def _verified_reply(fd, name, pinned):
         payload = caps._verify_cap_envelope(encoded.encode(), pinned, public)
     if document["nodeId"] != payload["nodeId"] or document["userId"] != payload["userId"]:
         raise ValueError("durable signed-cap receipt changed its owner")
-    if document["status"] not in ("committed_first_cap", "committed_renewal"):
+    if document["status"] == "committed_calendar_successor":
+        if (payload["kind"] != "xmesh.quota-v2.xray-cap-admission"
+                or name != caps.wal_cap_filename(payload["userId"], payload["runtimeId"])):
+            raise ValueError("successor cap must be archived for its exact WAL runtime")
+    elif document["status"] not in ("committed_first_cap", "committed_renewal"):
         raise ValueError("durable signed-cap receipt has invalid status")
     return payload
 

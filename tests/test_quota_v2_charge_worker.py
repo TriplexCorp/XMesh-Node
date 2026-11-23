@@ -61,6 +61,21 @@ class ChargeWorkerTests(unittest.TestCase):
                 if not isinstance(archived, FileNotFoundError):
                     verify_reply.assert_called_once_with(3, archive, "c" * 64)
 
+    def test_successor_receipt_is_only_accepted_under_its_runtime_archive(self):
+        runtime = "a" * 64
+        archive = f"wal-cap-u42-{runtime}.json"
+        grant = {"kind": "xmesh.quota-v2.xray-cap-admission", "nodeId": 7,
+                 "userId": 42, "runtimeId": runtime}
+        receipt = {"status": "committed_calendar_successor", "nodeId": 7,
+                   "userId": 42, "signedEnvelope": "fixture"}
+        verify = worker.renewal_worker
+        with (mock.patch.object(verify.lease, "_identity_file", return_value=receipt),
+              mock.patch.object(wal_transport, "_write_public"),
+              mock.patch.object(worker.caps, "_verify_cap_envelope", return_value=grant)):
+            self.assertEqual(verify._verified_reply(3, archive, "pin"), grant)
+            with self.assertRaisesRegex(ValueError, "exact WAL runtime"):
+                verify._verified_reply(3, "genesis-positive-cap-u42.json", "pin")
+
     def test_wal_queue_reaches_every_stream_across_reopened_state(self):
         streams = [f"meter-{i:064x}.jsonl" for i in range(1, 1001)]
         with tempfile.TemporaryDirectory() as tmp:
