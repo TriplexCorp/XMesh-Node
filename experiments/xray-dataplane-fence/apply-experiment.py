@@ -142,7 +142,9 @@ def run(root: Path):
         msg, ok := proxyConfig.(proto.Message)
         configName := ""
         if ok { configName = string(proto.MessageName(msg)) }
-        if !ok || configName != "xray.proxy.vless.inbound.Config" || pl != nil || !net.HasNetwork(nl, net.Network_UNIX) {
+        if !ok || configName != "xray.proxy.vless.inbound.Config" ||
+            !net.HasNetwork(nl, net.Network_UNIX) || mss.ProtocolName != "tcp" ||
+            mss.SecurityType != "" || receiverConfig.ReceiveOriginalDestination {
             return nil, errors.New("incompatible private VLESS transport",
                 ": config=",configName,", ports=",pl!=nil,", unix=",net.HasNetwork(nl, net.Network_UNIX))
         }
@@ -158,6 +160,8 @@ def run(root: Path):
     // a duplicate Unix listener can either fail startup or bypass our
     // source-pinned runtime/peer identity. The private worker is exclusive.
     if private == "" && pl == nil {""")
+    inbound_source = replace_once(inbound_source, "\n\tif pl != nil {",
+                                  "\n\tif private == \"\" && pl != nil {")
     inbound_file.write_text(inbound_source)
     outbound_file = root / "proxy/vless/outbound/outbound.go"
     outbound_source = replace_once(outbound_file.read_text(), '"github.com/xtls/xray-core/app/reverse"',

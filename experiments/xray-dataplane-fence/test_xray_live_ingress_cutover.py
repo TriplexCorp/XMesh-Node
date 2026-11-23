@@ -235,9 +235,10 @@ def run(binary, root, echo_port, processes, netns=None):
         ledger.mkdir(mode=0o700)
         private = json.loads(json.dumps(profile))
         private["api"]["listen"] = f"127.0.0.1:{reserve_port()}"
-        for inbound in private["inbounds"]:
-            inbound.pop("port")
-            inbound["listen"] = str(root/f"unbound-{generation}-{inbound['tag']}.sock")
+        if generation != 1:
+            for inbound in private["inbounds"]:
+                inbound.pop("port")
+                inbound["listen"] = str(root/f"unbound-{generation}-{inbound['tag']}.sock")
         (root/f"backend-{generation}.json").write_bytes(canonical(private))
         backend[generation] = {
             "ledger": ledger, "socket": root/f"control-{generation}.sock",
@@ -272,8 +273,10 @@ def run(binary, root, echo_port, processes, netns=None):
     active[1] = (first.pid, trusted_runtime_identity(first.pid))
     # No byte budget can pass merely because a private inbound was started.
     for cls in CLASSES:
-        assert not (root/f"unbound-1-vless-{cls}.sock").exists(), (
-            "private Xray duplicated the original unauthorized listener")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(.5)
+            assert probe.connect_ex(("127.0.0.1", ports[cls])) != 0, (
+                "private Xray left the original TCP listener open")
         assert Path(f"/proc/{first.pid}/root/dev/shm/xmesh-{active[1][1]}/vless-{cls}").exists()
     front = launch("frontend", dict(os.environ,
                                    GITHUB_ACTIONS="true",
