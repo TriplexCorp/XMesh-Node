@@ -56,7 +56,9 @@ func privateIngressDirectory(dir string) error {
 // No DNS resolution, TCP retry or default outbound for an absent meter.
 func DialIngressMeter(ctx context.Context, user *protocol.MemoryUser) (net.Conn, error) {
 	dir := os.Getenv("XMESH_QUOTA_INGRESS_STATE")
-	if os.Getenv("GITHUB_ACTIONS") != "true" || !filepath.IsAbs(dir) {
+	if (os.Getenv("GITHUB_ACTIONS") != "true" &&
+        !stagingMarkerApproved("XMESH_QUOTA_INGRESS_STAGING")) ||
+        !filepath.IsAbs(dir) {
 		return nil, errors.New("private ingress disabled")
 	}
 	if err := privateIngressDirectory(dir); err != nil {
