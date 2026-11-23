@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments" / "quota-v2-physical-stop"))
@@ -136,6 +137,37 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
         ):
             with self.subTest(config=changed), self.assertRaises(ValueError):
                 successor_meter._verify_fresh_container_env(changed)
+
+    def test_outside_ci_requires_real_host_marker_not_docker_claim(self):
+        import journal_integrity
+        import vless_ingress
+        base = [
+            "XMESH_EXPERIMENTAL_DRAIN=1",
+            "XMESH_EXPERIMENTAL_OBSERVED_DIR=" + journal_integrity.JOURNAL_DEST,
+            "XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING=/run/xmesh/positive-cap-binding.json",
+        ]
+        docker = {"Config": {"Env": base + ["XMESH_QUOTA_V2_STAGING_RUNTIME=1"]}}
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), \
+                mock.patch.object(vless_ingress, "_staging_permitted", return_value=False):
+            with self.assertRaisesRegex(ValueError, "staging marker"):
+                successor_meter._verify_fresh_container_env(docker)
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), \
+                mock.patch.object(vless_ingress, "_staging_permitted", return_value=True):
+            self.assertIsNone(successor_meter._verify_fresh_container_env(docker))
+            with self.assertRaisesRegex(ValueError, "staging marker"):
+                successor_meter._verify_fresh_container_env({
+                    "Config": {"Env": base + ["GITHUB_ACTIONS=true"]},
+                })
+            with self.assertRaisesRegex(ValueError, "staging marker"):
+                successor_meter._verify_fresh_container_env({
+                    "Config": {"Env": base + [
+                        "GITHUB_ACTIONS=true", "XMESH_QUOTA_V2_STAGING_RUNTIME=1"]},
+                })
+            with self.assertRaises(ValueError):
+                successor_meter._verify_fresh_container_env({
+                    "Config": {"Env": base + [
+                        "XMESH_QUOTA_V2_STAGING_RUNTIME=0"]},
+                })
 
     def test_runtime_bind_keeps_ipc_out_of_wal_and_cannot_hide_old_debt(self):
         import journal_integrity as journal
