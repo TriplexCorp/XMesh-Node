@@ -228,6 +228,66 @@ class DurableRenewalNonce(unittest.TestCase):
             activate.assert_not_called()
             renew.assert_not_called()
 
+    def test_repaired_successor_ingress_must_charge_old_wal_first(self):
+        # A missing ingress route after generation 3 was recorded must not
+        # bypass the predecessor generation 2 WAL. Model the real function
+        # with a signed chain, a private state fd and a failed charge stream.
+        import charge_worker
+        import successor_meter
+        import successor_positive
+        user, node = 123, 7
+        genesis = {"reservationId": "11111111-1111-4111-8111-111111111111",
+                   "runtimeId": "a" * 64}
+        second = {"reservationId": "22222222-2222-4222-8222-222222222222",
+                  "runtimeId": "b" * 64}
+        third = {"reservationId": "33333333-3333-4333-8333-333333333333",
+                 "runtimeId": "c" * 64}
+        measured = ("e" * 64, "2026-11-24T00:00:00Z", os.getpid(), third["runtimeId"])
+        chain = [(genesis, None), (second, None), (third, measured)]
+        intent = {"nodeId": node, "executableSha256": "d" * 64,
+                  "configSha256": "f" * 64}
+        source = "https://staging.example.invalid"
+        for charge_ok in (False, True):
+            with self.subTest(charge_ok=charge_ok):
+                failed = set()
+
+                def charge(*args, **kwargs):
+                    self.assertEqual(kwargs["container_name"],
+                                     successor_meter.container_for(
+                                         user, genesis["reservationId"]))
+                    if not charge_ok:
+                        failed.add(user)
+                    return 0
+
+                with mock.patch.object(successor_positive, "verified_chain",
+                                       return_value=chain), \
+                        mock.patch.object(renewal_worker.wal_transport,
+                                          "_panel_pin", return_value="e" * 64), \
+                        mock.patch.object(renewal_worker.lease, "_identity_file",
+                                          return_value=intent), \
+                        mock.patch.object(calendar_fence, "_original_signed_scope",
+                                          return_value="f" * 64), \
+                        mock.patch.object(renewal_worker.wal_transport,
+                                          "_measure_quarantined_runtime",
+                                          return_value=("f" * 64, "timestamp",
+                                                        os.getpid(), second["runtimeId"])), \
+                        mock.patch.object(charge_worker, "run",
+                                          side_effect=charge) as charged, \
+                        mock.patch.object(successor_meter, "control_socket",
+                                          return_value="/private/next.sock"), \
+                        mock.patch.object(successor_positive, "install_successor",
+                                          return_value=True) as install:
+                    result = renewal_worker._run_generation(
+                        source, node, user, self.state, "/private/old.sock",
+                        failed, True)
+                    charged.assert_called_once()
+                    if charge_ok:
+                        self.assertTrue(result)
+                        install.assert_called_once()
+                    else:
+                        self.assertFalse(result)
+                        install.assert_not_called()
+
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()
         try:
