@@ -90,6 +90,18 @@ def latest_signed_cap(fd, names, node, user, pinned):
 
 def _candidate(fd, names, node, user, pinned, now):
     original = latest_signed_cap(fd, names, node, user, pinned)
+    # On a service restart the already installed, durable first-generation
+    # signed cap may still be current while its per-user ingress symlink is
+    # missing. Repair only a MISSING route, never overwrite another runtime,
+    # and never resurrect an already fenced calendar predecessor.
+    if (os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"
+            and now < original["validUntilMs"]):
+        import calendar_fence
+        if calendar_fence._fence_name(user, original["reservationId"]) not in names:
+            try:
+                os.readlink(f"ingress-u{user}", dir_fd=fd)
+            except FileNotFoundError:
+                return user, -3, original["nonce"]
     if now >= original["validUntilMs"]:
         successor_name = _successor_filename(user, original)
         if successor_name in names:
@@ -260,6 +272,64 @@ def pending_renewals(state, node, pinned, now=None):
             if item is not None:
                 jobs.append(item)
         return jobs
+    finally:
+        os.close(lock)
+        os.close(fd)
+
+
+def _restore_initial_ingress(panel, node, user, state):
+    """Crash-reconcile only the SAME previously installed signed Xray cap.
+
+    Never creates a lease, retries positive issuance, reuses an expired cap,
+    or changes an existing route. A recorded calendar fence is irreversible.
+    """
+    if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
+        return False
+    import calendar_fence
+    import vless_ingress
+    fd, lock = quarantine._locked_private_state(state)
+    try:
+        names = os.listdir(fd)
+        if f"genesis-positive-cap-u{user}.json" not in names:
+            return False
+        pinned = wal_transport._panel_pin()
+        grant = latest_signed_cap(fd, names, node, user, pinned)
+        if (time.time_ns() // 1_000_000 >= grant["validUntilMs"]
+                or calendar_fence._fence_name(user, grant["reservationId"]) in names):
+            return False
+        activation = quarantine._enrolled_activation(panel, node)
+        original = lease._identity_file(
+            fd, "genesis-quarantine-envelope.json", quarantine.MAX_REPLY + 4096)
+        if (not isinstance(original, dict)
+                or set(original) != {"prepared", "reply"}
+                or grant["activationReceiptSha256"] !=
+                    activation["activationReceiptSha256"]
+                or grant["runtimeId"] !=
+                    original["prepared"]["payload"]["candidateRuntimeId"]):
+            raise ValueError("historical signed first-generation ingress changed identity")
+        config_pin = calendar_fence._original_signed_scope(
+            fd, grant, node, pinned)
+        pins = lease._original_measurement_pins(
+            fd, original, node, activation["activationReceiptSha256"])
+        if config_pin != pins[1]:
+            raise ValueError("stored first-generation ingress config differs from pinned Xray")
+        measured = wal_transport._measure_quarantined_runtime(pins)
+        if measured[3] != grant["runtimeId"]:
+            raise ValueError("first-generation ingress Xray restarted without fresh authorization")
+        link = f"ingress-u{user}"
+        try:
+            existing = os.readlink(link, dir_fd=fd)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if existing != vless_ingress.target(measured[2], measured[3]):
+                raise ValueError("foreign ingress route cannot be healed by original cap")
+            return False
+        # After the signed policy, installed receipt, active deadline and
+        # independently measured kernel PID all agree, publish only the
+        # original existing cap's missing user link.
+        vless_ingress.publish(fd, grant, measured)
+        return True
     finally:
         os.close(lock)
         os.close(fd)
@@ -494,6 +564,9 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
         if user in failed_users:
             continue
         try:
+            if revision == -3:
+                installed += int(_restore_initial_ingress(panel, node, user, state))
+                continue
             if (revision in (-1, -2) and fresh_socket is None
                     and os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"
                     and os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1"):
