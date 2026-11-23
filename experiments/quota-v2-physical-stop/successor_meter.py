@@ -44,17 +44,18 @@ def _verify_fresh_container_env(docker):
         raise ValueError("untrusted successor Xray process environment")
     runtime_layout = any(m.get("Destination") == journal_integrity.RUNTIME_DEST
                          for m in docker.get("Mounts", []) if isinstance(m, dict))
-    # A Docker self-report of GITHUB_ACTIONS=true is not sufficient to
-    # authorize a production-host experimental Xray. The installed Agent
-    # must itself be running in CI OR verify an explicit root-owned staging
-    # marker before accepting a separately signed-cap isolated runtime.
+    # Neither a Docker self-report nor the host environment string
+    # GITHUB_ACTIONS=true attests to an isolated CI runner. Require the
+    # root-owned staging marker in BOTH CI and non-CI modes. Production
+    # may never turn on a fresh spending runtime using environment alone.
+    import vless_ingress
+    if not vless_ingress._staging_permitted():
+        raise ValueError("fresh successor requires the root-only staging marker")
     host_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     if not host_ci:
-        import vless_ingress
         mounts = docker.get("Mounts")
         marker = vless_ingress.STAGING_MARKER
-        if (not vless_ingress._staging_permitted()
-                or "XMESH_QUOTA_V2_STAGING_RUNTIME=1" not in env
+        if ("XMESH_QUOTA_V2_STAGING_RUNTIME=1" not in env
                 or "GITHUB_ACTIONS=true" in env
                 or not isinstance(mounts, list)
                 or len([m for m in mounts if isinstance(m, dict)
