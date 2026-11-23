@@ -577,14 +577,18 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
     live = wal_transport._measure_quarantined_runtime((executable, config), container)
     if live[3] != old["runtimeId"]:
         raise ValueError("measured predecessor no longer matches the signed chain")
-    if repair:
-        return successor_positive.install_successor(
-            panel, node, user, state, successor_meter.control_socket(candidate), executable, config,
-            predecessor=old, old_container=container, candidate_container=candidate)
+    # Route repair is admission: never re-publish the previously signed
+    # successor until its predecessor WAL has been verified and charged.
+    # In particular a broken per-stream ACK must not be bypassed simply
+    # because ingress-u<user> is missing or points to another runtime.
     if position:
         charge_worker.run(panel, node, state, failed_users, container_name=container)
     if user in failed_users:
         return False
+    if repair:
+        return successor_positive.install_successor(
+            panel, node, user, state, successor_meter.control_socket(candidate), executable, config,
+            predecessor=old, old_container=container, candidate_container=candidate)
     if now < old["validUntilMs"]:
         if position:
             return False
