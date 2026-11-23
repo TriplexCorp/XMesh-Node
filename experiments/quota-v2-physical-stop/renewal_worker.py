@@ -654,6 +654,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
     # malformed Genesis candidate must not stall charging for existing users.
     # The charge worker verifies the remote head before processing streams.
     import charge_worker
+    import vless_ingress
     failed_users = set()
     if os.environ.get("XMESH_QUOTA_V2_MANAGED_GENERATIONS_STAGING") == "1":
         genesis_wal_ok = True
@@ -663,6 +664,11 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
             print(f"Quota V2 Genesis WAL ledger unavailable: {type(exc).__name__}", flush=True)
             # Never rotate a Genesis user when its WAL check failed.
             genesis_wal_ok = False
+        # Removing the operator staging marker must stop NEW signed grants
+        # without stopping conservative reconciliation of already spent WAL.
+        if not vless_ingress._staging_permitted():
+            print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
+            return 0
         installed = activate_initial_cap(panel, node, state, socket_path)
         return installed + _poll_generations(
             panel, node, state, socket_path, failed_users, genesis_wal_ok)
@@ -678,6 +684,9 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             print(f"Quota V2 successor WAL ledger not independently anchored: "
                   f"{type(error).__name__}", flush=True)
+    if not vless_ingress._staging_permitted():
+        print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
+        return 0
     installed = activate_initial_cap(panel, node, state, socket_path)
     pinned = wal_transport._panel_pin()
     jobs = pending_renewals(state, node, pinned)
