@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -13,6 +14,8 @@ import first_cap_handoff as cap
 import genesis_reservation as lease
 import quarantine_policy as quarantine
 import renewal_worker
+import calendar_fence
+import vless_ingress
 
 
 class DurableRenewalNonce(unittest.TestCase):
@@ -26,6 +29,78 @@ class DurableRenewalNonce(unittest.TestCase):
 
     def locked(self):
         return quarantine._locked_private_state(self.state)
+
+    def test_recover_only_missing_live_signed_original_ingress(self):
+        user, node = 123, 7
+        now = time.time_ns() // 1_000_000
+        runtime = "a" * 64
+        activation = "f" * 64
+        config_pin = "c" * 64
+        grant = {
+            "kind": "xmesh.quota-v2.xray-cap-admission",
+            "nodeId": node, "userId": user,
+            "runtimeId": runtime,
+            "activationReceiptSha256": activation,
+            "policySha256": "b" * 64,
+            "reservationId": "11111111-1111-4111-8111-111111111111",
+            "nonce": "d" * 64, "issuedAtMs": now - 1000,
+            "validUntilMs": now + 60000,
+        }
+        original = {"prepared": {"payload": {
+            "candidateRuntimeId": runtime,
+        }}, "reply": {"revision": config_pin}}
+        measured = ("e" * 64, "2026-11-22T00:00:00Z", os.getpid(), runtime)
+        Path(self.state, f"genesis-positive-cap-u{user}.json").touch()
+        env = {"XMESH_QUOTA_V2_INGRESS_STAGING": "1"}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(renewal_worker, "latest_signed_cap", return_value=grant), \
+                mock.patch.object(renewal_worker.wal_transport, "_panel_pin", return_value="f"*64), \
+                mock.patch.object(renewal_worker.quarantine, "_enrolled_activation",
+                                  return_value={"activationReceiptSha256": activation}), \
+                mock.patch.object(renewal_worker.lease, "_identity_file", return_value=original), \
+                mock.patch.object(renewal_worker.calendar_fence if hasattr(
+                    renewal_worker, "calendar_fence") else calendar_fence,
+                    "_original_signed_scope", return_value=config_pin), \
+                mock.patch.object(renewal_worker.lease, "_original_measurement_pins",
+                                  return_value=("e"*64, config_pin)), \
+                mock.patch.object(renewal_worker.wal_transport,
+                                  "_measure_quarantined_runtime", return_value=measured), \
+                mock.patch.object(vless_ingress, "publish") as publish:
+            fd, lock = self.locked()
+            try:
+                item = renewal_worker._candidate(
+                    fd, os.listdir(fd), node, user, "f"*64, now)
+                self.assertEqual(item, (user, -3, grant["nonce"]))
+            finally:
+                os.close(lock)
+                os.close(fd)
+            self.assertTrue(renewal_worker._restore_initial_ingress(
+                "https://staging.example.invalid", node, user, self.state))
+            publish.assert_called_once()
+            self.assertEqual(publish.call_args.args[1:3],
+                             (grant, measured))
+            link = Path(self.state, f"ingress-u{user}")
+            link.symlink_to(vless_ingress.target(measured[2], measured[3]))
+            self.assertFalse(renewal_worker._restore_initial_ingress(
+                "https://staging.example.invalid", node, user, self.state))
+            publish.assert_called_once()
+            link.unlink()
+            link.symlink_to(vless_ingress.target(measured[2], "b"*64))
+            with self.assertRaisesRegex(ValueError, "foreign ingress"):
+                renewal_worker._restore_initial_ingress(
+                    "https://staging.example.invalid", node, user, self.state)
+            link.unlink()
+            Path(self.state, calendar_fence._fence_name(
+                user, grant["reservationId"])).touch()
+            self.assertFalse(renewal_worker._restore_initial_ingress(
+                "https://staging.example.invalid", node, user, self.state))
+            publish.assert_called_once()
+            Path(self.state, calendar_fence._fence_name(
+                user, grant["reservationId"])).unlink()
+            grant["validUntilMs"] = now - 1
+            self.assertFalse(renewal_worker._restore_initial_ingress(
+                "https://staging.example.invalid", node, user, self.state))
+            publish.assert_called_once()
 
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()
