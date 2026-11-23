@@ -49,10 +49,20 @@ def _verify_fresh_container_env(docker):
     host_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     if not host_ci:
         import vless_ingress
+        mounts = docker.get("Mounts")
+        marker = vless_ingress.STAGING_MARKER
         if (not vless_ingress._staging_permitted()
                 or "XMESH_QUOTA_V2_STAGING_RUNTIME=1" not in env
-                or "GITHUB_ACTIONS=true" in env):
-            raise ValueError("installed successor requires the explicit root-only staging marker")
+                or "GITHUB_ACTIONS=true" in env
+                or not isinstance(mounts, list)
+                or len([m for m in mounts if isinstance(m, dict)
+                        and m.get("Destination") == marker]) != 1
+                or not any(isinstance(m, dict)
+                           and m.get("Source") == marker
+                           and m.get("Destination") == marker
+                           and m.get("Type") == "bind"
+                           and m.get("RW") is False for m in mounts)):
+            raise ValueError("installed successor requires the exact read-only root staging marker mount")
     required = {
         "XMESH_EXPERIMENTAL_DRAIN": "1",
         "XMESH_EXPERIMENTAL_OBSERVED_DIR": (journal_integrity.RUNTIME_DEST + "/ledger"
