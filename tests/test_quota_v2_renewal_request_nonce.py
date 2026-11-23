@@ -175,6 +175,30 @@ class DurableRenewalNonce(unittest.TestCase):
                 renew.assert_not_called()
                 rotate.assert_not_called()
 
+    def test_managed_wal_failure_blocks_initial_caps_even_with_valid_staging(self):
+        # A root-owned marker is not sufficient when WAL debit integrity
+        # is unknown. Preserve old charges; never mint a fresh positive cap.
+        import charge_worker
+        env = {
+            "XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
+            "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
+            "XMESH_QUOTA_V2_INGRESS_STAGING": "1",
+            "XMESH_QUOTA_V2_MANAGED_GENERATIONS_STAGING": "1",
+        }
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(vless_ingress, "_staging_permitted",
+                                  return_value=True) as marker, \
+                mock.patch.object(charge_worker, "run",
+                                  side_effect=ValueError("unverified WAL")) as charge, \
+                mock.patch.object(renewal_worker, "activate_initial_cap") as activate, \
+                mock.patch.object(renewal_worker, "_poll_generations") as rotate:
+            self.assertEqual(renewal_worker.run(
+                "https://staging.example.invalid", 7, self.state), 0)
+            charge.assert_called_once()
+            marker.assert_not_called()
+            activate.assert_not_called()
+            rotate.assert_not_called()
+
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()
         try:
