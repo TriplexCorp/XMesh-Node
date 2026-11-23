@@ -10,6 +10,8 @@ from contextlib import ExitStack
 import hashlib
 import json
 import os
+import pwd
+import signal
 from pathlib import Path
 import shutil
 import socket
@@ -149,7 +151,62 @@ def wait_port(port, process):
     raise AssertionError(f"VLESS frontend port {port} did not open")
 
 
-def run(binary, root, echo_port, processes):
+def _namespaced_xray_pid(wrapper, binary):
+    """Identify the metered Xray, not the sudo/ip-netns/runuser wrapper."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if wrapper.poll() is not None:
+            raise AssertionError("isolated Xray wrapper exited")
+        stack = [wrapper.pid]
+        while stack:
+            pid = stack.pop()
+            try:
+                with open(f"/proc/{pid}/task/{pid}/children", encoding="ascii") as f:
+                    stack.extend(int(child) for child in f.read().split())
+                if pid != wrapper.pid and os.path.samefile(f"/proc/{pid}/exe", binary):
+                    return pid
+            except (OSError, ValueError):
+                continue
+        time.sleep(.05)
+    raise AssertionError("isolated Xray PID could not be independently identified")
+
+
+def _namespace_echo(netns, user, echo_port, root, processes):
+    """The new Xray must reach a DIFFERENT netns-local echo process."""
+    source = (
+        "import socketserver,sys\n"
+        "class Handler(socketserver.BaseRequestHandler):\n"
+        " def handle(self):\n"
+        "  while True:\n"
+        "   data=self.request.recv(65536)\n"
+        "   if not data: return\n"
+        "   self.request.sendall(data)\n"
+        "class Server(socketserver.ThreadingTCPServer):\n"
+        " allow_reuse_address=True\n"
+        " daemon_threads=True\n"
+        "Server(('127.0.0.1',int(sys.argv[1])),Handler).serve_forever()\n"
+    )
+    with (root/"namespace-echo.log").open("ab") as log:
+        proc = subprocess.Popen(
+            ["sudo", "ip", "netns", "exec", netns, "runuser", "-u",
+             user, "--", "python3", "-u", "-c", source, str(echo_port)],
+            stdout=log, stderr=subprocess.STDOUT)
+    processes.append(proc)
+    for _ in range(100):
+        if proc.poll() is not None:
+            raise AssertionError("isolated echo exited")
+        probe = subprocess.run(
+            ["sudo", "ip", "netns", "exec", netns, "python3", "-c",
+             "import socket,sys; socket.create_connection(('127.0.0.1',int(sys.argv[1])),0.25).close()",
+             str(echo_port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if probe.returncode == 0:
+            return
+        time.sleep(.1)
+    raise AssertionError("isolated echo unavailable")
+
+
+def run(binary, root, echo_port, processes, netns=None):
     ports = {cls: reserve_port() for cls in CLASSES}
     socks = {f"{u}-{c}": reserve_port() for u in (USER_A, USER_B) for c in CLASSES}
     profile = server_profile(echo_port, ports, reserve_port())
@@ -196,10 +253,16 @@ def run(binary, root, echo_port, processes):
         }
 
     def launch(name, env):
+        command = [binary, "run", "-config", str(root/f"{name}.json")]
+        if netns and name == "backend-2":
+            user = pwd.getpwuid(os.getuid()).pw_name
+            arguments = [f"{key}={value}" for key, value in env.items()
+                         if key == "GITHUB_ACTIONS" or key.startswith("XMESH_")]
+            command = ["sudo", "ip", "netns", "exec", netns, "runuser",
+                       "-u", user, "--", "/usr/bin/env", *arguments, *command]
         with (root/f"{name}.log").open("ab") as log:
             proc = subprocess.Popen(
-                [binary, "run", "-config", str(root/f"{name}.json")],
-                env=env, stdout=log, stderr=subprocess.STDOUT)
+                command, env=env, stdout=log, stderr=subprocess.STDOUT)
         processes.append(proc)
         return proc
 
@@ -271,9 +334,18 @@ def run(binary, root, echo_port, processes):
 
         # A clean second Xray can run concurrently; its per-user WAL and
         # private authenticated inbound cannot touch B's in-flight stream.
+        if netns:
+            _namespace_echo(netns, pwd.getpwuid(os.getuid()).pw_name,
+                            echo_port, root, processes)
         second = launch("backend-2", backend[2]["env"])
         await_socket(backend[2]["socket"], second)
-        active[2] = (second.pid, trusted_runtime_identity(second.pid))
+        second_pid = (_namespaced_xray_pid(second, binary) if netns
+                      else second.pid)
+        active[2] = (second_pid, trusted_runtime_identity(second_pid))
+        if netns:
+            assert os.stat(f"/proc/{second_pid}/ns/net").st_ino != (
+                os.stat(f"/proc/{first.pid}/ns/net").st_ino), (
+                    "successor shares the original public frontend network namespace")
         for cls in CLASSES:
             assert not (root/f"unbound-2-vless-{cls}.sock").exists()
 
@@ -363,8 +435,12 @@ def run(binary, root, echo_port, processes):
         assert first.poll() is None and second.poll() is None and front.poll() is None
         # Terminating only A's new metering runtime must fail closed for A,
         # while B's original stream continues under its first reservation.
-        second.kill()
-        assert second.wait(timeout=10)==-9
+        if netns:
+            os.kill(active[2][0], signal.SIGKILL)
+            second.wait(timeout=10)
+        else:
+            second.kill()
+            assert second.wait(timeout=10)==-9
         with connect(USER_A,"main") as denied:
             assert not probe_echo(denied,1), "dead signed Xray granted A extra traffic"
         echo_bytes(b, 16384)
@@ -372,33 +448,50 @@ def run(binary, root, echo_port, processes):
                                         f"xmesh-u{USER_B}--vless-main") == {
             "uplink":81920, "downlink":81920,
         }
-        print("PASS: two-user stable VLESS A->new Xray, B live stream intact; replay idempotent, stale-generation hijack denied, SIGKILL of new A runtime fails closed without dropping B")
+        print("PASS: two-user stable VLESS A->new Xray, B live stream intact; "
+              "stale-generation hijack denied, second runtime SIGKILL fails closed; "
+              f"successor in separate network namespace={bool(netns)}")
 
 
 def main():
-    assert os.environ.get("GITHUB_ACTIONS")=="true"
-    assert os.environ.get("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT")=="1"
-    if len(sys.argv)!=2:
+    assert os.environ.get("GITHUB_ACTIONS") == "true"
+    assert os.environ.get("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
+    if len(sys.argv) != 2:
         raise SystemExit("usage: test_xray_live_ingress_cutover.py PINNED_XRAY_BINARY")
     with tempfile.TemporaryDirectory(prefix="xmesh-live-ingress-") as tmp, EchoServer(("127.0.0.1",0), EchoHandler) as echo:
         root = Path(tmp)
-        thread = threading.Thread(target=echo.serve_forever,daemon=True)
+        thread = threading.Thread(target=echo.serve_forever, daemon=True)
         thread.start()
         processes = []
+        netns = None
         try:
-            run(sys.argv[1],root,echo.server_address[1],processes)
+            if os.environ.get("XMESH_QUOTA_V2_CROSS_NETNS") == "1":
+                netns = "xmesh-qv2-" + uuid.uuid4().hex[:12]
+                subprocess.run(["sudo", "ip", "netns", "add", netns], check=True)
+                subprocess.run(["sudo", "ip", "-n", netns, "link",
+                                "set", "lo", "up"], check=True)
+            run(sys.argv[1], root, echo.server_address[1], processes, netns)
         except BaseException:
             for log in root.glob("*.log"):
-                print(f"{log.name}:\n{log.read_text(errors='replace')[-6000:]}",
+                print(f"{log.name}:\\n{log.read_text(errors='replace')[-6000:]}",
                       file=sys.stderr)
             raise
         finally:
-            for p in reversed(processes):
-                if p.poll() is None:
-                    p.kill()
-                p.wait(timeout=10)
+            for proc in reversed(processes):
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=10)
+            if netns:
+                # The uid-dropped Xray may survive its sudo wrapper.
+                # Only this unique disposable namespace is ever cleaned.
+                remaining = subprocess.run(
+                    ["sudo", "ip", "netns", "pids", netns],
+                    capture_output=True, text=True)
+                for pid in remaining.stdout.split():
+                    subprocess.run(["sudo", "kill", "-KILL", pid], check=False)
+                subprocess.run(["sudo", "ip", "netns", "del", netns], check=True)
             echo.shutdown()
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
