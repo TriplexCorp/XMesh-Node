@@ -10,6 +10,32 @@ import uuid
 
 import wal_transport
 
+STAGING_MARKER = "/etc/xmesh-quota-v2-staging"
+
+
+def _staging_permitted():
+    """Root-owned opt-in for reviewed experimental staging outside CI.
+
+    A marker is NEVER positive spending authority: the enrolled policy,
+    executable pin, signed-cap and Xray's private Unix peer all remain
+    independently mandatory.
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return True
+    if os.geteuid() != 0:
+        return False
+    try:
+        fd = os.open(STAGING_MARKER, os.O_RDONLY | os.O_NOFOLLOW
+                     | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(fd)
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600)
+    finally:
+        os.close(fd)
+
 
 def target(pid, runtime):
     if type(pid) is not int or pid < 1 or not re.fullmatch("[0-9a-f]{64}", runtime):
@@ -155,8 +181,8 @@ def serve(panel, node, state, binary):
 
     if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
         raise ValueError("private ingress is not enabled for this fixture")
-    if os.environ.get("GITHUB_ACTIONS") != "true":
-        raise ValueError("unverified production ingress must remain disabled")
+    if not _staging_permitted():
+        raise ValueError("unverified production ingress: missing root-only staging marker")
     fd, lock = quarantine._locked_private_state(state)
     try:
         enrollment = quarantine._enrolled_activation(panel, node)
@@ -188,8 +214,13 @@ def serve(panel, node, state, binary):
     finally:
         os.close(lock)
         os.close(fd)
+    runtime_env = {"XMESH_QUOTA_INGRESS_STATE": state}
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        runtime_env["GITHUB_ACTIONS"] = "true"
+    else:
+        runtime_env["XMESH_QUOTA_INGRESS_STAGING"] = "1"
     os.execve(exe, [binary, "run", "-format", "json", "-config", f"/proc/self/fd/{config}"],
-              {"GITHUB_ACTIONS": os.environ["GITHUB_ACTIONS"], "XMESH_QUOTA_INGRESS_STATE": state})
+              runtime_env)
 
 
 if __name__ == "__main__":
