@@ -30,8 +30,29 @@ var errHistoricMeterDebt = errors.New("experimental xmesh drain: unresolved prio
 var errNoSessionID = errors.New("experimental xmesh drain: missing session ID")
 var errNoUserID = errors.New("experimental xmesh drain: missing authenticated user email")
 var errDuplicateSession = errors.New("experimental xmesh drain: duplicate live session ID")
-var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
-    os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1"
+// This is an unreleased, source-pinned experimental dataplane. A private
+// root-only machine marker is an EXPLICIT staging opt-in, never a lease or
+// spending authorization. Actual spending still requires an independently
+// verified Nexus Ed25519 cap and a private durable WAL journal. The checked
+// CI runner path remains available for disposable live tests.
+const stagingMarker = "/etc/xmesh-quota-v2-staging"
+
+func stagingMarkerApproved(flag string) bool {
+    if os.Geteuid() != 0 || os.Getenv(flag) != "1" {
+        return false
+    }
+    info, err := os.Lstat(stagingMarker)
+    if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+        return false
+    }
+    stat, ok := info.Sys().(*syscall.Stat_t)
+    return ok && stat.Uid == 0 && stat.Nlink == 1
+}
+
+var enabled = os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1" &&
+    (os.Getenv("GITHUB_ACTIONS") == "true" ||
+        (os.Getenv("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING") != "" &&
+            stagingMarkerApproved("XMESH_QUOTA_V2_STAGING_RUNTIME")))
 
 // Every user-bearing inbound must be enumerated. A single-inbound fence
 // cannot protect a second CDN/secondary listener carrying the same identity.
