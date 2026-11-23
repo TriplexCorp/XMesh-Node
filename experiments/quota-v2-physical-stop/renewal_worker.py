@@ -662,8 +662,14 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
             charge_worker.run(panel, node, state, failed_users)
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             print(f"Quota V2 Genesis WAL ledger unavailable: {type(exc).__name__}", flush=True)
-            # Never rotate a Genesis user when its WAL check failed.
+            # An unresolved WAL prefix may already represent spent bytes.
+            # No positive first cap or generation transition may be minted
+            # until its independently signed reconciliation succeeds.
             genesis_wal_ok = False
+        if not genesis_wal_ok:
+            print("Quota V2 new admissions paused; signed WAL reconciliation failed",
+                  flush=True)
+            return 0
         # Removing the operator staging marker must stop NEW signed grants
         # without stopping conservative reconciliation of already spent WAL.
         if not vless_ingress._staging_permitted():
