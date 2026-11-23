@@ -42,7 +42,7 @@ NODE_PORT="$((10#$NODE_PORT))"
 
 # A cold install replaces systemd units and re-enrolls the Node. With a
 # signed spending ledger that operation needs an explicit migration path.
-for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-positive-cap-u*,calendar-delivery-u*,calendar-positive-u*,wal-cap-u*}.json; do
+for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-reservation-prepared-u*,genesis-reservation-confirmed-u*,genesis-positive-cap-u*,calendar-successor-u*,calendar-fence-u*,calendar-meter-u*,calendar-delivery-u*,calendar-positive-u*,wal-cap-u*}.json; do
   if [[ -e "$quota_evidence" || -L "$quota_evidence" ]]; then
     echo "Quota V2 spending state exists; cold bootstrap is blocked before changing the installed Agent." >&2
     exit 2
