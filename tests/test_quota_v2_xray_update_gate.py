@@ -1,6 +1,7 @@
 """The official Xray updater must not recover an old switch over a v2 ledger."""
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -41,6 +42,55 @@ class XrayUpdateGateTest(unittest.TestCase):
                 self.assertEqual(operation.counter, 0)
                 self.assertEqual(journal.read_text(), record)
                 self.assertFalse((state / "updates/2/transaction.json").exists())
+
+
+class ColdBootstrapLedgerGateTest(unittest.TestCase):
+    def test_cold_bootstrap_and_operational_reinstall_refuse_every_quota_phase(self):
+        # Execute the real shell guard, using only a disposable replacement
+        # for its absolute state root. No apt, Docker or systemd is invoked.
+        source_root = Path(__file__).resolve().parents[1]
+        protected = (
+            "genesis-quarantine-envelope.json",
+            "genesis-reservation-prepared-u42.json",
+            "genesis-reservation-confirmed-u42.json",
+            "genesis-positive-cap-u42.json",
+            "calendar-successor-u42-reservation.json",
+            "calendar-fence-u42-reservation.json",
+            "calendar-meter-u42-reservation.json",
+            "calendar-delivery-u42-reservation.json",
+            "calendar-positive-u42-reservation.json",
+            "wal-cap-u42-runtime.json",
+        )
+        for source, terminator in (
+            (source_root / "bootstrap.sh", "\ndone"),
+            (source_root / "deploy/install-v6-strict-operational-agents.sh",
+             "\n  done"),
+        ):
+            raw = source.read_text()
+            start = raw.index("for quota_evidence in /var/lib/xmesh-xray-sync/")
+            end = raw.index(terminator, start) + len(terminator)
+            guard = raw[start:end]
+            with tempfile.TemporaryDirectory(prefix="quota-v2-bootstrap-") as tmp:
+                command = "set -Eeuo pipefail\n" + guard.replace(
+                    "/var/lib/xmesh-xray-sync", tmp)
+                def check():
+                    return subprocess.run(
+                        ["bash", "-ec", command], capture_output=True,
+                        text=True, timeout=5)
+                self.assertEqual(check().returncode, 0)
+                for marker in protected:
+                    with self.subTest(source=source.name, marker=marker):
+                        item = Path(tmp) / marker
+                        # A dangling symlink is still an unsafe marker:
+                        # an updater must not treat it as clean state.
+                        item.symlink_to("missing")
+                        try:
+                            result = check()
+                            self.assertEqual(result.returncode, 2)
+                            self.assertIn("Quota V2", result.stderr)
+                        finally:
+                            item.unlink()
+                self.assertEqual(check().returncode, 0)
 
 
 if __name__ == "__main__":
