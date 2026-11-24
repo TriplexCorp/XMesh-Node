@@ -332,11 +332,15 @@ def _verify_charging_runtime_unchanged(container_name, before, wal_root, runtime
     old_state = before.get("State") if isinstance(before, dict) else None
     new_state = current.get("State") if isinstance(current, dict) else None
     if (not isinstance(old_state, dict) or not isinstance(new_state, dict)
-            or before.get("Id") != current.get("Id")
+            or not isinstance(before.get("Id"), str)
+            or caps.HEX64.fullmatch(before["Id"]) is None
+            or before["Id"] != current.get("Id")
+            or not isinstance(wal_root, str) or not os.path.isabs(wal_root)
             or source != wal_root
             or type(old_state.get("Pid")) is not int or old_state["Pid"] <= 0
             or old_state["Pid"] != new_state.get("Pid")
             or not isinstance(old_state.get("StartedAt"), str)
+            or not old_state["StartedAt"] or old_state["StartedAt"].startswith("0001-")
             or old_state["StartedAt"] != new_state.get("StartedAt")):
         raise ValueError("Xray or journal changed during authenticated WAL charging")
     if runtime_id is not None and (
