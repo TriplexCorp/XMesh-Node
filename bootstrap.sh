@@ -222,6 +222,7 @@ assert state.get('automaticClassicalFallback') is False
 PY
 echo "STRICT-PQ GATE PASSED: productionActivation=true strictPQEnabled=true fallback=false"
 if [[ "$METERED_INSTALL" == 1 ]]; then
+  python3 "$INSTALL_DIR/experiments/quota-v2-physical-stop/qualified_runtime_image.py"
   echo "Metered Xray verified, but approved quota services are unavailable. Node startup is blocked." >&2
   exit 1
 fi

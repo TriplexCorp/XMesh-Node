@@ -26,9 +26,9 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           target=/usr/local/libexec/xmesh-metered-xray
-          nexus=1c8f2f7b23bae34857b77f43e0b794815adcbb28
+          nexus=5ee2543bc0f1a2a14d44d69ad3c3fad5fb40ebdb
           test ! -e "$target"
-          approved_tree=d9ef27c488cdd79b6eaff339d766e05869d80a7b
+          approved_tree=27b8535d80514d6c9775df46ffb286cbf7884a9f
           if [[ "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" != "$approved_tree" ]]; then
             # A new patch has no existing release approval. Prove the
             # current installer refuses it before exercising the approved
@@ -39,7 +39,7 @@ jobs:
             fi
             test ! -e "$target"
             sudo test ! -e /var/lib/xmesh-metered-xray
-            approved_node=f9b2f3416c7488b6e4e7e901904b8f2dfd3745ca
+            approved_node=efca0dea82cc9ac347feb94790c83b82174a70e3
             git fetch --no-tags --depth=1 origin "$approved_node"
             git worktree add --detach "$RUNNER_TEMP/approved-metered-node" "$approved_node"
             cd "$RUNNER_TEMP/approved-metered-node"
@@ -53,7 +53,7 @@ jobs:
           else
             [[ "$?" == 2 ]]
           fi
-          printf '%s  %s\n' 2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244 "$target" | sha256sum --check
+          printf '%s  %s\n' 28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11 "$target" | sha256sum --check
           qualification=/var/lib/xmesh-metered-xray/identity
           [[ "$(sudo stat -c '%u:%a:%h' "$qualification")" == 0:600:1 ]]
           [[ "$(sudo stat -c '%u:%a' "$(dirname "$qualification")")" == 0:700 ]]
@@ -61,7 +61,7 @@ jobs:
             echo 'Unprivileged runner can read the private qualification record.' >&2
             exit 1
           fi
-          sudo grep -Fxq "artifactSha256=2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244" "$qualification"
+          sudo grep -Fxq "artifactSha256=28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11" "$qualification"
           sudo mv "$target" "$target.saved"
           if sudo bash install.sh; then
             echo 'Legacy installation accepted after metered executable loss.' >&2
@@ -72,7 +72,7 @@ jobs:
           sudo mv "$target.saved" "$target"
           sudo python3 "$GITHUB_WORKSPACE"/tests/test_quota_v2_qualified_runtime_image.py
           report="$(sudo python3 "$GITHUB_WORKSPACE"/experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
-          IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244"; assert r["productionActivationAuthorized"] is False'
+          IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11"; assert r["productionActivationAuthorized"] is False'
           test -z "$(sudo docker ps -q --filter ancestor="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["imageId"])' "$report")")"
           inode="$(stat -c '%i' "$target")"
           sudo bash deploy/install-metered-xray.sh "$nexus"
