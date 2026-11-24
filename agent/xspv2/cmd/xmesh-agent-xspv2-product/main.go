@@ -1151,7 +1151,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1203,6 +1203,20 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(`{"status":"candidate-verified","runtimeSwitched":false}`)
+	case "prepare-release":
+		flags := flag.NewFlagSet("prepare-release", flag.ExitOnError)
+		command := flags.Int64("command-id", 0, "claimed release command ID")
+		plan := flags.String("plan-file", "", "private signed release plan")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := prepareReleaseCutover(*command, *plan); err != nil {
+			fmt.Fprintln(os.Stderr, "release preflight failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println(`{"status":"candidate-prepared","runtimeSwitched":false,"productionActivationAuthorized":false}`)
 	case "verify-release-plan":
 		flags := flag.NewFlagSet("verify-release-plan", flag.ExitOnError)
 		command := flags.Int64("command-id", 0, "claimed release command ID")
