@@ -345,6 +345,8 @@ class DurableRenewalNonce(unittest.TestCase):
             mock.patch.object(renewal_worker.wal_transport, "_measure_quarantined_runtime",
                               return_value=measured),
             mock.patch.object(charge_worker, "run") as charge,
+            mock.patch.object(successor_meter, "control_socket",
+                              return_value="/private/expired-generation.sock"),
             mock.patch.object(renewal_worker, "_prepare_successor") as prepare,
             mock.patch.object(calendar_fence, "fence_successor") as fence,
             mock.patch.object(successor_positive, "install_successor") as stale_install,
