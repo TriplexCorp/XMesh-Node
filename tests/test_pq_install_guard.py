@@ -44,7 +44,9 @@ class InstallGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             state = Path(td)
             self.assertEqual(self.invoke('xmesh_product_binding_exists "$1"', state), 1)
-            for name in ('config.json', 'activation-request.json', 'activation-receipt.json', 'active.json'):
+            for name in ('config.json', 'activation-request.json', 'activation-receipt.json',
+                         'active.json', 'client-key.pem', 'client.pem', 'server-ca.pem',
+                         'panel-pin.json'):
                 with self.subTest(name=name):
                     path = state / name
                     path.symlink_to('missing-target')
@@ -53,6 +55,57 @@ class InstallGuardTests(unittest.TestCase):
                     path.touch()
                     self.assertEqual(self.invoke('xmesh_product_binding_exists "$1"', state), 0)
                     path.unlink()
+
+    def test_sigkill_after_keyring_fsync_cannot_consume_new_enrollment(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state = root / 'product'
+            state.mkdir(mode=0o700)
+            ring = root / 'xsp-v2' / 'keys'
+            ring.mkdir(parents=True, mode=0o700)
+            for name in ('node-request.master', 'node-request.vault'):
+                with self.subTest(name=name):
+                    path = ring / name
+                    path.write_bytes(b'original encrypted signing material')
+                    self.assertEqual(self.invoke('xmesh_product_binding_exists "$1"', state), 0)
+                    path.unlink()
+                    path.symlink_to('missing-original')
+                    self.assertEqual(self.invoke('xmesh_product_binding_exists "$1"', state), 0)
+                    path.unlink()
+            (root / 'xsp-v2').rename(root / 'staged-keyring')
+            (root / 'xsp-v2').symlink_to(root / 'staged-keyring', target_is_directory=True)
+            self.assertEqual(self.invoke('xmesh_product_binding_exists "$1"', state), 0)
+
+    @unittest.skipUnless(os.geteuid() == 0, 'PQ directory must be owned by root')
+    def test_unsafe_product_root_and_symlink_state_never_execute_agent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state = root / 'product'
+            state.mkdir(mode=0o700)
+            (state / 'config.json').touch()
+            (state / 'activation-request.json').touch()
+            invoked = root / 'invoked'
+            product = root / 'product-binary'
+            product.write_text('#!/bin/sh\ntouch "$XMESH_INVOKED"\nexit 0\n')
+            product.chmod(0o700)
+            command = 'set -euo pipefail; source "$1"; shift; xmesh_verify_or_resume_enrolled_product "$@"'
+            def run(path):
+                return subprocess.run(['bash', '-c', command, 'test', str(GUARD),
+                                       str(path), str(product), 'https://panel.invalid', '7'],
+                                      capture_output=True, text=True, timeout=5,
+                                      env={**os.environ, 'XMESH_INVOKED': str(invoked)})
+            state.chmod(0o777)
+            self.assertEqual(run(state).returncode, 2)
+            self.assertFalse(invoked.exists())
+            state.chmod(0o700)
+            (state / 'activation-receipt.json').symlink_to('foreign')
+            self.assertEqual(run(state).returncode, 2)
+            self.assertFalse(invoked.exists())
+            (state / 'activation-receipt.json').unlink()
+            alias = root / 'product-alias'
+            alias.symlink_to(state, target_is_directory=True)
+            self.assertEqual(run(alias).returncode, 2)
+            self.assertFalse(invoked.exists())
 
     @unittest.skipUnless(os.geteuid() == 0, 'installed artifact must be root-owned')
     def test_only_same_safe_binary_is_allowed_for_bound_product(self):
@@ -77,7 +130,7 @@ class InstallGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             state = root / 'product'
-            state.mkdir()
+            state.mkdir(mode=0o700)
             (state / 'config.json').write_text('private config')
             original = state / 'activation-request.json'
             original.write_text('original signed request')

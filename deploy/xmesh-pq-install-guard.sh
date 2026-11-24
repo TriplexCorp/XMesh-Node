@@ -5,8 +5,21 @@ xmesh_product_binding_exists() {
   if [[ -L "$state" || ( -e "$state" && ! -d "$state" ) ]]; then
     return 0
   fi
-  for entry in config.json activation-request.json activation-receipt.json active.json; do
+  # The encrypted keyring can reach disk before the first product config.
+  # No signed key may be treated as a fresh installation after SIGKILL.
+  for entry in config.json activation-request.json activation-receipt.json active.json \
+    client-key.pem client.pem server-ca.pem panel-pin.json; do
     if [[ -e "$state/$entry" || -L "$state/$entry" ]]; then
+      return 0
+    fi
+  done
+  local ring="${state%/*}/xsp-v2/keys"
+  if [[ -L "${state%/*}/xsp-v2" || -L "$ring" ||
+        ( -e "$ring" && ! -d "$ring" ) ]]; then
+    return 0
+  fi
+  for entry in node-request.master node-request.vault; do
+    if [[ -e "$ring/$entry" || -L "$ring/$entry" ]]; then
       return 0
     fi
   done
@@ -51,10 +64,25 @@ xmesh_require_unchanged_binary() {
 # verifies the original dual signatures, release identity and local files.
 xmesh_verify_or_resume_enrolled_product() {
   local state="$1" product="$2" panel="$3" node="$4"
+  if [[ -L "$state" || ( -e "$state" && ! -d "$state" ) ]]; then
+    echo 'Invalid PQ product state root; refusing enrollment.' >&2
+    return 2
+  fi
+  if [[ -d "$state" && "$(stat -c '%u:%a' -- "$state")" != "0:700" ]]; then
+    echo 'PQ product directory must be owned by root with mode 0700.' >&2
+    return 2
+  fi
   if ! xmesh_product_binding_exists "$state"; then
     printf '%s\n' fresh
     return 0
   fi
+  for entry in config.json activation-request.json activation-receipt.json active.json \
+    client-key.pem client.pem server-ca.pem panel-pin.json; do
+    if [[ -L "$state/$entry" ]]; then
+      echo 'PQ product symlink state is not recoverable.' >&2
+      return 2
+    fi
+  done
   if [[ ! -x "$product" || -L "$product" ]]; then
     echo 'Enrolled PQ product binary unavailable.' >&2
     return 2
