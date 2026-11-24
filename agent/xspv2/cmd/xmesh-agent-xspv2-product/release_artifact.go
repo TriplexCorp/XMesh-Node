@@ -137,10 +137,10 @@ func lockReleaseDirectory(dir string) (*os.File, error) {
 			// SIGKILL can interrupt publication after the atomic hard-link
 			// creates the verified candidate but before the partial is removed.
 			// Only reclaim that exact inode when the other link is a private,
-			// canonically named candidate in THIS locked directory.
+			// canonically named candidate or immutable preflight in THIS directory.
 			matched := false
 			for _, sibling := range entries {
-				if !releaseCandidatePattern.MatchString(sibling.Name()) {
+				if sibling.Name() != "prepared-release.json" && !releaseCandidatePattern.MatchString(sibling.Name()) {
 					continue
 				}
 				peer, err := sibling.Info()
@@ -171,11 +171,11 @@ func lockReleaseDirectory(dir string) (*os.File, error) {
 	return lock, nil
 }
 
-// Atomically publish a verified candidate only if the destination does not
+// Atomically publish a verified release file only if the destination does not
 // exist. Rename would silently replace a different inode introduced between
 // Lstat and publication. A hard link fails with EEXIST instead; after a crash
 // lockReleaseDirectory safely removes a leftover link to this same inode.
-func publishReleaseCandidate(temp, final string) error {
+func publishImmutableReleaseFile(temp, final string) error {
 	if err := os.Link(temp, final); err != nil {
 		return fmt.Errorf("release candidate already exists or cannot be published: %w", err)
 	}
@@ -268,7 +268,7 @@ func collectReleaseArtifact(dir string, plan releasePlan, rawPlan []byte, fetch 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return publishReleaseCandidate(tmp.Name(), final)
+	return publishImmutableReleaseFile(tmp.Name(), final)
 }
 
 func downloadStagedRelease(command int64, planPath string) error {
