@@ -24,27 +24,7 @@ const (
 	maxReleaseArtifactBytes = 64 * 1024 * 1024
 )
 
-var releaseCandidatePattern = regexp.MustCompile(`^[1-9][0-9]{0,18}-[0-9a-f]{64}\.binpackage main
-
-import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
-)
-
-)
+var releaseCandidatePattern = regexp.MustCompile(`^[1-9][0-9]{0,18}-[0-9a-f]{64}\.bin$`)
 
 type releaseArtifactRequest struct {
 	CommandID  int64           `json:"commandId"`
