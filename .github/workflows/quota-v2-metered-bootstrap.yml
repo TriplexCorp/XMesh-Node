@@ -9,6 +9,8 @@ on:
       - 'deploy/install-v6-strict-operational-agents.sh'
       - 'experiments/xray-dataplane-fence/**'
       - 'experiments/quota-v2-physical-stop/qualified_runtime_image.py'
+      - 'experiments/quota-v2-physical-stop/qualified_first_meter.py'
+      - 'experiments/quota-v2-physical-stop/wal_transport.py'
       - 'tests/test_quota_v2_qualified_runtime_image.py'
 permissions:
   contents: read
@@ -74,6 +76,24 @@ jobs:
           report="$(sudo python3 "$GITHUB_WORKSPACE"/experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
           IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11"; assert r["productionActivationAuthorized"] is False'
           test -z "$(sudo docker ps -q --filter ancestor="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["imageId"])' "$report")")"
+          sudo python3 - "$GITHUB_WORKSPACE" "$report" <<'PYTHON'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, str(Path(sys.argv[1]) / "experiments/quota-v2-physical-stop"))
+          import qualified_first_meter as meter
+          image = json.loads(sys.argv[2])
+          profile = {"inbounds": [{"tag": "vless-main", "listen": "127.0.0.1",
+                                   "protocol": "vless", "port": 28401,
+                                   "settings": {"decryption": "none", "clients": []}}],
+                     "outbounds": [{"protocol": "blackhole"}]}
+          meter.launch_meter(image["imageId"], profile, 1, "a" * 64, "b" * 64)
+          config = hashlib.sha256(meter.wal.observed.canonical(profile)).hexdigest()
+          live = meter.wal._measure_quarantined_runtime((image["artifactSha256"], config))
+          assert len(live[3]) == 64
+          meter.release.docker("rm", "--force", "xmesh-managed-xray")
+          PYTHON
           inode="$(stat -c '%i' "$target")"
           sudo bash deploy/install-metered-xray.sh "$nexus"
           [[ "$(stat -c '%i' "$target")" == "$inode" ]]

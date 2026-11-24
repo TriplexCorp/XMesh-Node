@@ -105,15 +105,15 @@ WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
 if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]];then
   echo "Invalid quota auto renewal staging flag" >&2;exit 2
 fi
-if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.30 ) ]];then
-  echo "Quota auto renewal requires the explicit control-v6.0.30 WAL staging Agent." >&2;exit 2
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.31 ) ]];then
+  echo "Quota auto renewal requires the explicit control-v6.0.31 WAL staging Agent." >&2;exit 2
 fi
-if [[ "$AGENT_VERSION" == control-v6.0.30 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
-  echo "control-v6.0.30 requires an exact Nexus release revision." >&2
+if [[ "$AGENT_VERSION" == control-v6.0.31 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
+  echo "control-v6.0.31 requires an exact Nexus release revision." >&2
   exit 2
 fi
 if [[ "$WAL_STAGE_AGENT" != 0 || "$AGENT_VERSION" == control-v6.0.25 ]];then
-  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.30 ) || "$WAL_STAGE_AGENT" != 1 ||
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.31 ) || "$WAL_STAGE_AGENT" != 1 ||
         ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
     echo "Experimental WAL/Genesis Agent requires explicit staging and an exact Nexus revision." >&2
     exit 2
@@ -222,7 +222,7 @@ assert state.get('automaticClassicalFallback') is False
 PY
 echo "STRICT-PQ GATE PASSED: productionActivation=true strictPQEnabled=true fallback=false"
 if [[ "$METERED_INSTALL" == 1 ]]; then
-  python3 "$INSTALL_DIR/experiments/quota-v2-physical-stop/qualified_runtime_image.py"
+  python3 "$INSTALL_DIR/experiments/quota-v2-physical-stop/qualified_first_meter.py" --panel "$PANEL" --node "$NODE"
   echo "Metered Xray verified, but approved quota services are unavailable. Node startup is blocked." >&2
   exit 1
 fi
