@@ -9,6 +9,7 @@ umask 077
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 NEXUS_REF="$1"
 DESTINATION=/usr/local/libexec/xmesh-metered-xray
+QUALIFICATION=/var/lib/xmesh-metered-xray
 SIGNER=TriplexCorp/XMesh-Node
 SIGNER_WORKFLOW="$SIGNER/.github/workflows/xray-dataplane-fence-experiment.yml"
 WORK="$(mktemp -d /tmp/xmesh-metered-xray.XXXXXXXX)"
@@ -79,6 +80,34 @@ attest() {
 }
 attest "$WORK/metered-xray-candidate-manifest.json"
 
+# Persist a non-authorizing, immutable local qualification fence before
+# publishing the executable. It is not a spending permit. A missing binary
+# must never silently return the Node to ordinary Xray installation.
+# A different Nexus revision requires a coordinated transition, not repair.
+record_qualification() {
+    [[ ! -L "$QUALIFICATION" ]] || return 2
+    install -d -o root -g root -m 0700 "$QUALIFICATION"
+    [[ "$(stat -c '%u:%a' "$QUALIFICATION")" == 0:700 ]] || return 2
+    local record="$QUALIFICATION/identity" candidate
+    candidate="$(mktemp "$QUALIFICATION/.identity.XXXXXXXX")"
+    printf 'nexusRevision=%s\nnodeSourceRevision=%s\nupstreamSourceRevision=%s\npatchSourceTree=%s\nartifactSha256=%s\n' \
+        "$NEXUS_REF" "$signer_revision" "$upstream_revision" "$patch_tree" "$digest" > "$candidate"
+    chmod 0600 "$candidate"
+    sync -d "$candidate"
+    if [[ ! -e "$record" && ! -L "$record" ]]; then
+        ln -T -- "$candidate" "$record" || true
+    fi
+    if [[ ! -f "$record" || -L "$record" ]] || ! cmp -s "$candidate" "$record"; then
+        rm -f -- "$candidate"
+        echo 'Metered Xray qualification differs; coordinated recovery required.' >&2
+        return 2
+    fi
+    rm -f -- "$candidate"
+    [[ "$(stat -c '%u:%a:%h' "$record")" == 0:600:1 ]] || return 2
+    sync -f "$QUALIFICATION"
+    sync -f /var/lib
+}
+
 # A cold bootstrap may repair a missing artifact, but it must never replace
 # an existing executable. Live upgrades need an authorized runtime handoff.
 [[ ! -L /usr/local/libexec ]] || exit 2
@@ -86,6 +115,7 @@ if [[ -e "$DESTINATION" || -L "$DESTINATION" ]]; then
     [[ -f "$DESTINATION" && ! -L "$DESTINATION" && "$(stat -c '%u:%a:%h' "$DESTINATION")" == 0:755:1 ]]
     check_sha "$DESTINATION" "$digest"
     attest "$DESTINATION"
+    record_qualification
     exit 0
 fi
 
@@ -112,6 +142,7 @@ tar -xzf "$WORK/go.tar.gz" -C "$WORK"
 )
 check_sha "$WORK/xray" "$digest"
 attest "$WORK/xray"
+record_qualification
 
 install -o root -g root -m 0755 -d /usr/local/libexec
 [[ "$(stat -c '%u:%a' /usr/local/libexec)" == 0:755 ]]

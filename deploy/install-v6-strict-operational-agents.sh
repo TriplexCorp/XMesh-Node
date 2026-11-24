@@ -65,6 +65,7 @@ PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
   exit 1
 }
 
+source "$ROOT/deploy/xmesh-pq-install-guard.sh"
 xmesh_refuse_metered_legacy_install
 
 # Cold repair is not a coordinated release switch. Never overwrite its

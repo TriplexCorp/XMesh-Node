@@ -240,6 +240,8 @@ exit 77
         self.assertLess(gate, refusal)
         self.assertLess(refusal, router)
         self.assertIn("xmesh_refuse_metered_legacy_install", bootstrap[package:gate])
+        self.assertLess(installer.index('source "$ROOT/deploy/xmesh-pq-install-guard.sh"'),
+                        installer.index("xmesh_refuse_metered_legacy_install"))
         self.assertLess(installer.index("xmesh_refuse_metered_legacy_install"),
                         installer.index("cat > /etc/systemd/system/xmesh-xray-sync.service"))
 
@@ -252,13 +254,20 @@ exit 77
         guard = root / "deploy/xmesh-pq-install-guard.sh"
         with tempfile.TemporaryDirectory() as tmp:
             artifact = Path(tmp) / "xray"
-            command = ("bash", "-c", 'source "$1"; xmesh_refuse_metered_legacy_install "$2"',
-                       "bash", str(guard), str(artifact))
+            qualification = Path(tmp) / "qualification"
+            command = ("bash", "-c", 'source "$1"; xmesh_refuse_metered_legacy_install "$2" "$3"',
+                       "bash", str(guard), str(artifact), str(qualification))
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
             artifact.write_bytes(b"metered")
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
             artifact.unlink()
             artifact.symlink_to("missing")
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+            artifact.unlink()
+            qualification.mkdir()
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+            qualification.rmdir()
+            qualification.symlink_to("missing")
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
 
 
