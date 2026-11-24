@@ -125,9 +125,12 @@ fi
 source "$INSTALL_DIR/deploy/xmesh-pq-install-guard.sh"
 xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
 PRODUCT_PREINSTALLED=0
+PRODUCT_ACTIVATION_STATE=fresh
 if xmesh_product_binding_exists /var/lib/xmesh-agent/product; then
   bash "$INSTALL_DIR/deploy/install-xsp-v2-product-client.sh" "$NODE_RELEASE_SHA"
   PRODUCT_PREINSTALLED=1
+  # This must complete before ANY running services are stopped.
+  PRODUCT_ACTIVATION_STATE="$(xmesh_verify_or_resume_enrolled_product /var/lib/xmesh-agent/product /usr/local/bin/xmesh-agent-xspv2-product "$PANEL" "$NODE")"
 fi
 echo "XMesh Node reviewed revision: $NODE_RELEASE_SHA"
 echo "Enforcing pre-activation fail-closed state..."
@@ -157,9 +160,10 @@ fi
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo "strict-PQ product client installation failed." >&2; exit 1; }
 
-if "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null 2>&1; then
-  echo "Existing strict-PQ activation receipt verified."
+if [[ "$PRODUCT_ACTIVATION_STATE" == active || "$PRODUCT_ACTIVATION_STATE" == resumed ]]; then
+  echo "Existing original strict-PQ activation receipt verified or recovered."
 else
+  [[ "$PRODUCT_ACTIVATION_STATE" == fresh ]] || { echo "Invalid PQ activation state" >&2; exit 2; }
   [[ -r /dev/tty ]] || { echo "Interactive TTY required for secure one-time enrollment token entry." >&2; exit 1; }
   TOKEN_FILE="$(mktemp /run/xmesh-v6-enroll.XXXXXXXX)"
   chmod 0600 "$TOKEN_FILE"

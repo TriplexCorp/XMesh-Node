@@ -73,6 +73,71 @@ class InstallGuardTests(unittest.TestCase):
             self.assertEqual(self.invoke(command, alias, digest), 2)
             self.assertEqual(self.invoke(command, Path(td) / 'absent', digest), 2)
 
+    def test_lost_activation_is_recovered_without_reenrollment(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state = root / 'product'
+            state.mkdir()
+            (state / 'config.json').write_text('private config')
+            original = state / 'activation-request.json'
+            original.write_text('original signed request')
+            marker, calls = state / 'recovered', state / 'calls'
+            product = root / 'product-binary'
+            product.write_text('''#!/usr/bin/env bash
+echo "$1" >>"$XMESH_MOCK_CALLS"
+if [[ "$1" == "verify-active" ]]; then
+  [[ -e "$XMESH_MOCK_MARKER" && "$3" == "https://panel.invalid" && "$5" == 7 ]] && exit 0
+  exit 1
+fi
+if [[ "$1" == "resume-activation" ]]; then
+  touch "$XMESH_MOCK_MARKER"
+  exit 0
+fi
+exit 77
+''')
+            product.chmod(0o700)
+            command = 'set -euo pipefail; source "$1"; shift; xmesh_verify_or_resume_enrolled_product "$@"'
+            def run():
+                return subprocess.run(
+                    ['bash', '-c', command, 'fixture', str(GUARD),
+                     str(state), str(product), 'https://panel.invalid', '7'],
+                    env={**os.environ, 'XMESH_MOCK_CALLS': str(calls),
+                         'XMESH_MOCK_MARKER': str(marker)},
+                    capture_output=True, text=True, timeout=5)
+            result = run()
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, 'resumed'), result.stderr)
+            self.assertEqual(calls.read_text().splitlines(),
+                             ['verify-active', 'resume-activation', 'verify-active'])
+            self.assertEqual(original.read_text(), 'original signed request')
+            calls.unlink()
+            result = run()
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, 'active'), result.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ['verify-active'])
+            calls.unlink()
+            (state / 'active.json').symlink_to('missing-target')
+            marker.unlink()
+            self.assertEqual(run().returncode, 2)
+            self.assertEqual(calls.read_text().splitlines(), ['verify-active'])
+            calls.unlink()
+            (state / 'active.json').unlink()
+            original.unlink()
+            self.assertEqual(run().returncode, 2)
+            self.assertEqual(calls.read_text().splitlines(), ['verify-active'])
+            calls.unlink()
+            (state / 'config.json').unlink()
+            result = run()
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, 'fresh'), result.stderr)
+            self.assertFalse(calls.exists())
+
+    def test_both_installer_entrypoints_recover_before_service_shutdown(self):
+        for source, mutation in (
+                ((ROOT / 'bootstrap.sh').read_text(), 'systemctl disable --now "$unit"'),
+                ((ROOT / 'install.sh').read_text(), 'docker update --restart=no xmesh-node')):
+            self.assertLess(source.index('PRODUCT_ACTIVATION_STATE="$(xmesh_verify_or_resume_enrolled_product'),
+                            source.index(mutation))
+            self.assertIn('[[ "$PRODUCT_ACTIVATION_STATE" == fresh ]]', source)
+            self.assertIn('xmesh_product_binding_exists /var/lib/xmesh-agent/product', source)
+
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
         bootstrap = (ROOT / 'bootstrap.sh').read_text()
         standalone = (ROOT / 'install.sh').read_text()

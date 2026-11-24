@@ -45,3 +45,39 @@ xmesh_require_unchanged_binary() {
     return 2
   fi
 }
+
+# A bound Agent is never sent through enrollment again after a lost receipt.
+# Called before stopping any operational service; root-owned product CLI
+# verifies the original dual signatures, release identity and local files.
+xmesh_verify_or_resume_enrolled_product() {
+  local state="$1" product="$2" panel="$3" node="$4"
+  if ! xmesh_product_binding_exists "$state"; then
+    printf '%s\n' fresh
+    return 0
+  fi
+  if [[ ! -x "$product" || -L "$product" ]]; then
+    echo 'Enrolled PQ product binary unavailable.' >&2
+    return 2
+  fi
+  if "$product" verify-active --panel "$panel" --node-id "$node" >/dev/null 2>&1; then
+    printf '%s\n' active
+    return 0
+  fi
+  # Never "repair" an invalid existing active marker or incomplete state
+  # by consuming a new enrollment token; fail closed before router changes.
+  if [[ -e "$state/active.json" || -L "$state/active.json" ||
+        ! -f "$state/config.json" || -L "$state/config.json" ||
+        ! -f "$state/activation-request.json" || -L "$state/activation-request.json" ]]; then
+    echo 'Unsafe or incomplete PQ activation; coordinated recovery required.' >&2
+    return 2
+  fi
+  if ! "$product" resume-activation >/dev/null; then
+    echo 'Original PQ activation could not be recovered; re-enrollment refused.' >&2
+    return 2
+  fi
+  if ! "$product" verify-active --panel "$panel" --node-id "$node" >/dev/null 2>&1; then
+    echo 'Recovered Agent failed original PQ activation verification.' >&2
+    return 2
+  fi
+  printf '%s\n' resumed
+}
