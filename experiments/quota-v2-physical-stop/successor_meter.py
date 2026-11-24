@@ -282,6 +282,57 @@ def control_socket(container):
     return os.path.join(os.path.dirname(ledger), "drain.sock")
 
 
+def verify_reusable_generation(name, state, old, old_container, executable, config):
+    """Accept an existing candidate ONLY as its actual, isolated live Xray.
+
+    Docker name existence is not proof of a running process. Never restart a
+    stopped generation here: an interrupted XSP/2 positive grant can already
+    be funded remotely even if the local receipt did not reach disk.
+    """
+    before = wal_transport._measure_quarantined_runtime(
+        (executable, config), old_container)
+    if before[3] != old["runtimeId"]:
+        raise ValueError("existing generation predecessor changed")
+    old_inspect, old_ledger = wal_transport._bound_journal(old_container)
+    current, ledger = wal_transport._bound_journal(name)
+    _verify_fresh_container_env(current)
+    root = str(Path(state) / name)
+    if (current.get("Name") != "/" + name
+            or current.get("Image") != old_inspect.get("Image")
+            or ledger != str(Path(root) / "ledger")):
+        raise ValueError("existing generation has a foreign Docker identity or WAL root")
+    mounts = current.get("Mounts")
+    old_mounts = old_inspect.get("Mounts")
+    if not isinstance(mounts, list) or not isinstance(old_mounts, list):
+        raise ValueError("existing generation has no trusted Docker mounts")
+    def source_for(records, destination):
+        selected = [m for m in records if isinstance(m, dict)
+                    and m.get("Destination") == destination
+                    and m.get("Type") == "bind"]
+        if len(selected) != 1:
+            raise ValueError("existing generation has a foreign configuration mount")
+        return selected[0].get("Source")
+    if (source_for(mounts, wal_transport.journal.RUNTIME_DEST) != root
+            or source_for(mounts, "/etc/xray/config.json")
+            != source_for(old_mounts, "/etc/xray/config.json")):
+        raise ValueError("existing generation differs from signed predecessor mounts")
+    measured = wal_transport._measure_quarantined_runtime(
+        (executable, config), name)
+    if measured[3] == before[3]:
+        raise ValueError("existing generation reused predecessor kernel runtime")
+    _clean_mount(old_ledger, ledger, measured[3])
+    # At this stage the next action is ZERO-meter attestation, not positive
+    # admission. If a previous process installed a cap or wrote byte intents
+    # before its Agent receipt, refuse rather than observe a supposedly fresh
+    # generation or mint another reservation.
+    if any(item.startswith(("positive-cap-", "meter-")) for item in os.listdir(ledger)):
+        raise ValueError("existing generation may already have signed spend or WAL")
+    if wal_transport._measure_quarantined_runtime(
+            (executable, config), old_container) != before:
+        raise ValueError("predecessor changed while revalidating existing generation")
+    return name
+
+
 def start_generation(state, node, user, old, old_container, executable, config):
     """Provision only the deterministic empty candidate of a fenced reservation."""
     import vless_ingress
@@ -308,12 +359,13 @@ def start_generation(state, node, user, old, old_container, executable, config):
         existing = subprocess.check_output([
             "docker", "ps", "-a", "--filter", f"name=^/{name}$", "--format", "{{.Names}}",
         ], timeout=10).decode().splitlines()
+        if _name(user, old["reservationId"]) in names:
+            raise ValueError("measured generation vanished after zero-WAL proof")
         if existing:
             if existing != [name]:
                 raise ValueError("ambiguous managed generation container")
-            return name
-        if _name(user, old["reservationId"]) in names:
-            raise ValueError("measured generation vanished after zero-WAL proof")
+            return verify_reusable_generation(
+                name, state, old, old_container, executable, config)
         before = wal_transport._measure_quarantined_runtime((executable, config), old_container)
         if before[3] != old["runtimeId"]:
             raise ValueError("generation launch requires live fenced predecessor")
