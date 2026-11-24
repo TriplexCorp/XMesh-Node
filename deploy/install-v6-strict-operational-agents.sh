@@ -42,7 +42,10 @@ NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
 [[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
   echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
 }
-if [[ "$AGENT_VERSION" == control-v6.0.25 || "$AGENT_VERSION" == control-v6.0.27 || "$WAL_STAGE_AGENT" != 0 ]];then
+if [[ "$AGENT_VERSION" == control-v6.0.27 && ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
+  echo "control-v6.0.27 requires an exact Nexus release revision." >&2; exit 2
+fi
+if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
   if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.27 ) || "$WAL_STAGE_AGENT" != 1 || ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
     echo "Experimental WAL/Genesis Agent requires isolated staging and an exact Nexus revision." >&2; exit 2
   fi
