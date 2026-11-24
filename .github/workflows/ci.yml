@@ -151,7 +151,7 @@ jobs:
           go test ./... -count=1
           # Private staged artifact and ownership tests must actually run as root.
           go test -c -o "$RUNNER_TEMP/xmesh-release-tests" ./cmd/xmesh-agent-xspv2-product
-          sudo "$RUNNER_TEMP/xmesh-release-tests" -test.run '^Test(CollectReleaseArtifact|ReleaseTransferLockAndCrashCleanup|ReleaseVerifiedCandidateRetryDoesNotOverwriteOrRefetch|ImmutableReleasePreflightRejectsMutationAndSurvivesRetry|ReleasePreflightPreservesExistingSymlinkAndExpiredRecord|StagedArtifactRequiresExactPrivateBytes)$' -test.v -test.count=1
+          sudo "$RUNNER_TEMP/xmesh-release-tests" -test.run '^Test(CollectReleaseArtifact|ReleaseTransferLockAndCrashCleanup|ReleaseVerifiedCandidateRetryDoesNotOverwriteOrRefetch|ImmutableReleasePreflightRejectsMutationAndSurvivesRetry|ReleasePreflightPreservesExistingSymlinkAndExpiredRecord|ReleaseCrashRecoveryAfterAtomicPublish|PreparedReleaseCrashRecoveryAfterPublish|StagedArtifactRequiresExactPrivateBytes)$' -test.v -test.count=1
       - name: Build exact reviewed Linux Agent candidate using production builder
         shell: bash
         run: |
