@@ -1,5 +1,6 @@
 name: Xray 26.10.31 patched per-user session fence (disposable)
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
     paths:
@@ -156,3 +157,69 @@ jobs:
           path: ${{ runner.temp }}/metered-xray-candidate/
           if-no-files-found: error
           retention-days: 14
+
+
+  attest-main-candidate:
+    name: Verify signed main-branch candidate provenance
+    needs: patched-real-xray
+    if: github.repository == 'TriplexCorp/XMesh-Node' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Retrieve the immutable candidate from the successful build job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: metered-xray-linux-amd64-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/metered-xray-candidate
+      - name: Verify candidate-only manifest and measured binary
+        working-directory: ${{ runner.temp }}/metered-xray-candidate
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path("candidate-manifest.json").read_bytes())
+          assert manifest["schemaVersion"] == 1
+          assert manifest["kind"] == "xmesh.metered-xray-candidate"
+          assert manifest["nodeSourceRevision"] == os.environ["GITHUB_SHA"]
+          assert manifest["independentRebuildMatched"] is True
+          assert manifest["candidateOnly"] is True
+          assert manifest["productionActivationAuthorized"] is False
+          with Path("xray").open("rb") as binary:
+              assert hashlib.file_digest(binary, "sha256").hexdigest() == manifest["artifactSha256"]
+          PYTHON
+      - name: Attest the independently rebuilt binary and candidate manifest
+        id: provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            ${{ runner.temp }}/metered-xray-candidate/xray
+            ${{ runner.temp }}/metered-xray-candidate/candidate-manifest.json
+      - name: Require trusted GitHub issuer, signer workflow, ref and source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        working-directory: ${{ runner.temp }}/metered-xray-candidate
+        run: |
+          set -euo pipefail
+          for subject in xray candidate-manifest.json; do
+            gh attestation verify "$subject" --bundle "$PROVENANCE_BUNDLE" \
+              --repo TriplexCorp/XMesh-Node \
+              --signer-workflow TriplexCorp/XMesh-Node/.github/workflows/xray-dataplane-fence-experiment.yml \
+              --source-ref refs/heads/main --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+      - name: Retain verified signed candidate provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: metered-xray-linux-amd64-provenance-${{ github.sha }}
+          path: ${{ steps.provenance.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 30
