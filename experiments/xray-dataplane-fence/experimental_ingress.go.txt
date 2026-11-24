@@ -22,7 +22,10 @@ const ingressGroup = "/dev/shm/xmesh-"
 var meterTarget = regexp.MustCompile("^/proc/([1-9][0-9]*)/root/dev/shm/xmesh-([a-f0-9]{64})$")
 
 func MeterListener(tag string) (string, error) {
-	if os.Getenv("XMESH_QUOTA_PRIVATE_VLESS") != "1" || (tag != "vless-main" && tag != "vless-cdn") {
+	if productionRole != "" && tag != "vless-main" && tag != "vless-cdn" {
+        return "", errors.New("unqualified production VLESS inbound")
+    }
+    if os.Getenv("XMESH_QUOTA_PRIVATE_VLESS") != "1" || (tag != "vless-main" && tag != "vless-cdn") {
 		return "", nil
 	}
 	if _, tracked := trackedInboundTags[tag]; !enabled || capControl == nil || !tracked {
@@ -56,7 +59,8 @@ func privateIngressDirectory(dir string) error {
 // No DNS resolution, TCP retry or default outbound for an absent meter.
 func DialIngressMeter(ctx context.Context, user *protocol.MemoryUser) (net.Conn, error) {
 	dir := os.Getenv("XMESH_QUOTA_INGRESS_STATE")
-	if (os.Getenv("GITHUB_ACTIONS") != "true" &&
+	if productionRole == "meter" || (productionRole != "ingress" &&
+        os.Getenv("GITHUB_ACTIONS") != "true" &&
         !stagingMarkerApproved("XMESH_QUOTA_INGRESS_STAGING")) ||
         !filepath.IsAbs(dir) {
 		return nil, errors.New("private ingress disabled")

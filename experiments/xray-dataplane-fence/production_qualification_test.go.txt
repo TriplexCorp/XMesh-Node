@@ -1,0 +1,46 @@
+package xmeshdrain
+
+import (
+    "crypto/sha256"
+    "fmt"
+    "strings"
+    "testing"
+)
+
+func TestProductionQualificationRequiresExactArtifact(t *testing.T) {
+    binary := "exact approved candidate bytes"
+    revision := strings.Repeat("a", 40)
+    record := fmt.Sprintf("nexusRevision=%s\nnodeSourceRevision=%s\nupstreamSourceRevision=%s\npatchSourceTree=%s\nartifactSha256=%x\n", revision, revision, revision, revision, sha256.Sum256([]byte(binary)))
+    if err := verifyQualificationRecord([]byte(record), strings.NewReader(binary)); err != nil { t.Fatal(err) }
+    for _, bad := range []string{record+"extra=1\n", strings.Replace(record,"nexusRevision","nodeSourceRevision",1), strings.TrimSuffix(record,"\n")} {
+        if verifyQualificationRecord([]byte(bad), strings.NewReader(binary)) == nil { t.Fatal("accepted malformed qualification") }
+    }
+    if verifyQualificationRecord([]byte(record),strings.NewReader(binary+"tampered")) == nil { t.Fatal("accepted replaced artifact") }
+}
+
+func TestProductionRoleCannotFallBackToStaging(t *testing.T) {
+    env := map[string]string{
+        "XMESH_EXPERIMENTAL_DRAIN":"1",
+        "XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING":"/run/cap-binding.json",
+        "XMESH_QUOTA_PRIVATE_VLESS":"1",
+        "XMESH_EXPERIMENTAL_OBSERVED_DIR":"/run/ledger",
+        "XMESH_EXPERIMENTAL_DRAIN_SOCKET":"/run/drain.sock",
+        "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS":"vless-main,vless-cdn",
+    }
+    get := func(k string) string { return env[k] }
+    if err:=validateProductionRole("meter",get); err!=nil {t.Fatal(err)}
+    for _, flag := range []string{"GITHUB_ACTIONS","XMESH_QUOTA_V2_STAGING_RUNTIME","XMESH_QUOTA_INGRESS_STAGING","XMESH_EXPERIMENTAL_CRASH_AFTER_DRAIN"} {
+        env[flag]="true"
+        if validateProductionRole("meter",get)==nil {t.Fatalf("accepted staging flag %s",flag)}
+        delete(env,flag)
+    }
+    for _, flag := range []string{"XMESH_EXPERIMENTAL_DRAIN","XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING","XMESH_QUOTA_PRIVATE_VLESS","XMESH_EXPERIMENTAL_OBSERVED_DIR","XMESH_EXPERIMENTAL_DRAIN_SOCKET","XMESH_EXPERIMENTAL_SCOPED_INBOUNDS"} {
+        value:=env[flag];delete(env,flag)
+        if validateProductionRole("meter",get)==nil {t.Fatalf("accepted missing meter setting %s",flag)}
+        env[flag]=value
+    }
+    if validateProductionRole("ingress",get)==nil {t.Fatal("accepted meter flags on frontend")}
+    if validateProductionRole("unknown",get)==nil {t.Fatal("accepted unknown role")}
+    env=map[string]string{"XMESH_QUOTA_INGRESS_STATE":"/var/lib/xmesh-xray-sync"}
+    if err:=validateProductionRole("ingress",get);err!=nil {t.Fatal(err)}
+}
