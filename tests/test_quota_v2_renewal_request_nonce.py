@@ -167,13 +167,17 @@ class DurableRenewalNonce(unittest.TestCase):
                     mock.patch.object(charge_worker, "run") as charge, \
                     mock.patch.object(renewal_worker, "activate_initial_cap") as activate, \
                     mock.patch.object(renewal_worker, "pending_renewals") as renew, \
-                    mock.patch.object(renewal_worker, "_poll_generations") as rotate:
+                    mock.patch.object(renewal_worker, "_poll_generations", return_value=0) as rotate:
                 self.assertEqual(renewal_worker.run(
                     "https://staging.example.invalid", 7, self.state), 0)
                 charge.assert_called_once()
                 activate.assert_not_called()
                 renew.assert_not_called()
-                rotate.assert_not_called()
+                if managed == "1":
+                    rotate.assert_called_once()
+                    self.assertIs(rotate.call_args.kwargs["allow_admission"], False)
+                else:
+                    rotate.assert_not_called()
 
     def test_managed_wal_failure_blocks_initial_caps_even_with_valid_staging(self):
         # A root-owned marker is not sufficient when WAL debit integrity
@@ -191,13 +195,14 @@ class DurableRenewalNonce(unittest.TestCase):
                 mock.patch.object(charge_worker, "run",
                                   side_effect=ValueError("unverified WAL")) as charge, \
                 mock.patch.object(renewal_worker, "activate_initial_cap") as activate, \
-                mock.patch.object(renewal_worker, "_poll_generations") as rotate:
+                mock.patch.object(renewal_worker, "_poll_generations", return_value=0) as rotate:
             self.assertEqual(renewal_worker.run(
                 "https://staging.example.invalid", 7, self.state), 0)
             charge.assert_called_once()
             marker.assert_not_called()
             activate.assert_not_called()
-            rotate.assert_not_called()
+            rotate.assert_called_once()
+            self.assertIs(rotate.call_args.kwargs["allow_admission"], False)
 
     def test_unverified_separate_successor_wal_denies_new_positive_caps(self):
         # Charge the existing Genesis WAL first, then simulate a foreign,
@@ -287,6 +292,26 @@ class DurableRenewalNonce(unittest.TestCase):
                     else:
                         self.assertFalse(result)
                         install.assert_not_called()
+
+        # While paused, an already installed generation may still carry
+        # live traffic. Missing ingress must not divert charging to its
+        # predecessor or enter the route repair/admission path.
+        with (
+            mock.patch.object(successor_positive, "verified_chain", return_value=chain),
+            mock.patch.object(renewal_worker.wal_transport, "_panel_pin", return_value="e" * 64),
+            mock.patch.object(renewal_worker.lease, "_identity_file", return_value=intent),
+            mock.patch.object(calendar_fence, "_original_signed_scope", return_value="f" * 64),
+            mock.patch.object(renewal_worker.wal_transport, "_measure_quarantined_runtime",
+                              return_value=measured),
+            mock.patch.object(charge_worker, "run") as charge_tip,
+            mock.patch.object(successor_positive, "install_successor") as install,
+        ):
+            self.assertFalse(renewal_worker._run_generation(
+                source, node, user, self.state, "/private/old.sock", set(), False,
+                allow_admission=False))
+            self.assertEqual(charge_tip.call_args.kwargs["container_name"],
+                             successor_meter.container_for(user, second["reservationId"]))
+            install.assert_not_called()
 
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()

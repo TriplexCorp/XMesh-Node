@@ -535,7 +535,8 @@ def _activate_user(panel, node, user, state, socket_path):
     return True
 
 
-def _run_generation(panel, node, user, state, socket_path, failed_users, genesis_wal_ok):
+def _run_generation(panel, node, user, state, socket_path, failed_users, genesis_wal_ok,
+                    *, allow_admission=True):
     import calendar_fence
     import charge_worker
     import successor_meter
@@ -547,6 +548,9 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
         names = os.listdir(fd)
         pinned = wal_transport._panel_pin()
         chain = successor_positive.verified_chain(fd, names, node, user, pinned)
+        if len(chain) == 1 and not allow_admission:
+            # The shared Genesis journal was already handled by run().
+            return False
         old, measured = chain[-1]
         intent = lease._identity_file(fd, quarantine.INTENT_FILE, 4096)
         executable = intent["executableSha256"]
@@ -554,7 +558,7 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
         if intent["nodeId"] != node or intent["configSha256"] != config:
             raise ValueError("calendar generation policy pins changed")
         repair = False
-        if measured is not None:
+        if allow_admission and measured is not None:
             try:
                 route = os.readlink(f"ingress-u{user}", dir_fd=fd)
             except FileNotFoundError:
@@ -583,7 +587,7 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
     # because ingress-u<user> is missing or points to another runtime.
     if position:
         charge_worker.run(panel, node, state, failed_users, container_name=container)
-    if user in failed_users:
+    if not allow_admission or user in failed_users:
         return False
     if repair:
         return successor_positive.install_successor(
@@ -627,10 +631,11 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
         predecessor=old, old_container=container, candidate_container=candidate)
 
 
-def _poll_generations(panel, node, state, socket_path, failed_users, genesis_wal_ok):
+def _poll_generations(panel, node, state, socket_path, failed_users, genesis_wal_ok,
+                      *, allow_admission=True):
     import vless_ingress
-    if (os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1"
-            or not vless_ingress._staging_permitted()):
+    if allow_admission and (os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1"
+                            or not vless_ingress._staging_permitted()):
         raise ValueError("automatic calendar generations require signed staging ingress")
     fd, lock = quarantine._locked_private_state(state)
     try:
@@ -646,7 +651,8 @@ def _poll_generations(panel, node, state, socket_path, failed_users, genesis_wal
     for user in selected:
         try:
             installed += int(_run_generation(panel, node, user, state, socket_path,
-                                            failed_users, genesis_wal_ok))
+                                            failed_users, genesis_wal_ok,
+                                            allow_admission=allow_admission))
         except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError) as exc:
             print(f"Quota V2 calendar transition refused for user {user}: {type(exc).__name__}", flush=True)
     return installed
@@ -678,12 +684,14 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
         if not genesis_wal_ok:
             print("Quota V2 new admissions paused; signed WAL reconciliation failed",
                   flush=True)
-            return 0
+            return _poll_generations(panel, node, state, socket_path, failed_users,
+                                     genesis_wal_ok, allow_admission=False)
         # Removing the operator staging marker must stop NEW signed grants
         # without stopping conservative reconciliation of already spent WAL.
         if not vless_ingress._staging_permitted():
             print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
-            return 0
+            return _poll_generations(panel, node, state, socket_path, failed_users,
+                                     genesis_wal_ok, allow_admission=False)
         installed = activate_initial_cap(
             panel, node, state, socket_path, blocked_users=failed_users)
         return installed + _poll_generations(
