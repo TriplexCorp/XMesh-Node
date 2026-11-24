@@ -107,6 +107,13 @@ func validateRecoveredActivationReceipt(cfg productConfig, requestRaw []byte, pa
 	if err != nil {
 		return activeState{}, err
 	}
+	// Nexus persists json.Marshal(envelope), with no padding or alternate
+	// encoding. A byte-wise recovery must refuse modified outer JSON even
+	// if its structured signed claims still verify (e.g. appended space).
+	canonical, err := json.Marshal(receiptEnvelope.Env)
+	if err != nil || !bytes.Equal(canonical, responseRaw) {
+		return activeState{}, errors.New("recovered activation receipt bytes are not canonical")
+	}
 	if err := checkUniqueJSONKeys(receiptEnvelope.Payload); err != nil {
 		return activeState{}, err
 	}
