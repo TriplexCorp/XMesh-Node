@@ -318,6 +318,33 @@ def _charge_stream(fd, state_fd, state_names, node, pinned, public, filename, bi
     return submitted
 
 
+def _verify_charging_runtime_unchanged(container_name, before, wal_root, runtime_id):
+    """Refuse to treat signed WAL ACKs as proof of an unrelated live Xray.
+
+    A correctly signed WAL receipt is historical accounting evidence; it
+    cannot silently authorize an ingress transition after Docker replaced
+    the process or remounted a different journal during charging.
+    """
+    if container_name == "xmesh-managed-xray":
+        current, source = wal_transport._bound_journal()
+    else:
+        current, source = wal_transport._bound_journal(container_name)
+    old_state = before.get("State") if isinstance(before, dict) else None
+    new_state = current.get("State") if isinstance(current, dict) else None
+    if (not isinstance(old_state, dict) or not isinstance(new_state, dict)
+            or before.get("Id") != current.get("Id")
+            or source != wal_root
+            or type(old_state.get("Pid")) is not int or old_state["Pid"] <= 0
+            or old_state["Pid"] != new_state.get("Pid")
+            or not isinstance(old_state.get("StartedAt"), str)
+            or old_state["StartedAt"] != new_state.get("StartedAt")):
+        raise ValueError("Xray or journal changed during authenticated WAL charging")
+    if runtime_id is not None and (
+            wal_transport.runtime_identity.trusted_runtime_identity(
+                new_state["Pid"]) != runtime_id):
+        raise ValueError("successor kernel identity changed during WAL charging")
+
+
 def _verify_private_successor_wal_owner(container_name, entries):
     """An isolated successor belongs to ONE signed user, never a shared pool.
 
@@ -376,6 +403,7 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
             fd, streams, journal._read_meter_wal, journal._canonical_go)
         _verify_private_successor_wal_owner(container_name, entries)
         if not entries:
+            _verify_charging_runtime_unchanged(container_name, docker, local, runtime_id)
             return 0
         pinned = wal_transport._panel_pin()
         state_names = os.listdir(state_fd)
@@ -405,6 +433,7 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
                         failed_users.add(user)
                     print(f"Quota V2 user {user} WAL stream refused: "
                           f"{type(error).__name__}", flush=True)
+        _verify_charging_runtime_unchanged(container_name, docker, local, runtime_id)
     finally:
         os.close(lock)
         os.close(state_fd)
