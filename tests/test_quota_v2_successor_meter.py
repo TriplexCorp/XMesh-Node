@@ -211,7 +211,11 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             old_runtime = ("1" * 64, self.runtime[1], 11111, "2" * 64)
             fresh = self.runtime
             predecessor = dict(self.old, runtimeId=old_runtime[3],
-                               activationReceiptSha256="5" * 64)
+                               activationReceiptSha256="5" * 64,
+                               aliasScopes=[
+                                   {"email": "xmesh-u101--vless-main"},
+                                   {"email": "xmesh-u101--vless-cdn"},
+                               ])
             pinned = "6" * 64
             binding = ledger.parent / "cap-binding.json"
             original = successor_meter.wal_transport.observed.canonical({
@@ -228,6 +232,10 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             }
             current = {
                 "Name": "/" + name, "Image": old_inspect["Image"],
+                "Config": {"Env": [
+                    "XMESH_QUOTA_PRIVATE_VLESS=1",
+                    "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS=vless-cdn,vless-main",
+                ]},
                 "Mounts": [
                     {"Type": "bind", "Destination": "/etc/xray/config.json",
                      "Source": source, "RW": False},
@@ -271,6 +279,27 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "foreign Docker identity"):
                     check()
                 current["Image"] = old_inspect["Image"]
+                for bad in ("XMESH_QUOTA_PRIVATE_VLESS=0",
+                            "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS=vless-main"):
+                    if bad.startswith("XMESH_QUOTA_PRIVATE"):
+                        env = ["XMESH_QUOTA_PRIVATE_VLESS=1",
+                               "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS=vless-cdn,vless-main"]
+                        env[0] = bad
+                    else:
+                        env = ["XMESH_QUOTA_PRIVATE_VLESS=1",
+                               "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS=vless-cdn,vless-main"]
+                        env[1] = bad
+                    current["Config"]["Env"] = env
+                    with self.assertRaisesRegex(ValueError, "private VLESS byte gate"):
+                        check()
+                current["Config"]["Env"] = [
+                    "XMESH_QUOTA_PRIVATE_VLESS=1",
+                    "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS=vless-cdn,vless-main",
+                ]
+                with self.assertRaisesRegex(ValueError, "private VLESS byte gate"):
+                    current["Config"]["Env"].append("XMESH_QUOTA_PRIVATE_VLESS=1")
+                    check()
+                current["Config"]["Env"].pop()
                 current["Mounts"][1]["Source"] = "/tmp/another-wal"
                 with self.assertRaisesRegex(ValueError, "predecessor mounts"):
                     check()
