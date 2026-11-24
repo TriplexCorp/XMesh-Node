@@ -7,6 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -129,5 +132,36 @@ func TestRecoveredActivationReceiptReconstructsExactActiveMarker(t *testing.T) {
 	}
 	if _, err := validateRecoveredActivationReceipt(cfg, request, original, append(signed, '\n')); err == nil {
 		t.Fatal("trailing forged receipt accepted")
+	}
+}
+
+func TestActivationRecoveryVerifiesExistingMarkerBeforeOriginalRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "active.json")
+	calls := 0
+	verify := func() error {
+		calls++
+		return nil
+	}
+	if handled, err := resumeActiveMarker(path, verify); handled || err != nil || calls != 0 {
+		t.Fatal("missing active marker unexpectedly handled")
+	}
+	if err := os.WriteFile(path, []byte("existing marker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := resumeActiveMarker(path, verify); !handled || err != nil || calls != 1 {
+		t.Fatal("existing activation did not use the full operational verifier")
+	}
+	refusal := errors.New("unverified release COMMIT")
+	if handled, err := resumeActiveMarker(path, func() error { return refusal }); !handled || !errors.Is(err, refusal) {
+		t.Fatal("invalid active state permitted enrollment recovery")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(filepath.Dir(path), "missing"), path); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := resumeActiveMarker(path, func() error { return refusal }); !handled || !errors.Is(err, refusal) {
+		t.Fatal("dangling active marker bypassed operational verification")
 	}
 }

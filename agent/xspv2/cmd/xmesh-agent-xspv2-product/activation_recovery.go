@@ -147,20 +147,36 @@ func validateRecoveredActivationReceipt(cfg productConfig, requestRaw []byte, pa
 	return active, nil
 }
 
+// Only a genuinely absent active marker permits recovery of the original
+// enrollment. Any existing marker (including an invalid one) must go through
+// full operational verification, which also enforces the installed digest.
+func resumeActiveMarker(path string, verify func() error) (bool, error) {
+	if _, err := os.Lstat(path); err == nil {
+		return true, verify()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return true, err
+	}
+	return false, nil
+}
+
 func recoverLostActivation() error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
+	// An already active node can have a newer executable covered by a
+	// durable signed release COMMIT. Verify that through the normal full
+	// operational check; never attempt original enrollment recovery if the
+	// marker exists but cannot be verified.
+	handled, err := resumeActiveMarker(activeFile, func() error {
+		return verifyActive(cfg.PanelURL, cfg.NodeID)
+	})
+	if handled || err != nil {
+		return err
+	}
 	running, err := identity()
 	if err != nil || running != cfg.ReleaseIdentity {
 		return errors.New("installed Agent release differs from enrollment")
-	}
-	if _, err := os.Lstat(activeFile); err == nil {
-		// An already-active Agent is verified, not silently rewritten.
-		return verifyActive(cfg.PanelURL, cfg.NodeID)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	requestRaw, err := strictFile(activationRequest, 0600)
 	if err != nil {
