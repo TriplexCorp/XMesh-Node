@@ -77,3 +77,55 @@ func TestCollectReleaseArtifact(t *testing.T) {
 		})
 	}
 }
+
+func TestReleaseTransferLockAndCrashCleanup(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root-owned staging directory")
+	}
+	dir := filepath.Join(t.TempDir(), "stage")
+	if err := privateReleaseDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockReleaseDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := filepath.Join(dir, ".partial-123")
+	verified := filepath.Join(dir, "42-verified.bin")
+	for _, path := range []string{partial, verified} {
+		if err := os.WriteFile(path, []byte("preserve until safe"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if second, err := lockReleaseDirectory(dir); err == nil {
+		second.Close()
+		t.Fatal("concurrent transfer accepted")
+	}
+	if _, err := os.Stat(partial); err != nil {
+		t.Fatal("active transfer's partial removed")
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := lockReleaseDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery.Close()
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Fatal("abandoned partial not removed")
+	}
+	if _, err := os.Stat(verified); err != nil {
+		t.Fatal("verified candidate removed")
+	}
+	if err := os.Symlink(verified, partial); err != nil {
+		t.Fatal(err)
+	}
+	if unsafe, err := lockReleaseDirectory(dir); err == nil {
+		unsafe.Close()
+		t.Fatal("unsafe partial symlink accepted")
+	}
+	if _, err := os.Stat(verified); err != nil {
+		t.Fatal("unsafe cleanup removed verified target")
+	}
+}

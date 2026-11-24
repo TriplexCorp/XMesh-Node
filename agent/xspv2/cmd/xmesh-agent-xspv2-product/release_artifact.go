@@ -12,29 +12,30 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
 
 const (
-	releaseArtifactPath = "/api/v1/node/agent-release-artifact"
-	releaseChunkBytes = 128 * 1024
+	releaseArtifactPath     = "/api/v1/node/agent-release-artifact"
+	releaseChunkBytes       = 128 * 1024
 	maxReleaseArtifactBytes = 64 * 1024 * 1024
 )
 
 type releaseArtifactRequest struct {
-	CommandID int64 `json:"commandId"`
-	Current releaseIdentity `json:"current"`
-	PlanSHA256 string `json:"planSha256"`
-	Offset int64 `json:"offset"`
+	CommandID  int64           `json:"commandId"`
+	Current    releaseIdentity `json:"current"`
+	PlanSHA256 string          `json:"planSha256"`
+	Offset     int64           `json:"offset"`
 }
 
 type releaseArtifactChunk struct {
-	PlanSHA256 string `json:"planSha256"`
+	PlanSHA256     string `json:"planSha256"`
 	ArtifactSHA256 string `json:"artifactSha256"`
-	Offset int64 `json:"offset"`
-	TotalBytes int64 `json:"totalBytes"`
-	DataB64 string `json:"dataB64"`
+	Offset         int64  `json:"offset"`
+	TotalBytes     int64  `json:"totalBytes"`
+	DataB64        string `json:"dataB64"`
 }
 
 func decodeReleaseChunk(raw []byte, planSHA, digest string, offset, total int64) ([]byte, int64, error) {
@@ -76,6 +77,61 @@ func privateReleaseDirectory(path string) error {
 	return nil
 }
 
+// Serialize transfers on the private directory itself. The kernel releases
+// this advisory lock when the downloader is killed. Remove only its private
+// incomplete temporary files; never remove verified candidates or WAL.
+func lockReleaseDirectory(dir string) (*os.File, error) {
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	lock := os.NewFile(uintptr(fd), dir)
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return nil, fmt.Errorf("another release transfer is active: %w", err)
+	}
+	fail := func(err error) (*os.File, error) {
+		lock.Close()
+		return nil, err
+	}
+	info, err := lock.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != 0 || !info.IsDir() || info.Mode().Perm() != 0700 {
+		return fail(errors.New("unsafe locked release directory"))
+	}
+	entries, err := lock.ReadDir(-1)
+	if err != nil {
+		return fail(err)
+	}
+	for _, entry := range entries {
+		suffix, ok := strings.CutPrefix(entry.Name(), ".partial-")
+		if !ok {
+			continue
+		}
+		if _, err := strconv.ParseUint(suffix, 10, 64); err != nil {
+			return fail(errors.New("unexpected partial release filename"))
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fail(err)
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != 0 || st.Nlink != 1 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			return fail(errors.New("unsafe incomplete release file"))
+		}
+		if err := syscall.Unlinkat(fd, entry.Name()); err != nil {
+			return fail(err)
+		}
+	}
+	if err := lock.Sync(); err != nil {
+		return fail(err)
+	}
+	return lock, nil
+}
+
 // Stage non-executable bytes only; never touch the enrolled binary, keys,
 // receipt, WAL, or services. A failed/incomplete transfer publishes nothing.
 func collectReleaseArtifact(dir string, plan releasePlan, rawPlan []byte, fetch func([]byte) ([]byte, int, error)) error {
@@ -85,6 +141,11 @@ func collectReleaseArtifact(dir string, plan releasePlan, rawPlan []byte, fetch 
 	if err := privateReleaseDirectory(dir); err != nil {
 		return err
 	}
+	lock, err := lockReleaseDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	planHash := sha256.Sum256(rawPlan)
 	planSHA := hex.EncodeToString(planHash[:])
 	tmp, err := os.CreateTemp(dir, ".partial-")
