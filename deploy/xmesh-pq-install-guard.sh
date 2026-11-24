@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # Sourced by fresh-install entry points. This is not an upgrade authorization.
+xmesh_refuse_metered_legacy_install() {
+  local artifact="${1:-/usr/local/libexec/xmesh-metered-xray}"
+  local qualification="${2:-/var/lib/xmesh-metered-xray}"
+  # The durable directory is also a fence when the binary is lost or removed.
+  if [[ -e "$artifact" || -L "$artifact" || -e "$qualification" || -L "$qualification" ]]; then
+    echo 'A metered Xray installation exists; refusing legacy startup.' >&2
+    return 2
+  fi
+}
+
 xmesh_product_binding_exists() {
   local state="$1" entry
   if [[ -L "$state" || ( -e "$state" && ! -d "$state" ) ]]; then

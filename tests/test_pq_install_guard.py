@@ -206,8 +206,8 @@ exit 77
                         source.index('systemctl daemon-reload'))
         self.assertLess(source.index('systemctl enable xmesh-pq-activation-recovery.service'),
                         source.index('systemctl start xmesh-node-metrics.service'))
-        # All dependencies are opt-in to reviewed 6.0.28, not 6.0.24.
-        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.28 ]]; then', source)
+        # All dependencies are opt-in to reviewed 6.0.29, not 6.0.24.
+        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.29 ]]; then', source)
         self.assertIn('WAL staging requires a fresh test node', source)
 
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
@@ -226,6 +226,49 @@ exit 77
                             source.index('docker run --rm'))
             self.assertLess(source.index('xmesh_require_unchanged_binary'),
                             source.index('mv -f "$PRODUCT_STAGE"'))
+
+
+    def test_metered_bootstrap_cannot_continue_into_ordinary_router(self):
+        root = Path(__file__).resolve().parents[1]
+        bootstrap = (root / "bootstrap.sh").read_text()
+        installer = (root / "deploy/install-v6-strict-operational-agents.sh").read_text()
+        package = bootstrap.index("deploy/install-metered-xray.sh")
+        gate = bootstrap.index("STRICT-PQ GATE PASSED")
+        refusal = bootstrap.index("approved quota services are unavailable")
+        router = bootstrap.index("docker compose up -d --no-build")
+        self.assertLess(package, gate)
+        self.assertLess(gate, refusal)
+        self.assertLess(refusal, router)
+        self.assertIn("xmesh_refuse_metered_legacy_install", bootstrap[package:gate])
+        self.assertLess(installer.index('source "$ROOT/deploy/xmesh-pq-install-guard.sh"'),
+                        installer.index("xmesh_refuse_metered_legacy_install"))
+        self.assertLess(installer.index("xmesh_refuse_metered_legacy_install"),
+                        installer.index("cat > /etc/systemd/system/xmesh-xray-sync.service"))
+
+
+    def test_all_stock_install_paths_refuse_prepared_metered_artifact(self):
+        root = Path(__file__).resolve().parents[1]
+        standalone = (root / "install.sh").read_text()
+        self.assertLess(standalone.index("xmesh_refuse_metered_legacy_install"),
+                        standalone.index("docker compose"))
+        guard = root / "deploy/xmesh-pq-install-guard.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "xray"
+            qualification = Path(tmp) / "qualification"
+            command = ("bash", "-c", 'source "$1"; xmesh_refuse_metered_legacy_install "$2" "$3"',
+                       "bash", str(guard), str(artifact), str(qualification))
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            artifact.write_bytes(b"metered")
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+            artifact.unlink()
+            artifact.symlink_to("missing")
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+            artifact.unlink()
+            qualification.mkdir()
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+            qualification.rmdir()
+            qualification.symlink_to("missing")
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
 
 
 if __name__ == '__main__':

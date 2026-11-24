@@ -1,0 +1,63 @@
+name: Quota V2 verified metered Xray installation (disposable)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/quota-v2-metered-bootstrap.yml'
+      - 'deploy/install-metered-xray.sh'
+      - 'bootstrap.sh'
+      - 'deploy/xmesh-pq-install-guard.sh'
+      - 'deploy/install-v6-strict-operational-agents.sh'
+      - 'experiments/xray-dataplane-fence/**'
+permissions:
+  contents: read
+jobs:
+  reconstruct-and-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install the reconstructed artifact only after verifying both signed subjects
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          target=/usr/local/libexec/xmesh-metered-xray
+          nexus=1c8f2f7b23bae34857b77f43e0b794815adcbb28
+          test ! -e "$target"
+          sudo bash deploy/install-metered-xray.sh "$nexus"
+          [[ "$(stat -c '%u:%a:%h' "$target")" == '0:755:1' ]]
+          if sudo bash install.sh; then
+            echo 'Legacy standalone installer accepted a metered artifact.' >&2
+            exit 1
+          else
+            [[ "$?" == 2 ]]
+          fi
+          printf '%s  %s\n' 2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244 "$target" | sha256sum --check
+          qualification=/var/lib/xmesh-metered-xray/identity
+          [[ "$(sudo stat -c '%u:%a:%h' "$qualification")" == 0:600:1 ]]
+          [[ "$(sudo stat -c '%u:%a' "$(dirname "$qualification")")" == 0:700 ]]
+          if test -r "$qualification"; then
+            echo 'Unprivileged runner can read the private qualification record.' >&2
+            exit 1
+          fi
+          sudo grep -Fxq "artifactSha256=2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244" "$qualification"
+          sudo mv "$target" "$target.saved"
+          if sudo bash install.sh; then
+            echo 'Legacy installation accepted after metered executable loss.' >&2
+            exit 1
+          else
+            [[ "$?" == 2 ]]
+          fi
+          sudo mv "$target.saved" "$target"
+          inode="$(stat -c '%i' "$target")"
+          sudo bash deploy/install-metered-xray.sh "$nexus"
+          [[ "$(stat -c '%i' "$target")" == "$inode" ]]
+          sudo sh -c 'printf invalid >> "$1"' sh "$target"
+          before="$(sha256sum "$target")"
+          if sudo bash deploy/install-metered-xray.sh "$nexus"; then
+            echo 'Unexpected success for a modified installed artifact.' >&2
+            exit 1
+          fi
+          [[ "$(sha256sum "$target")" == "$before" ]]

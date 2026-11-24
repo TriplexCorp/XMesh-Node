@@ -7,6 +7,7 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 [[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
 source deploy/xmesh-pq-install-guard.sh
+xmesh_refuse_metered_legacy_install
 xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required. Install Docker Engine with Compose plugin first." >&2
