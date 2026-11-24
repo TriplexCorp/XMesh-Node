@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27.4'
@@ -76,7 +77,8 @@ jobs:
           # while unrelated routes keep upstream raw TCP fast-path.
           go test -race ./proxy -run TestExperimentalSplice -count=20
           go test -race ./proxy -run TestExperimentalNonScopedTCP -count=20
-          go build -o /tmp/xmesh-xray-fence-experiment ./main
+          env GOFLAGS= GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 \
+            go build -trimpath -o /tmp/xmesh-xray-fence-experiment ./main
           /tmp/xmesh-xray-fence-experiment version
       - name: Install a signed 8 MiB cap in real Xray and enforce it over VLESS
         env:
@@ -94,3 +96,63 @@ jobs:
         env:
           XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: "1"
         run: python3 experiments/xray-dataplane-fence/test_xray_patched_crash.py /tmp/xmesh-xray-fence-experiment
+
+      - name: Independently reproduce the exact tested metered Xray candidate
+        env:
+          REVIEWED_XRAY_REVISION: a4a3dff5b20c2faae567b742c172c7b95e75c083
+          EXPECTED_NODE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # A PR workflow must check out the exact reviewed head, not the
+          # synthetic merge commit. No artifact is qualified otherwise.
+          test "$(git rev-parse HEAD)" = "$EXPECTED_NODE_REVISION"
+          second="$RUNNER_TEMP/xray-rebuild-source"
+          git -C .experimental-xray worktree add --detach "$second" "$REVIEWED_XRAY_REVISION"
+          test "$(git -C "$second" rev-parse HEAD)" = "$REVIEWED_XRAY_REVISION"
+          python3 experiments/xray-dataplane-fence/apply-experiment.py "$second"
+          (
+            cd "$second"
+            env GOFLAGS= GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 \
+              GOCACHE="$RUNNER_TEMP/xray-rebuild-cache" \
+              go build -trimpath -o "$RUNNER_TEMP/xray-rebuilt" ./main
+          )
+          cmp /tmp/xmesh-xray-fence-experiment "$RUNNER_TEMP/xray-rebuilt"
+          out="$RUNNER_TEMP/metered-xray-candidate"
+          mkdir -m 0700 "$out"
+          install -m 0755 /tmp/xmesh-xray-fence-experiment "$out/xray"
+          python3 - "$out" <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          output = Path(sys.argv[1])
+          binary = output / "xray"
+          manifest = {
+              "schemaVersion": 1,
+              "kind": "xmesh.metered-xray-candidate",
+              "nodeSourceRevision": os.environ["EXPECTED_NODE_REVISION"],
+              "upstreamSourceRevision": os.environ["REVIEWED_XRAY_REVISION"],
+              "goVersion": subprocess.check_output(["go", "version"], text=True).strip(),
+              "buildFlags": ["GOOS=linux", "GOARCH=amd64", "GOAMD64=v1", "CGO_ENABLED=0", "-trimpath"],
+              "artifactSha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "independentRebuildMatched": True,
+              "candidateOnly": True,
+              "productionActivationAuthorized": False,
+          }
+          (output / "candidate-manifest.json").write_text(
+              json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(manifest, sort_keys=True, indent=2))
+          PY
+          (cd "$out" && sha256sum xray candidate-manifest.json > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - name: Retain reproducible tested metered Xray candidate (not production approval)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: metered-xray-linux-amd64-candidate-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/metered-xray-candidate/
+          if-no-files-found: error
+          retention-days: 14
