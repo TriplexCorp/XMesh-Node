@@ -223,7 +223,16 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
         _verify_fresh_container_env(fresh)
         measured = wal_transport._measure_quarantined_runtime(
             (executable_pin, config_pin), container_name=candidate_container)
-        original = wal_transport._measure_quarantined_runtime(None, *old_args)
+        # The installed runtime requires independently pinned executable and
+        # config on BOTH sides of the generation transition. Derive the old
+        # config from the original signed policy, not Docker or the candidate.
+        old_pins = None
+        if installed_worker():
+            original_config = calendar_fence._original_signed_scope(fd, old, node, pinned)
+            if original_config != config_pin:
+                raise ValueError("successor configuration differs from signed predecessor")
+            old_pins = (executable_pin, original_config)
+        original = wal_transport._measure_quarantined_runtime(old_pins, *old_args)
         if (measured[0] == original[0] or measured[2] == original[2]
                 or measured[3] == original[3] or measured[3] == old["runtimeId"]
                 or measured[0] != fresh.get("Id")

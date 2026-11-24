@@ -285,7 +285,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
         # config hash must be independently pinned for this exact PID.
         if original_config_sha != config_pin:
             raise ValueError("successor Xray does not use signed original config")
-        original = wal_transport._measure_quarantined_runtime(None, *old_args)
+        original = wal_transport._measure_quarantined_runtime((executable_pin, config_pin), *old_args)
         candidate = wal_transport._measure_quarantined_runtime(
             (executable_pin, config_pin), container_name=candidate_container)
         if candidate != measured or original[3] != old["runtimeId"]:
@@ -353,7 +353,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             if saved["response"] != response:
                 raise ValueError("concurrent successor delivery differs from committed grant")
             if (installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"):
-                original_now = wal_transport._measure_quarantined_runtime(None, *old_args)
+                original_now = wal_transport._measure_quarantined_runtime((executable_pin, config_pin), *old_args)
                 if original_now[3] != old["runtimeId"]:
                     raise ValueError("predecessor changed before replaying ingress route")
                 verified_grant = wal_transport.observed.strict_json(
@@ -383,7 +383,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
         }
         quarantine._durable_store(fd, record, _filename(user,old["reservationId"]))
         if (installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"):
-            original_now = wal_transport._measure_quarantined_runtime(None, *old_args)
+            original_now = wal_transport._measure_quarantined_runtime((executable_pin, config_pin), *old_args)
             if original_now[3] != old["runtimeId"]:
                 raise ValueError("predecessor changed before publishing ingress route")
             vless_ingress.publish(fd, wal_transport.observed.strict_json(grant)["payload"],
