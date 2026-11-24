@@ -103,15 +103,15 @@ WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
 if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]];then
   echo "Invalid quota auto renewal staging flag" >&2;exit 2
 fi
-if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.27 ) ]];then
-  echo "Quota auto renewal requires the explicit control-v6.0.27 WAL staging Agent." >&2;exit 2
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.28 ) ]];then
+  echo "Quota auto renewal requires the explicit control-v6.0.28 WAL staging Agent." >&2;exit 2
 fi
-if [[ "$AGENT_VERSION" == control-v6.0.27 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
-  echo "control-v6.0.27 requires an exact Nexus release revision." >&2
+if [[ "$AGENT_VERSION" == control-v6.0.28 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
+  echo "control-v6.0.28 requires an exact Nexus release revision." >&2
   exit 2
 fi
 if [[ "$WAL_STAGE_AGENT" != 0 || "$AGENT_VERSION" == control-v6.0.25 ]];then
-  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.27 ) || "$WAL_STAGE_AGENT" != 1 ||
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.28 ) || "$WAL_STAGE_AGENT" != 1 ||
         ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
     echo "Experimental WAL/Genesis Agent requires explicit staging and an exact Nexus revision." >&2
     exit 2
