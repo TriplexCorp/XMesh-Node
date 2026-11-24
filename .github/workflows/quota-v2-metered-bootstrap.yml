@@ -104,3 +104,9 @@ jobs:
             exit 1
           fi
           [[ "$(sha256sum "$target")" == "$before" ]]
+
+      - name: Diagnose isolated meter startup on the disposable runner
+        if: failure()
+        run: |
+          sudo docker inspect --format 'state={{json .State}} net={{json .HostConfig.NetworkMode}} restart={{json .HostConfig.RestartPolicy}} bindings={{json .HostConfig.PortBindings}} ports={{json .NetworkSettings.Ports}} networks={{json .NetworkSettings.Networks}}' xmesh-managed-xray
+          sudo docker logs --tail 20 xmesh-managed-xray
