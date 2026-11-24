@@ -297,10 +297,40 @@ def verify_reusable_generation(name, state, old, old_container, executable, conf
     current, ledger = wal_transport._bound_journal(name)
     _verify_fresh_container_env(current)
     root = str(Path(state) / name)
-    if (current.get("Name") != "/" + name
-            or current.get("Image") != old_inspect.get("Image")
+    old_image = old_inspect.get("Image")
+    if (not isinstance(old_image, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", old_image) is None
+            or current.get("Name") != "/" + name
+            or current.get("Image") != old_image
             or ledger != str(Path(root) / "ledger")):
         raise ValueError("existing generation has a foreign Docker identity or WAL root")
+    # A candidate with the right Docker name, image and WAL, but started
+    # without the private-VLESS byte gate must never be reused. The fresh
+    # launcher supplies these exact settings from the signed alias roster.
+    aliases = old.get("aliasScopes")
+    if not isinstance(aliases, list) or not aliases:
+        raise ValueError("missing signed predecessor ingress scopes")
+    allowed = []
+    for alias in aliases:
+        if not isinstance(alias, dict) or not isinstance(alias.get("email"), str):
+            raise ValueError("invalid signed predecessor ingress scope")
+        _, sep, tag = alias["email"].partition("--")
+        if not sep or tag not in ("vless-main", "vless-cdn"):
+            raise ValueError("unsupported signed predecessor ingress scope")
+        allowed.append(tag)
+    allowed.sort()
+    if len(allowed) != len(set(allowed)):
+        raise ValueError("duplicate signed predecessor ingress scope")
+    config_env = current.get("Config")
+    env = config_env.get("Env") if isinstance(config_env, dict) else None
+    if not isinstance(env, list) or not all(isinstance(v, str) for v in env):
+        raise ValueError("existing generation has no verifiable Xray gate environment")
+    for required in ("XMESH_QUOTA_PRIVATE_VLESS=1",
+                     "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS=" + ",".join(allowed)):
+        if env.count(required) != 1 or any(
+                value.startswith(required.partition("=")[0] + "=") and value != required
+                for value in env):
+            raise ValueError("existing generation lost its private VLESS byte gate")
     mounts = current.get("Mounts")
     old_mounts = old_inspect.get("Mounts")
     if not isinstance(mounts, list) or not isinstance(old_mounts, list):
