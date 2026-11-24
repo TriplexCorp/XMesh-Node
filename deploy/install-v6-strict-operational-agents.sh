@@ -115,7 +115,12 @@ fetch_install(){
   local remote="$1" target="$2" mode="$3" tmp
   tmp="$(mktemp /tmp/xmesh-v6-agent.XXXXXXXX)"
   trap 'rm -f "$tmp"' RETURN
-  /usr/bin/curl --proto '=https' --tlsv1.3 --tls-max 1.3 --fail --silent --show-error --location --max-time 30 "$RAW/$remote" -o "$tmp"
+  # A pinned GitHub raw source can transiently return 503 under concurrent
+  # fresh Node bootstrap. Retry only curl's transient HTTP/network errors;
+  # preserve fail-closed behavior for 404, invalid TLS and syntax checks.
+  /usr/bin/curl --proto '=https' --tlsv1.3 --tls-max 1.3 --fail --silent --show-error --location \
+    --connect-timeout 10 --max-time 30 --retry 4 --retry-delay 2 --retry-max-time 120 \
+    "$RAW/$remote" -o "$tmp"
   case "$remote" in *.sh) bash -n "$tmp";; *.py) python3 -m py_compile "$tmp";; esac
   install -o root -g root -m "$mode" "$tmp" "$target"
   rm -f "$tmp"
