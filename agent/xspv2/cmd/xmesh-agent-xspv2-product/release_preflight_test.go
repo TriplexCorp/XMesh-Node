@@ -112,3 +112,47 @@ func TestReleasePreflightPreservesExistingSymlinkAndExpiredRecord(t *testing.T) 
 		t.Fatal("expired preflight signed plan accepted")
 	}
 }
+
+func TestPreparedReleaseCrashRecoveryAfterPublish(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root-owned release directory")
+	}
+	dir := filepath.Join(t.TempDir(), "release-candidates")
+	if err := privateReleaseDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(dir, "prepared-release.json")
+	tmp, err := os.CreateTemp(dir, ".partial-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("{\"preflightOnly\":true,\"runtimeSwitched\":false}\n")
+	if _, err := tmp.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(tmp.Name(), record); err != nil {
+		t.Fatal(err)
+	}
+	// A dead process leaves two links. Reentry must reclaim only the
+	// partial without changing the immutable published preflight.
+	lock, err := lockReleaseDirectory(dir)
+	if err != nil {
+		t.Fatalf("preflight publication cannot recover after SIGKILL: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(tmp.Name()); !os.IsNotExist(err) {
+		t.Fatalf("partial preflight survived recovery: %v", err)
+	}
+	after, err := strictFile(record, 0600)
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatalf("published preflight changed during recovery: %v", err)
+	}
+}
