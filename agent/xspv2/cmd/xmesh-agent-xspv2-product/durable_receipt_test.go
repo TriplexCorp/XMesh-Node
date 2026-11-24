@@ -13,6 +13,14 @@ import (
 )
 
 func signedPanelEnvelopeForTest(t *testing.T, issuedAtMS int64) ([]byte, productConfig, string) {
+	request := strings.Repeat("a", 32)
+	raw, cfg := signTestPanelPayload(t, issuedAtMS, "panel.product.activation-receipt",
+		"/api/v2/product/activate", request, strings.Repeat("b", 40), []byte(`{"schema":"test"}`))
+	return raw, cfg, request
+}
+
+func signTestPanelPayload(t *testing.T, issuedAtMS int64, messageType, path, requestID, revision string,
+	payload []byte) ([]byte, productConfig) {
 	t.Helper()
 
 	edPublic, edPrivate, err := ed25519.GenerateKey(rand.Reader)
@@ -36,17 +44,15 @@ func signedPanelEnvelopeForTest(t *testing.T, issuedAtMS int64) ([]byte, product
 			MLDSA65PublicB64: b64.EncodeToString(pqPublic),
 		},
 	}
-	requestID := strings.Repeat("a", 32)
-	payload := []byte(`{"schema":"test"}`)
 	env := envelope{
 		Protocol:     "XSP/2",
 		Suite:        suite,
 		Direction:    2,
-		MessageType:  "panel.product.activation-receipt",
+		MessageType:  messageType,
 		IssuerID:     cfg.PanelPin.IssuerID,
 		NodeID:       cfg.NodeID,
 		Method:       "POST",
-		Path:         "/api/v2/product/activate",
+		Path:         path,
 		Ed25519KeyID: cfg.PanelPin.Ed25519KeyID,
 		MLDSA65KeyID: cfg.PanelPin.MLDSA65KeyID,
 		KeyEpoch:     1,
@@ -54,7 +60,7 @@ func signedPanelEnvelopeForTest(t *testing.T, issuedAtMS int64) ([]byte, product
 		ExpiresAtMS:  issuedAtMS + 120000,
 		NonceHex:     strings.Repeat("0", 32),
 		RequestID:    requestID,
-		Revision:     strings.Repeat("b", 40),
+		Revision:     revision,
 		PayloadB64:   b64.EncodeToString(payload),
 	}
 	input, err := signingInput(env, payload)
@@ -74,7 +80,7 @@ func signedPanelEnvelopeForTest(t *testing.T, issuedAtMS int64) ([]byte, product
 	if err != nil {
 		t.Fatal(err)
 	}
-	return raw, cfg, requestID
+	return raw, cfg
 }
 
 func TestDurableActivationReceiptSurvivesNetworkFreshnessWindow(t *testing.T) {

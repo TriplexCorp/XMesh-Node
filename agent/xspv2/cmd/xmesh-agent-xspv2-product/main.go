@@ -259,7 +259,7 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
-	if err := tmp.Chmod(mode); err == nil {
+	if err = tmp.Chmod(mode); err == nil {
 		_, err = tmp.Write(data)
 	}
 	if err == nil {
@@ -959,6 +959,11 @@ func verifyActive(panel string, nodeID int64) error {
 	if err != nil || running != cfg.ReleaseIdentity {
 		return errors.New("running strict-PQ Agent differs from enrolled release identity")
 	}
+	return verifyEnrolledRelease(cfg, running)
+}
+
+func verifyEnrolledRelease(cfg productConfig, running releaseIdentity) error {
+	nodeID := cfg.NodeID
 	activeRaw, err := strictFile(activeFile, 0o600)
 	if err != nil {
 		return err
@@ -1073,42 +1078,7 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 	if err != nil || len(body) > maxPayloadBytes {
 		return errors.New("invalid request body")
 	}
-	keys, public, err := keyring.Open(vaultFile, masterFile)
-	if err != nil {
-		return err
-	}
-	innerRaw, err := json.Marshal(tunnelPayload{Path: path, BodyB64: b64.EncodeToString(body)})
-	if err != nil {
-		return err
-	}
-	requestID, err := randomHex(16)
-	if err != nil {
-		return err
-	}
-	outer, err := makeEnvelope(keys, public, "node.product.tunnel", "/api/v2/product/tunnel", requestID, cfg.ReleaseIdentity.SourceRevision, innerRaw)
-	if err != nil {
-		return err
-	}
-	client, err := hybridClient(cfg)
-	if err != nil {
-		return err
-	}
-	responseRaw, status, err := postJSON(client, "https://"+cfg.EndpointAddress+"/api/v2/product/tunnel", outer)
-	if err != nil {
-		return err
-	}
-	if status != http.StatusOK {
-		return fmt.Errorf("strict-PQ tunnel rejected: HTTP %d", status)
-	}
-	parsed, err := verifyPanelEnvelope(responseRaw, cfg, "panel.product.tunnel-response", "/api/v2/product/tunnel", requestID)
-	if err != nil {
-		return err
-	}
-	var result tunnelResponsePayload
-	if err := json.Unmarshal(parsed.Payload, &result); err != nil {
-		return err
-	}
-	responseBody, err := strictB64(result.BodyB64, -1, 2*1024*1024)
+	responseBody, status, err := tunnelRequest(cfg, path, body)
 	if err != nil {
 		return err
 	}
@@ -1120,11 +1090,54 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 		return err
 	}
 	if statusPath != "" {
-		if err := atomicWrite(statusPath, []byte(fmt.Sprintf("%d\n", result.Status)), 0o600); err != nil {
+		if err := atomicWrite(statusPath, []byte(fmt.Sprintf("%d\n", status)), 0o600); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func tunnelRequest(cfg productConfig, path string, body []byte) ([]byte, int, error) {
+	keys, public, err := keyring.Open(vaultFile, masterFile)
+	if err != nil {
+		return nil, 0, err
+	}
+	innerRaw, err := json.Marshal(tunnelPayload{Path: path, BodyB64: b64.EncodeToString(body)})
+	if err != nil {
+		return nil, 0, err
+	}
+	requestID, err := randomHex(16)
+	if err != nil {
+		return nil, 0, err
+	}
+	outer, err := makeEnvelope(keys, public, "node.product.tunnel", "/api/v2/product/tunnel", requestID, cfg.ReleaseIdentity.SourceRevision, innerRaw)
+	if err != nil {
+		return nil, 0, err
+	}
+	client, err := hybridClient(cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	responseRaw, status, err := postJSON(client, "https://"+cfg.EndpointAddress+"/api/v2/product/tunnel", outer)
+	if err != nil {
+		return nil, 0, err
+	}
+	if status != http.StatusOK {
+		return nil, 0, fmt.Errorf("strict-PQ tunnel rejected: HTTP %d", status)
+	}
+	parsed, err := verifyPanelEnvelope(responseRaw, cfg, "panel.product.tunnel-response", "/api/v2/product/tunnel", requestID)
+	if err != nil {
+		return nil, 0, err
+	}
+	var result tunnelResponsePayload
+	if err := json.Unmarshal(parsed.Payload, &result); err != nil {
+		return nil, 0, err
+	}
+	responseBody, err := strictB64(result.BodyB64, -1, 2*1024*1024)
+	if err != nil {
+		return nil, 0, err
+	}
+	return responseBody, result.Status, nil
 }
 
 func main() {
@@ -1138,7 +1151,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1163,6 +1176,34 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(`{"strictPQEnabled":true,"automaticClassicalFallback":false}`)
+	case "fetch-release-plan":
+		flags := flag.NewFlagSet("fetch-release-plan", flag.ExitOnError)
+		command := flags.Int64("command-id", 0, "claimed release command ID")
+		output := flags.String("output-file", "", "private signed release plan output")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := fetchStagedRelease(*command, *output); err != nil {
+			fmt.Fprintln(os.Stderr, "release plan fetch failed:", err)
+			os.Exit(1)
+		}
+	case "verify-release-plan":
+		flags := flag.NewFlagSet("verify-release-plan", flag.ExitOnError)
+		command := flags.Int64("command-id", 0, "claimed release command ID")
+		plan := flags.String("plan-file", "", "private signed release plan file")
+		artifact := flags.String("artifact-file", "", "private staged Agent artifact file")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := verifyStagedRelease(*command, *plan, *artifact); err != nil {
+			fmt.Fprintln(os.Stderr, "release plan verification failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println(`{"status":"candidate-verified","runtimeSwitched":false}`)
 	case "wal-evidence":
 		flags := flag.NewFlagSet("wal-evidence", flag.ExitOnError)
 		panel := flags.String("panel", "", "HTTPS panel origin")
