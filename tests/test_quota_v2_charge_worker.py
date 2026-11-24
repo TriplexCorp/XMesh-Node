@@ -45,7 +45,7 @@ class ChargeWorkerTests(unittest.TestCase):
             }
             with (
                 mock.patch.dict(os.environ, env),
-                mock.patch.object(wal_transport, "run"),
+                mock.patch.object(wal_transport, "run") as sync,
                 mock.patch.object(wal_transport, "_bound_journal",
                                   side_effect=[(initial, str(wal)),
                                                (changed, str(wal))]) as inspect,
@@ -54,10 +54,16 @@ class ChargeWorkerTests(unittest.TestCase):
                                   return_value=({}, {})),
                 mock.patch.object(wal_transport, "_post") as post,
             ):
+                order = mock.Mock()
+                order.attach_mock(inspect, "inspect")
+                order.attach_mock(sync, "sync")
                 with self.assertRaisesRegex(
                         ValueError, "Xray or journal changed during authenticated WAL charging"):
                     worker.run("https://isolated.test", 7, str(state), set())
-                self.assertEqual(inspect.call_count, 2)
+                # Identity must be measured BEFORE the signed network round trip.
+                self.assertEqual(
+                    [event[0] for event in order.mock_calls],
+                    ["inspect", "sync", "inspect"])
                 post.assert_not_called()
             with (
                 mock.patch.dict(os.environ, env),
