@@ -115,6 +115,30 @@ func persistReleasePreflight(dir string, plan releasePlan, signed []byte) error 
 	return syncParent(destination)
 }
 
+// Re-check the exact immutable plan over the current authenticated XSP/2
+// tunnel. Neither a cached signature nor a correctly staged candidate
+// authorizes the next transition after a command is revoked.
+func revalidateReleasePlan(cfg productConfig, command int64, activation string, signed []byte,
+	fetch func([]byte) ([]byte, int, error)) error {
+	body, err := json.Marshal(releasePlanRequestForPreflight{
+		CommandID: command, Current: cfg.ReleaseIdentity,
+	})
+	if err != nil {
+		return err
+	}
+	fresh, status, err := fetch(body)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK || !bytes.Equal(fresh, signed) {
+		return errors.New("release authorization changed, expired or revoked")
+	}
+	if _, err := verifyReleasePlan(fresh, cfg, command, activation); err != nil {
+		return err
+	}
+	return nil
+}
+
 func prepareReleaseCutover(command int64, planPath string) error {
 	cfg, activation, err := installedReleaseEnrollment()
 	if err != nil {
@@ -128,23 +152,12 @@ func prepareReleaseCutover(command int64, planPath string) error {
 	if err != nil {
 		return err
 	}
-	// The old signed plan is NOT sufficient after revocation. Re-check the
-	// claimed command, live activation and same immutable signed response
-	// over strict XSP/2 before recording evidence for a future cutover.
-	body, err := json.Marshal(releasePlanRequestForPreflight{
-		CommandID: command, Current: cfg.ReleaseIdentity,
-	})
-	if err != nil {
-		return err
-	}
-	fresh, status, err := tunnelRequest(cfg, releasePlanPath, body)
-	if err != nil {
-		return err
-	}
-	if status != http.StatusOK || !bytes.Equal(fresh, raw) {
-		return errors.New("release authorization changed, expired or revoked")
-	}
-	if _, err := verifyReleasePlan(fresh, cfg, command, activation); err != nil {
+	// The old signed plan is NOT sufficient after revocation. A fresh
+	// authenticated request must return the exact same immutable receipt.
+	if err := revalidateReleasePlan(cfg, command, activation, raw,
+		func(body []byte) ([]byte, int, error) {
+			return tunnelRequest(cfg, releasePlanPath, body)
+		}); err != nil {
 		return err
 	}
 	return persistReleasePreflight(stateRoot+"/release-candidates", plan, raw)

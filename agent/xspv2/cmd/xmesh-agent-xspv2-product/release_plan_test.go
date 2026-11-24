@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,5 +83,62 @@ func TestStagedArtifactRequiresExactPrivateBytes(t *testing.T) {
 	}
 	if err := verifyCandidateBytes(candidate, digest, 0600); err == nil {
 		t.Fatal("candidate with a second hard link accepted")
+	}
+}
+
+func TestFreshReleasePreflightRefusesRevokedOrChangedSignedPlan(t *testing.T) {
+	now := time.Now()
+	current := releaseIdentity{"control-v6.0.24", strings.Repeat("a", 40), strings.Repeat("b", 64)}
+	target := releaseIdentity{"control-v6.0.27", strings.Repeat("c", 40), strings.Repeat("d", 64)}
+	activation := strings.Repeat("e", 64)
+	plan := releasePlan{Schema: "xmesh-product-agent-release-plan-v1",
+		NodeID: 1, KeyEpoch: 1, CommandID: 55,
+		Current: current, Target: target, ActivationSHA256: activation,
+		ExpiresAtMS: now.Add(time.Minute).UnixMilli()}
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, cfg := signTestPanelPayload(t, now.UnixMilli(),
+		"panel.product.release-plan", releasePlanPath, "55", target.SourceRevision, payload)
+	cfg.ReleaseIdentity = current
+	if _, err := verifyReleasePlan(signed, cfg, 55, activation); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	good := func(body []byte) ([]byte, int, error) {
+		requests++
+		var request releasePlanRequestForPreflight
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatal(err)
+		}
+		if request.CommandID != 55 || request.Current != current {
+			t.Fatal("preflight sent unbound command")
+		}
+		return signed, http.StatusOK, nil
+	}
+	if err := revalidateReleasePlan(cfg, 55, activation, signed, good); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatal("preflight skipped fresh tunnel authorization")
+	}
+	cases := map[string]func([]byte) ([]byte, int, error){
+		"revoked command": func([]byte) ([]byte, int, error) {
+			return nil, http.StatusConflict, nil
+		},
+		"wrong signed response": func([]byte) ([]byte, int, error) {
+			return append(append([]byte(nil), signed...), ' '), http.StatusOK, nil
+		},
+		"backend unavailable": func([]byte) ([]byte, int, error) {
+			return nil, http.StatusServiceUnavailable, nil
+		},
+	}
+	for name, fetch := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := revalidateReleasePlan(cfg, 55, activation, signed, fetch); err == nil {
+				t.Fatal("preflight accepted stale or changed release authority")
+			}
+		})
 	}
 }
