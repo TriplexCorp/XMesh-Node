@@ -88,27 +88,44 @@ func recoverActivationResponse(cfg productConfig, requestRaw []byte, parsed pars
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	active, err := validateRecoveredActivationReceipt(cfg, requestRaw, parsed, responseRaw)
+	if err != nil {
+		return err
+	}
+	if err := atomicWrite(activationReceipt, responseRaw, 0600); err != nil {
+		return err
+	}
+	if err := atomicJSON(activeFile, active); err != nil {
+		return err
+	}
+	return verifyActive(cfg.PanelURL, cfg.NodeID)
+}
+
+func validateRecoveredActivationReceipt(cfg productConfig, requestRaw []byte, parsed parsedEnvelope, responseRaw []byte) (activeState, error) {
 	receiptEnvelope, err := verifyDurablePanelEnvelope(responseRaw, cfg,
 		"panel.product.activation-receipt", "/api/v2/product/activate", parsed.Env.RequestID)
 	if err != nil {
-		return err
+		return activeState{}, err
+	}
+	if err := checkUniqueJSONKeys(receiptEnvelope.Payload); err != nil {
+		return activeState{}, err
 	}
 	var receipt activationReceiptPayload
 	d := json.NewDecoder(bytes.NewReader(receiptEnvelope.Payload))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&receipt); err != nil {
-		return err
+		return activeState{}, err
 	}
 	if d.Decode(new(any)) != io.EOF {
-		return errors.New("trailing recovered activation receipt")
+		return activeState{}, errors.New("trailing recovered activation receipt")
 	}
 	requestHash := sha256.Sum256(requestRaw)
 	if receipt.Schema != "xmesh-v6-strict-pq-activation-receipt-1" ||
 		receipt.NodeID != cfg.NodeID || receipt.KeyEpoch != 1 ||
 		!receipt.ProductionActivation || !receipt.StrictPQEnabled ||
 		receipt.AutomaticClassicalFallback ||
-		receipt.RequestBindingSHA256 != hex.EncodeToString(requestHash[:]) {
-		return errors.New("recovered receipt does not bind the original activation request")
+		receipt.RequestBindingSHA256 != hex.EncodeToString(requestHash[:]) || receipt.ActivatedAt == "" {
+		return activeState{}, errors.New("recovered receipt does not bind the original activation request")
 	}
 	receiptHash := sha256.Sum256(responseRaw)
 	active := activeState{
@@ -120,13 +137,7 @@ func recoverActivationResponse(cfg productConfig, requestRaw []byte, parsed pars
 		AutomaticClassicalFallback: false, ReleaseIdentity: cfg.ReleaseIdentity,
 		ActivatedAt: receipt.ActivatedAt,
 	}
-	if err := atomicWrite(activationReceipt, responseRaw, 0600); err != nil {
-		return err
-	}
-	if err := atomicJSON(activeFile, active); err != nil {
-		return err
-	}
-	return verifyActive(cfg.PanelURL, cfg.NodeID)
+	return active, nil
 }
 
 func recoverLostActivation() error {

@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"crypto/mldsa"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -68,5 +70,48 @@ func TestSavedActivationRequiresBothOriginalSignaturesAndRelease(t *testing.T) {
 	badRaw, _ = json.Marshal(bad)
 	if _,err:=verifySavedActivationRequest(cfg,pub,badRaw);err==nil {
 		t.Fatal("altered activation claims accepted")
+	}
+}
+
+func TestRecoveredActivationReceiptReconstructsExactActiveMarker(t *testing.T) {
+	request := []byte("original node-signed request bytes")
+	hash := sha256.Sum256(request)
+	requestID := strings.Repeat("b", 32)
+	payload := activationReceiptPayload{
+		Schema:"xmesh-v6-strict-pq-activation-receipt-1",NodeID:1,KeyEpoch:1,
+		RequestBindingSHA256:hex.EncodeToString(hash[:]),ProductionActivation:true,
+		StrictPQEnabled:true,AutomaticClassicalFallback:false,
+		ActivatedAt:"2026-11-24T01:00:00Z",
+	}
+	claims, err := json.Marshal(payload)
+	if err != nil { t.Fatal(err) }
+	signed, cfg := signTestPanelPayload(t, time.Now().Add(-10*time.Minute).UnixMilli(),
+		"panel.product.activation-receipt","/api/v2/product/activate",
+		requestID,strings.Repeat("a",40),claims)
+	cfg.ReleaseIdentity=releaseIdentity{Version:"control-v6.0.27",
+		SourceRevision:strings.Repeat("a",40),ArtifactSHA256:strings.Repeat("c",64)}
+	original:=parsedEnvelope{Env:envelope{RequestID:requestID}}
+	active, err := validateRecoveredActivationReceipt(cfg,request,original,signed)
+	if err != nil { t.Fatal(err) }
+	if active.RequestID!=requestID || active.RequestBindingSHA256!=hex.EncodeToString(hash[:]) ||
+		active.ReleaseIdentity!=cfg.ReleaseIdentity || !active.StrictPQEnabled ||
+		active.AutomaticClassicalFallback || !active.ProductionActivation {
+		t.Fatal("recovered active marker has different authority")
+	}
+	changed := original
+	changed.Env.RequestID=strings.Repeat("d",32)
+	if _,err:=validateRecoveredActivationReceipt(cfg,request,changed,signed);err==nil {
+		t.Fatal("receipt for another request accepted")
+	}
+	payload.RequestBindingSHA256=strings.Repeat("e",64)
+	alteredClaims, _ := json.Marshal(payload)
+	altered, _ := signTestPanelPayload(t,time.Now().UnixMilli(),
+		"panel.product.activation-receipt","/api/v2/product/activate",
+		requestID,strings.Repeat("a",40),alteredClaims)
+	if _,err:=validateRecoveredActivationReceipt(cfg,request,original,altered);err==nil {
+		t.Fatal("changed receipt binding accepted")
+	}
+	if _,err:=validateRecoveredActivationReceipt(cfg,request,original,append(signed, '\n'));err==nil {
+		t.Fatal("trailing forged receipt accepted")
 	}
 }
