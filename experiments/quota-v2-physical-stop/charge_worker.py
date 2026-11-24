@@ -318,6 +318,28 @@ def _charge_stream(fd, state_fd, state_names, node, pinned, public, filename, bi
     return submitted
 
 
+def _verify_private_successor_wal_owner(container_name, entries):
+    """An isolated successor belongs to ONE signed user, never a shared pool.
+
+    A mismatched stream must fail the entire generation before any positive
+    cap may be installed. Merely adding its foreign user to failed_users
+    would leave the actual successor owner eligible for a new reservation.
+    The shared Genesis and older quarantine staging retain their separate
+    multiuser policy checks.
+    """
+    match = re.fullmatch(
+        r"xmesh-quota-u([1-9][0-9]{0,18})-[0-9a-f]{32}", container_name)
+    if match is None:
+        return
+    owner = int(match.group(1))
+    for birth in entries.values():
+        if not isinstance(birth, dict) or not isinstance(birth.get("email"), str):
+            raise ValueError("private successor contains malformed WAL birth identity")
+        user = registry.EMAIL.fullmatch(birth["email"])
+        if user is None or int(user.group(1)) != owner:
+            raise ValueError("isolated successor WAL contains another user's byte intents")
+
+
 def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
         container_name="xmesh-managed-xray"):
     if (os.geteuid() != 0 or
@@ -352,6 +374,7 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
                          if STREAM.fullmatch(name))
         entries, verified = registry.verify_meter_inventory(
             fd, streams, journal._read_meter_wal, journal._canonical_go)
+        _verify_private_successor_wal_owner(container_name, entries)
         if not entries:
             return 0
         pinned = wal_transport._panel_pin()
