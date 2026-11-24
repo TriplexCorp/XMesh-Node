@@ -52,3 +52,14 @@ assert 'fetch_install xmesh-product-release-update.timer' in ops
 assert 'Pending signed Agent update; recover it before repairing the installation.' in ops
 assert '/usr/local/libexec/xmesh-agent-release-bridge' not in ops
 print('first-release update supervisor installation contract: OK')
+
+# Recovery is a shared, repeatedly executed cryptographic prerequisite, not a
+# permanently active unit. The default systemd burst of five starts can be
+# consumed by successful bootstrap/control/metrics operations in two seconds.
+recovery_unit = ops.split("cat > /etc/systemd/system/xmesh-pq-activation-recovery.service <<'EOF'\n", 1)[1].split("\nEOF", 1)[0]
+assert "StartLimitIntervalSec=10s\nStartLimitBurst=32\n" in recovery_unit
+assert "ExecStart=/usr/local/bin/xmesh-agent-xspv2-product resume-activation" in recovery_unit
+assert "RemainAfterExit=yes" not in recovery_unit
+assert "Requires=xmesh-pq-activation-recovery.service" in ops
+assert "After=xmesh-pq-activation-recovery.service" in ops
+print("shared activation recovery burst and fail-closed dependency: OK")
