@@ -782,6 +782,25 @@ class FirstCapHandoffTests(unittest.TestCase):
             self.assertFalse(complete["finalMeterVerified"])
             self.assertFalse(complete["canResume"])
             self.assertFalse(complete["refundableBytes"])
+            for alias_roster in (
+                [],
+                [self.aliases[0], self.aliases[0]],
+                self.aliases[::-1],
+                [{"email": "xmesh-u999--vless-main", "class": "main"}],
+                [{"email": "xmesh-u100--vless-cdn", "class": "main"}],
+                [{"email": "xmesh-u100--vless-main", "class": "unsupported"}],
+                [{"email": "xmesh-u100--vless-main", "class": "main",
+                  "unreviewed": True}],
+            ):
+                # Alias validation must precede any WAL-tail receipt
+                # acceptance. Turning the signed list into a set alone
+                # could silently discard a duplicate owner scope.
+                with self.subTest(aliases=alias_roster), self.assertRaisesRegex(
+                        ValueError, "signed predecessor inbound"):
+                    calendar_fence._verified_old_wal_charge_heads(
+                        fd, self.node, 100,
+                        dict(self.claims, aliasScopes=alias_roster),
+                        valid_checkpoint, self.pub, runtime)
             forged = copy.deepcopy(valid_checkpoint)
             forged["inboundMeters"][0]["uplinkBytes"] = 6
             with self.assertRaisesRegex(ValueError, "differs from signed inbound"):
