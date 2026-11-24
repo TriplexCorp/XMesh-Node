@@ -27,7 +27,7 @@ WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
 if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]]; then
   echo "Invalid staged automatic renewal flag" >&2; exit 2
 fi
-if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.28 ) ]]; then
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.29 ) ]]; then
   echo "Automatic quota renewal requires the exact opt-in WAL staging Agent." >&2; exit 2
 fi
 if [[ "$WAL_AUTO_RENEW" == 0 ]]; then
@@ -42,11 +42,11 @@ NEXUS_REF="${XMESH_NEXUS_RELEASE_REF:-main}"
 [[ "$NEXUS_REF" =~ ^[A-Za-z0-9._/-]{1,160}$ && "$NEXUS_REF" != *..* && "$NEXUS_REF" != /* ]] || {
   echo "invalid XMESH_NEXUS_RELEASE_REF" >&2; exit 2;
 }
-if [[ "$AGENT_VERSION" == control-v6.0.28 && ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
-  echo "control-v6.0.28 requires an exact Nexus release revision." >&2; exit 2
+if [[ "$AGENT_VERSION" == control-v6.0.29 && ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
+  echo "control-v6.0.29 requires an exact Nexus release revision." >&2; exit 2
 fi
 if [[ "$AGENT_VERSION" == control-v6.0.25 || "$WAL_STAGE_AGENT" != 0 ]];then
-  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.28 ) || "$WAL_STAGE_AGENT" != 1 || ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.29 ) || "$WAL_STAGE_AGENT" != 1 || ! "$NEXUS_REF" =~ ^[a-f0-9]{40}$ ]];then
     echo "Experimental WAL/Genesis Agent requires isolated staging and an exact Nexus revision." >&2; exit 2
   fi
 fi
@@ -64,6 +64,12 @@ PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
   echo "strict-PQ activation receipt is not valid; operational agents will not be installed" >&2
   exit 1
 }
+
+# A prepared metered installation must never start standard Xray services.
+if [[ -e /usr/local/libexec/xmesh-metered-xray || -L /usr/local/libexec/xmesh-metered-xray ]]; then
+  echo "A metered Xray installation exists; refusing legacy service installation." >&2
+  exit 2
+fi
 
 # Cold repair is not a coordinated release switch. Never overwrite its
 # supervisor while a durable transaction is pending.
@@ -107,7 +113,7 @@ ln -sfn "$WAL_ROOT/quota-v2-physical-stop/quarantine_policy.py" /usr/local/sbin/
 # First-Genesis SQL lease helper is zero-authority and intentionally opt-in.
 # The positive signed-cap verifier is installed as a library, not a daemon.
 ln -sfn "$WAL_ROOT/quota-v2-physical-stop/genesis_reservation.py" /usr/local/sbin/xmesh-quota-genesis-reservation
-if [[ "$WAL_STAGE_AGENT" == 1 && "$AGENT_VERSION" == control-v6.0.28 ]]; then
+if [[ "$WAL_STAGE_AGENT" == 1 && "$AGENT_VERSION" == control-v6.0.29 ]]; then
   ln -sfn "$WAL_ROOT/quota-v2-physical-stop/first_cap_handoff.py" /usr/local/sbin/xmesh-quota-genesis-cap-rehearsal
 fi
 
@@ -140,7 +146,7 @@ grep -Fq '/api/v1/metrics/ingest' /usr/local/sbin/xmesh-node-metrics || { echo "
 if [[ "$WAL_STAGE_AGENT" == 0 ]];then
   fetch_install node-control-agent.sh /usr/local/sbin/xmesh-node-control 0700
   grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
-  if [[ "$AGENT_VERSION" == control-v6.0.28 ]];then
+  if [[ "$AGENT_VERSION" == control-v6.0.29 ]];then
     grep -Fxq "AGENT_VERSION = \"$AGENT_VERSION\"" /usr/local/libexec/xmesh-xray-update.py || { echo "Xray update worker version does not match canonical Agent release" >&2; exit 1; }
     # All three files come from the exact running Nexus revision, never
     # from a moving main branch or an untrusted update command.
@@ -151,7 +157,7 @@ if [[ "$WAL_STAGE_AGENT" == 0 ]];then
 fi
 
 install -d -o root -g root -m 0700 /etc/xmesh-node-metrics /var/lib/xmesh-node-metrics /var/lib/xmesh-node-control /var/lib/xmesh-xray-sync
-if [[ "$WAL_STAGE_AGENT" == 0 && "$AGENT_VERSION" == control-v6.0.28 ]]; then
+if [[ "$WAL_STAGE_AGENT" == 0 && "$AGENT_VERSION" == control-v6.0.29 ]]; then
   # The recovery image is the original verified product binary itself.
   # This initializes an immutable local trust anchor without bridge1.
   /usr/bin/python3 -I /usr/local/libexec/xmesh-product-upgrade-coordinator.py --fresh initialize
@@ -427,10 +433,10 @@ else
   rm -f /etc/systemd/system/xmesh-quota-v2-renewal.service /etc/systemd/system/xmesh-quota-v2-renewal.timer
 fi
 
-# The reviewed 6.0.28 product can recover the ORIGINAL signed activation
+# The reviewed 6.0.29 product can recover the ORIGINAL signed activation
 # after reboot without re-enrollment. Existing production Agent binaries do
 # not implement resume-activation; leave their unit topology unchanged.
-if [[ "$AGENT_VERSION" == control-v6.0.28 ]]; then
+if [[ "$AGENT_VERSION" == control-v6.0.29 ]]; then
 cat > /etc/systemd/system/xmesh-pq-activation-recovery.service <<'EOF'
 [Unit]
 Description=XMesh strict-PQ recover original signed Agent activation before operations
@@ -495,7 +501,7 @@ OPERATIONAL_TIMERS=(
 )
 if [[ "$WAL_STAGE_AGENT" == 0 ]];then
   OPERATIONAL_TIMERS+=(xmesh-node-control.timer)
-  if [[ "$AGENT_VERSION" == control-v6.0.28 ]]; then
+  if [[ "$AGENT_VERSION" == control-v6.0.29 ]]; then
     OPERATIONAL_TIMERS+=(xmesh-product-release-update.timer)
   fi
 fi
@@ -503,7 +509,7 @@ if [[ "$WAL_AUTO_RENEW" == 1 ]];then
   OPERATIONAL_TIMERS+=(xmesh-quota-v2-renewal.timer)
 fi
 # Ensure reboot recovery is attempted before operational traffic.
-if [[ "$AGENT_VERSION" == control-v6.0.28 ]]; then
+if [[ "$AGENT_VERSION" == control-v6.0.29 ]]; then
   systemctl enable xmesh-pq-activation-recovery.service >/dev/null
 fi
 systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null

@@ -206,8 +206,8 @@ exit 77
                         source.index('systemctl daemon-reload'))
         self.assertLess(source.index('systemctl enable xmesh-pq-activation-recovery.service'),
                         source.index('systemctl start xmesh-node-metrics.service'))
-        # All dependencies are opt-in to reviewed 6.0.28, not 6.0.24.
-        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.28 ]]; then', source)
+        # All dependencies are opt-in to reviewed 6.0.29, not 6.0.24.
+        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.29 ]]; then', source)
         self.assertIn('WAL staging requires a fresh test node', source)
 
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
@@ -226,6 +226,22 @@ exit 77
                             source.index('docker run --rm'))
             self.assertLess(source.index('xmesh_require_unchanged_binary'),
                             source.index('mv -f "$PRODUCT_STAGE"'))
+
+
+    def test_metered_bootstrap_cannot_continue_into_ordinary_router(self):
+        root = Path(__file__).resolve().parents[1]
+        bootstrap = (root / "bootstrap.sh").read_text()
+        installer = (root / "deploy/install-v6-strict-operational-agents.sh").read_text()
+        package = bootstrap.index("deploy/install-metered-xray.sh")
+        gate = bootstrap.index("STRICT-PQ GATE PASSED")
+        refusal = bootstrap.index("approved quota services are unavailable")
+        router = bootstrap.index("docker compose up -d --no-build")
+        self.assertLess(package, gate)
+        self.assertLess(gate, refusal)
+        self.assertLess(refusal, router)
+        self.assertIn("refusing legacy startup", bootstrap[package:gate])
+        self.assertLess(installer.index("refusing legacy service installation"),
+                        installer.index("cat > /etc/systemd/system/xmesh-xray-sync.service"))
 
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@ export LC_ALL=C
 
 if [[ $EUID -ne 0 ]]; then
   command -v sudo >/dev/null 2>&1 || { echo "Run as root (sudo is unavailable)." >&2; exit 1; }
-  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF,XMESH_NEXUS_RELEASE_REF,XMESH_QUOTA_V2_WAL_STAGE_AGENT,XMESH_QUOTA_V2_AUTO_RENEW_STAGING bash "$0" "$@"
+  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF,XMESH_NEXUS_RELEASE_REF,XMESH_QUOTA_V2_METERED_INSTALL,XMESH_QUOTA_V2_WAL_STAGE_AGENT,XMESH_QUOTA_V2_AUTO_RENEW_STAGING bash "$0" "$@"
 fi
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "Usage: XMESH_NODE_RELEASE_REF=<40-hex-reviewed-sha> bash bootstrap.sh https://panel.example.com NODE_ID [node-port]" >&2
@@ -98,20 +98,22 @@ NODE_RELEASE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
   echo "Fresh strict-PQ bootstrap requires XMesh Node v6.0.0." >&2; exit 1;
 }
 AGENT_VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/AGENT_VERSION")"
+METERED_INSTALL="${XMESH_QUOTA_V2_METERED_INSTALL:-0}"
+[[ "$METERED_INSTALL" == 0 || "$METERED_INSTALL" == 1 ]] || { echo "Invalid metered Xray install mode." >&2; exit 2; }
 WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
 WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
 if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]];then
   echo "Invalid quota auto renewal staging flag" >&2;exit 2
 fi
-if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.28 ) ]];then
-  echo "Quota auto renewal requires the explicit control-v6.0.28 WAL staging Agent." >&2;exit 2
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.29 ) ]];then
+  echo "Quota auto renewal requires the explicit control-v6.0.29 WAL staging Agent." >&2;exit 2
 fi
-if [[ "$AGENT_VERSION" == control-v6.0.28 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
-  echo "control-v6.0.28 requires an exact Nexus release revision." >&2
+if [[ "$AGENT_VERSION" == control-v6.0.29 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
+  echo "control-v6.0.29 requires an exact Nexus release revision." >&2
   exit 2
 fi
 if [[ "$WAL_STAGE_AGENT" != 0 || "$AGENT_VERSION" == control-v6.0.25 ]];then
-  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.28 ) || "$WAL_STAGE_AGENT" != 1 ||
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.29 ) || "$WAL_STAGE_AGENT" != 1 ||
         ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
     echo "Experimental WAL/Genesis Agent requires explicit staging and an exact Nexus revision." >&2
     exit 2
@@ -127,6 +129,23 @@ fi
 # disable any working services. The direct installer is an exact no-op on
 # an enrolled artifact; it refuses an uncoordinated identity replacement.
 source "$INSTALL_DIR/deploy/xmesh-pq-install-guard.sh"
+# A verified artifact is still not authorization to serve traffic. Keep the
+# metering installation path isolated until lease and ingress units can take
+# ownership of the data plane without a legacy Xray fallback.
+if [[ "$METERED_INSTALL" == 1 ]]; then
+  [[ "$WAL_STAGE_AGENT" == 0 && "$WAL_AUTO_RENEW" == 0 ]] || exit 2
+  xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
+  if docker inspect xmesh-node >/dev/null 2>&1 ||
+      docker inspect xmesh-managed-xray >/dev/null 2>&1; then
+    echo "Metered Xray first installation requires a clean node." >&2
+    exit 2
+  fi
+  bash "$INSTALL_DIR/deploy/install-metered-xray.sh" "${XMESH_NEXUS_RELEASE_REF:?}"
+elif [[ -e /usr/local/libexec/xmesh-metered-xray || -L /usr/local/libexec/xmesh-metered-xray ]]; then
+  echo "A metered Xray installation exists; refusing legacy startup." >&2
+  exit 2
+fi
+
 xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
 PRODUCT_PREINSTALLED=0
 PRODUCT_ACTIVATION_STATE=fresh
@@ -203,6 +222,10 @@ assert state.get('strictPQEnabled') is True
 assert state.get('automaticClassicalFallback') is False
 PY
 echo "STRICT-PQ GATE PASSED: productionActivation=true strictPQEnabled=true fallback=false"
+if [[ "$METERED_INSTALL" == 1 ]]; then
+  echo "Metered Xray verified, but approved quota services are unavailable. Node startup is blocked." >&2
+  exit 1
+fi
 
 # Persist only non-secret product coordinates for root-owned service units.
 install -d -o root -g root -m 0700 /etc/xmesh-node
