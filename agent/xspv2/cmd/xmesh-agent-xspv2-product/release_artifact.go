@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +22,28 @@ const (
 	releaseArtifactPath     = "/api/v1/node/agent-release-artifact"
 	releaseChunkBytes       = 128 * 1024
 	maxReleaseArtifactBytes = 64 * 1024 * 1024
+)
+
+var releaseCandidatePattern = regexp.MustCompile(`^[1-9][0-9]{0,18}-[0-9a-f]{64}\.binpackage main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
 )
 
 type releaseArtifactRequest struct {
@@ -127,8 +150,36 @@ func lockReleaseDirectory(dir string) (*os.File, error) {
 			return fail(err)
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || st.Uid != 0 || st.Nlink != 1 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		if !ok || st.Uid != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
 			return fail(errors.New("unsafe incomplete release file"))
+		}
+		if st.Nlink == 2 {
+			// SIGKILL can interrupt publication after the atomic hard-link
+			// creates the verified candidate but before the partial is removed.
+			// Only reclaim that exact inode when the other link is a private,
+			// canonically named candidate in THIS locked directory.
+			matched := false
+			for _, sibling := range entries {
+				if !releaseCandidatePattern.MatchString(sibling.Name()) {
+					continue
+				}
+				peer, err := sibling.Info()
+				if err != nil {
+					return fail(err)
+				}
+				peerStat, ok := peer.Sys().(*syscall.Stat_t)
+				if ok && peerStat.Uid == 0 && peerStat.Nlink == 2 &&
+					peerStat.Dev == st.Dev && peerStat.Ino == st.Ino &&
+					peer.Mode().IsRegular() && peer.Mode().Perm() == 0600 {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fail(errors.New("partial release file has unknown hard-link"))
+			}
+		} else if st.Nlink != 1 {
+			return fail(errors.New("unsafe incomplete release link count"))
 		}
 		if err := syscall.Unlinkat(fd, entry.Name()); err != nil {
 			return fail(err)
@@ -138,6 +189,20 @@ func lockReleaseDirectory(dir string) (*os.File, error) {
 		return fail(err)
 	}
 	return lock, nil
+}
+
+// Atomically publish a verified candidate only if the destination does not
+// exist. Rename would silently replace a different inode introduced between
+// Lstat and publication. A hard link fails with EEXIST instead; after a crash
+// lockReleaseDirectory safely removes a leftover link to this same inode.
+func publishReleaseCandidate(temp, final string) error {
+	if err := os.Link(temp, final); err != nil {
+		return fmt.Errorf("release candidate already exists or cannot be published: %w", err)
+	}
+	if err := os.Remove(temp); err != nil {
+		return err
+	}
+	return syncParent(final)
 }
 
 // Stage non-executable bytes only; never touch the enrolled binary, keys,
@@ -223,10 +288,7 @@ func collectReleaseArtifact(dir string, plan releasePlan, rawPlan []byte, fetch 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), final); err != nil {
-		return err
-	}
-	return syncParent(final)
+	return publishReleaseCandidate(tmp.Name(), final)
 }
 
 func downloadStagedRelease(command int64, planPath string) error {
