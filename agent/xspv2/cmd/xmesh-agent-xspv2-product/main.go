@@ -1165,7 +1165,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release|switch-release|confirm-release|resume-activation}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release|switch-release|confirm-release|rollback-release|resume-activation}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1263,6 +1263,18 @@ func main() {
 		}
 		if err := confirmInstalledRelease(*command); err != nil {
 			fmt.Fprintln(os.Stderr, "release confirmation failed:", err)
+			os.Exit(1)
+		}
+	case "rollback-release":
+		flags := flag.NewFlagSet("rollback-release", flag.ExitOnError)
+		command := flags.Int64("command-id", 0, "claimed release command ID")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := rollbackPreparedRelease(*command); err != nil {
+			fmt.Fprintln(os.Stderr, "release rollback refused:", err)
 			os.Exit(1)
 		}
 	case "verify-release-plan":

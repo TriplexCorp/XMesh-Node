@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,9 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"time"
 )
 
@@ -71,47 +68,46 @@ func replacePreparedProduct(dir, installed string, plan releasePlan) error {
 	return atomicWrite(installed, stage, 0755)
 }
 
-// The measured target must confirm itself in a separate process. If contact
-// with Nexus is lost after replacement, the next invocation recognizes both
-// the already installed candidate and its durable old image. It does not
-// blindly roll back a potentially committed remote identity.
+// A supervisor restarts the installed target to confirm the exact running
+// image. Replacement never executes a child process or uses a deadline to
+// infer a remote abort.
 func switchPreparedRelease(command int64) error {
+	cfg, plan, planBytes, err := loadPreparedProduct(command)
+	if err != nil {
+		return err
+	}
+	return publishPreparedProduct(cfg, plan.ActivationSHA256, plan, planBytes)
+}
+
+func rollbackPreparedRelease(command int64) error {
+	cfg, plan, planBytes, err := loadPreparedProduct(command)
+	if err != nil {
+		return err
+	}
+	return abortPreparedProduct(cfg, plan, planBytes)
+}
+
+func loadPreparedProduct(command int64) (productConfig, releasePlan, []byte, error) {
 	if command <= 0 || os.Geteuid() != 0 {
-		return errors.New("release switch requires the installed root Agent and a command ID")
+		return productConfig{}, releasePlan{}, nil, errors.New("release operation requires root and a command ID")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
-		return err
+		return cfg, releasePlan{}, nil, err
 	}
 	if err := verifyEnrolledRelease(cfg, cfg.ReleaseIdentity); err != nil {
-		return err
+		return cfg, releasePlan{}, nil, err
 	}
 	activation, err := originalActivationDigest()
 	if err != nil {
-		return err
+		return cfg, releasePlan{}, nil, err
 	}
-	planBytes, err := preparedReleasePlan(releaseCandidateDir, command)
+	raw, err := preparedReleasePlan(releaseCandidateDir, command)
 	if err != nil {
-		return err
+		return cfg, releasePlan{}, nil, err
 	}
-	plan, err := decodeReleasePlan(planBytes, cfg, command, activation, false)
-	if err != nil {
-		return err
-	}
-	if err := publishPreparedProduct(cfg, activation, plan, planBytes); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	process := exec.CommandContext(ctx, installedProduct, "confirm-release", "--command-id", strconv.FormatInt(command, 10))
-	process.Stderr = os.Stderr
-	if err := process.Run(); err != nil {
-		if abortErr := abortPreparedProduct(cfg, plan, planBytes); abortErr != nil {
-			return fmt.Errorf("target confirmation failed (%v); no authorized rollback: %w", err, abortErr)
-		}
-		return fmt.Errorf("target confirmation failed; restored previous Agent: %w", err)
-	}
-	return nil
+	plan, err := decodeReleasePlan(raw, cfg, command, activation, false)
+	return cfg, plan, raw, err
 }
 
 func abortPreparedProduct(cfg productConfig, plan releasePlan, signedPlan []byte) error {
