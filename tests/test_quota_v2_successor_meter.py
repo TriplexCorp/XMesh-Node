@@ -210,7 +210,17 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             source = "/etc/xray/source-pinned.json"
             old_runtime = ("1" * 64, self.runtime[1], 11111, "2" * 64)
             fresh = self.runtime
-            predecessor = dict(self.old, runtimeId=old_runtime[3])
+            predecessor = dict(self.old, runtimeId=old_runtime[3],
+                               activationReceiptSha256="5" * 64)
+            pinned = "6" * 64
+            binding = ledger.parent / "cap-binding.json"
+            original = successor_meter.wal_transport.observed.canonical({
+                "nodeId": predecessor["nodeId"],
+                "activationReceiptSha256": predecessor["activationReceiptSha256"],
+                "policyPublicKey": pinned,
+            })
+            binding.write_bytes(original)
+            binding.chmod(0o600)
             old_inspect = {
                 "Image": "sha256:" + "3" * 64,
                 "Mounts": [{"Type": "bind", "Destination": "/etc/xray/config.json",
@@ -245,11 +255,13 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
                   mock.patch.object(successor_meter.wal_transport,
                                     "_measure_quarantined_runtime", side_effect=measure) as measuring,
                   mock.patch.object(successor_meter, "_verify_fresh_container_env"),
+                  mock.patch.object(successor_meter.wal_transport, "_panel_pin",
+                                    return_value=pinned),
                   mock.patch.object(successor_meter, "_clean_mount") as clean):
                 def check():
                     return successor_meter.verify_reusable_generation(
                         name, state, predecessor, "xmesh-managed-xray",
-                        "c" * 64, "d" * 64)
+                        "c" * 64, "d" * 64, pinned)
                 self.assertEqual(check(), name)
                 self.assertEqual(measuring.call_count, 3)
                 clean.assert_called_with("/tmp/old-verified-wal",
@@ -267,6 +279,10 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "predecessor mounts"):
                     check()
                 current["Mounts"][0]["Source"] = source
+                binding.write_bytes(b"foreign binding")
+                with self.assertRaisesRegex(ValueError, "foreign signed-cap binding"):
+                    check()
+                binding.write_bytes(original)
                 (ledger / "positive-cap-u101.json").write_text("foreign")
                 with self.assertRaisesRegex(ValueError, "signed spend or WAL"):
                     check()
