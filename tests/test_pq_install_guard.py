@@ -170,8 +170,8 @@ exit 77
             (state / 'active.json').symlink_to('missing-target')
             marker.unlink()
             self.assertEqual(run().returncode, 2)
-            self.assertEqual(calls.read_text().splitlines(), ['verify-active'])
-            calls.unlink()
+            # A symlink is refused before invoking any Agent command.
+            self.assertFalse(calls.exists())
             (state / 'active.json').unlink()
             original.unlink()
             self.assertEqual(run().returncode, 2)
