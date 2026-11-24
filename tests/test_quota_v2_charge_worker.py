@@ -48,9 +48,14 @@ class ChargeWorkerTests(unittest.TestCase):
             (dict(before, State=dict(before["State"],
                                     StartedAt="2026-11-24T07:00:01Z")), wal),
             (before, "/var/lib/different-wal"),
+            (dict(before, Id=None), wal),
+            (dict(before, Id="untrusted-name"), wal),
             (dict(before, State={"Pid": 23456}), wal),
             (dict(before, State={"Pid": 0,
                                  "StartedAt": before["State"]["StartedAt"]}), wal),
+            (dict(before, State=dict(before["State"],
+                                    StartedAt="0001-01-01T00:00:00Z")), wal),
+            (before, "relative-ledger"),
         ):
             with (
                 self.subTest(current=current, mount=mount),
