@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 import charge_worker as worker
 import quarantine_policy as quarantine
 import successor_positive
+import vless_ingress
 import wal_transport
 
 
@@ -185,6 +186,7 @@ class ChargeWorkerTests(unittest.TestCase):
         observed = mock.Mock()
         observed.admission.side_effect = ValueError("invalid Genesis candidate")
         with (
+            tempfile.TemporaryDirectory() as directory,
             mock.patch.dict(os.environ, {
                 "XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
                 "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
@@ -193,11 +195,17 @@ class ChargeWorkerTests(unittest.TestCase):
             mock.patch.object(worker, "run", observed.charge),
             mock.patch.object(worker.renewal_worker, "activate_initial_cap", observed.admission),
         ):
-            with self.assertRaisesRegex(ValueError, "invalid Genesis candidate"):
+            marker = Path(directory) / "staging"
+            marker.touch(mode=0o600)
+            with (
+                mock.patch.object(vless_ingress, "STAGING_MARKER", str(marker)),
+                self.assertRaisesRegex(ValueError, "invalid Genesis candidate"),
+            ):
                 worker.renewal_worker.run("https://isolated.test", 42, "/private/state", "/private/socket")
         self.assertEqual(observed.mock_calls, [
             mock.call.charge("https://isolated.test", 42, "/private/state", set()),
-            mock.call.admission("https://isolated.test", 42, "/private/state", "/private/socket"),
+            mock.call.admission("https://isolated.test", 42, "/private/state", "/private/socket",
+                                blocked_users=set()),
         ])
 
     def test_batch_boundaries_never_split_durable_wal_lines(self):
