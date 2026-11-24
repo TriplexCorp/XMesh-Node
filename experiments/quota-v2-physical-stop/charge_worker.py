@@ -332,6 +332,8 @@ def _verify_charging_runtime_unchanged(container_name, before, wal_root, runtime
     old_state = before.get("State") if isinstance(before, dict) else None
     new_state = current.get("State") if isinstance(current, dict) else None
     if (not isinstance(old_state, dict) or not isinstance(new_state, dict)
+            or old_state.get("Running") is not True
+            or new_state.get("Running") is not True
             or not isinstance(before.get("Id"), str)
             or caps.HEX64.fullmatch(before["Id"]) is None
             or before["Id"] != current.get("Id")
