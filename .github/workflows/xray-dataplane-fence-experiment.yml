@@ -98,6 +98,42 @@ jobs:
           XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: "1"
         run: python3 experiments/xray-dataplane-fence/test_xray_patched_crash.py /tmp/xmesh-xray-fence-experiment
 
+      - name: Verify real Xray production role gate without a staging fallback
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          binary=/tmp/xmesh-xray-fence-experiment
+          qualification=/var/lib/xmesh-metered-xray
+          test ! -e "$qualification"
+          role() {
+            sudo env -i PATH=/usr/bin:/bin XMESH_QUOTA_V2_RUNTIME_ROLE=ingress \
+              XMESH_QUOTA_INGRESS_STATE=/var/lib/xmesh-xray-sync "$@" "$binary" version
+          }
+          if role; then
+            echo 'Explicit production role accepted without qualification.' >&2
+            exit 1
+          fi
+          sudo install -d -o root -g root -m 0700 "$qualification"
+          trap 'sudo rm -rf -- "$qualification"' EXIT
+          revision="$(git rev-parse HEAD)"
+          digest="$(sha256sum "$binary" | cut -d ' ' -f1)"
+          # Local disposable fixture only: this is not a signed release or
+          # a traffic admission test. No network listener is opened.
+          printf 'nexusRevision=%s\nnodeSourceRevision=%s\nupstreamSourceRevision=%s\npatchSourceTree=%s\nartifactSha256=%s\n' \
+            "$revision" "$revision" a4a3dff5b20c2faae567b742c172c7b95e75c083 \
+            "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" "$digest" \
+            | sudo tee "$qualification/identity" >/dev/null
+          sudo chmod 0600 "$qualification/identity"
+          role
+          if role GITHUB_ACTIONS=true; then
+            echo 'Production role accepted a CI bypass flag.' >&2
+            exit 1
+          fi
+          sudo sh -c 'printf "unexpected=1\n" >> "$1"' sh "$qualification/identity"
+          if role; then
+            echo 'Production role accepted a tampered qualification.' >&2
+            exit 1
+          fi
       - name: Independently reproduce the exact tested metered Xray candidate
         env:
           REVIEWED_XRAY_REVISION: a4a3dff5b20c2faae567b742c172c7b95e75c083
