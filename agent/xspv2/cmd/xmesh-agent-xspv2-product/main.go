@@ -1046,7 +1046,8 @@ func verifyActivationReleaseBinding(raw []byte, active activeState, running rele
 // paths, never an arbitrary API endpoint or caller-supplied redirect.
 func allowedProductTunnelPath(path string) bool {
 	switch path {
-	case "/api/v1/metrics/ingest",
+	case activationRecoveryPath,
+		"/api/v1/metrics/ingest",
 		"/api/v1/node/heartbeat",
 		"/api/v1/node/restart/poll",
 		"/api/v1/node/restart/ack",
@@ -1151,7 +1152,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release|resume-activation}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1176,6 +1177,16 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(`{"strictPQEnabled":true,"automaticClassicalFallback":false}`)
+	case "resume-activation":
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "resume-activation accepts no arguments")
+			os.Exit(2)
+		}
+		if err := recoverLostActivation(); err != nil {
+			fmt.Fprintln(os.Stderr, "strict-PQ activation recovery failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println(`{"status":"strict-pq-active","reusedOriginalRequest":true}`)
 	case "fetch-release-plan":
 		flags := flag.NewFlagSet("fetch-release-plan", flag.ExitOnError)
 		command := flags.Int64("command-id", 0, "claimed release command ID")
