@@ -109,10 +109,7 @@ func persistReleasePreflight(dir string, plan releasePlan, signed []byte) error 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), destination); err != nil {
-		return err
-	}
-	return syncParent(destination)
+	return publishImmutableReleaseFile(tmp.Name(), destination)
 }
 
 // Re-check the exact immutable plan over the current authenticated XSP/2
