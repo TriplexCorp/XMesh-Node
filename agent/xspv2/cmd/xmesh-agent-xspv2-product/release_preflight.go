@@ -17,17 +17,17 @@ import (
 // A durable evidence checkpoint, NOT an authority to execute or promote
 // the downloaded binary. Its current identity is deliberately immutable.
 type preparedRelease struct {
-	Schema                          string          `json:"schema"`
-	NodeID                          int64           `json:"nodeId"`
-	CommandID                       int64           `json:"commandId"`
-	Current                         releaseIdentity `json:"current"`
-	Target                          releaseIdentity `json:"target"`
-	ActivationSHA256                string          `json:"activationSha256"`
-	SignedPlanSHA256                string          `json:"signedPlanSha256"`
-	ArtifactFile                    string          `json:"artifactFile"`
-	PreflightOnly                   bool            `json:"preflightOnly"`
-	RuntimeSwitched                 bool            `json:"runtimeSwitched"`
-	ProductionActivationAuthorized  bool            `json:"productionActivationAuthorized"`
+	Schema                         string          `json:"schema"`
+	NodeID                         int64           `json:"nodeId"`
+	CommandID                      int64           `json:"commandId"`
+	Current                        releaseIdentity `json:"current"`
+	Target                         releaseIdentity `json:"target"`
+	ActivationSHA256               string          `json:"activationSha256"`
+	SignedPlanSHA256               string          `json:"signedPlanSha256"`
+	ArtifactFile                   string          `json:"artifactFile"`
+	PreflightOnly                  bool            `json:"preflightOnly"`
+	RuntimeSwitched                bool            `json:"runtimeSwitched"`
+	ProductionActivationAuthorized bool            `json:"productionActivationAuthorized"`
 }
 
 func candidateFileName(plan releasePlan) string {
@@ -42,8 +42,8 @@ func preflightRecord(plan releasePlan, signed []byte) preparedRelease {
 		Current: plan.Current, Target: plan.Target,
 		ActivationSHA256: plan.ActivationSHA256,
 		SignedPlanSHA256: hex.EncodeToString(planDigest[:]),
-		ArtifactFile: candidateFileName(plan),
-		PreflightOnly: true, RuntimeSwitched: false,
+		ArtifactFile:     candidateFileName(plan),
+		PreflightOnly:    true, RuntimeSwitched: false,
 		ProductionActivationAuthorized: false,
 	}
 }

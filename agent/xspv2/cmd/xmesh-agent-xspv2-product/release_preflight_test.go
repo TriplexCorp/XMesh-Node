@@ -20,9 +20,9 @@ func TestImmutableReleasePreflightRejectsMutationAndSurvivesRetry(t *testing.T) 
 	digest := sha256.Sum256(payload)
 	plan := releasePlan{
 		NodeID: 7, CommandID: 42,
-		Current: releaseIdentity{Version:"control-v6.0.24",SourceRevision: "a",ArtifactSHA256:"b"},
-		Target: releaseIdentity{Version:"control-v6.0.27",SourceRevision: "c",ArtifactSHA256:hex.EncodeToString(digest[:])},
-		ActivationSHA256:"d", ExpiresAtMS: time.Now().Add(time.Minute).UnixMilli(),
+		Current:          releaseIdentity{Version: "control-v6.0.24", SourceRevision: "a", ArtifactSHA256: "b"},
+		Target:           releaseIdentity{Version: "control-v6.0.27", SourceRevision: "c", ArtifactSHA256: hex.EncodeToString(digest[:])},
+		ActivationSHA256: "d", ExpiresAtMS: time.Now().Add(time.Minute).UnixMilli(),
 	}
 	signed := []byte("real call verifies signed plan first")
 	if err := privateReleaseDirectory(dir); err != nil {
@@ -85,30 +85,30 @@ func TestReleasePreflightPreservesExistingSymlinkAndExpiredRecord(t *testing.T) 
 	}
 	payload := []byte("verified bytes")
 	digest := sha256.Sum256(payload)
-	plan := releasePlan{NodeID:1,CommandID:1,Target:releaseIdentity{ArtifactSHA256:hex.EncodeToString(digest[:])},
-		ExpiresAtMS:time.Now().Add(time.Minute).UnixMilli()}
-	if err := os.WriteFile(filepath.Join(dir,candidateFileName(plan)),payload,0600); err != nil {
+	plan := releasePlan{NodeID: 1, CommandID: 1, Target: releaseIdentity{ArtifactSHA256: hex.EncodeToString(digest[:])},
+		ExpiresAtMS: time.Now().Add(time.Minute).UnixMilli()}
+	if err := os.WriteFile(filepath.Join(dir, candidateFileName(plan)), payload, 0600); err != nil {
 		t.Fatal(err)
 	}
 	external := filepath.Join(t.TempDir(), "external")
-	if err := os.WriteFile(external,[]byte("preserve"),0600); err != nil {
+	if err := os.WriteFile(external, []byte("preserve"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "prepared-release.json")
-	if err := os.Symlink(external,link); err != nil {
+	if err := os.Symlink(external, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := persistReleasePreflight(dir,plan,[]byte("signed")); err == nil {
+	if err := persistReleasePreflight(dir, plan, []byte("signed")); err == nil {
 		t.Fatal("symlink preflight marker accepted")
 	}
-	if content,err:=os.ReadFile(external);err!=nil||string(content)!="preserve" {
+	if content, err := os.ReadFile(external); err != nil || string(content) != "preserve" {
 		t.Fatal("rejected preflight modified external data")
 	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
 	}
-	plan.ExpiresAtMS=time.Now().Add(-time.Second).UnixMilli()
-	if err := persistReleasePreflight(dir,plan,[]byte("signed")); err == nil {
+	plan.ExpiresAtMS = time.Now().Add(-time.Second).UnixMilli()
+	if err := persistReleasePreflight(dir, plan, []byte("signed")); err == nil {
 		t.Fatal("expired preflight signed plan accepted")
 	}
 }
