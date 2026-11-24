@@ -204,12 +204,16 @@ def _verified_old_wal_charge_heads(state_fd, node, user, old, checkpoint, pinned
         signed_aliases = {alias["email"] for alias in old["aliasScopes"]}
         expected = {}
         rows = checkpoint.get("inboundMeters")
-        if not isinstance(rows, list):
-            raise ValueError("missing nonfinal old WAL per-alias observations")
+        if not isinstance(rows, list) or len(rows) != len(signed_aliases):
+            raise ValueError("missing or ambiguous nonfinal old WAL per-alias observations")
+        observed_aliases = set()
         for row in rows:
-            if (not isinstance(row, dict) or
-                    not isinstance(row.get("email"), str)):
-                raise ValueError("invalid old WAL inbound row identity")
+            if (not isinstance(row, dict)
+                    or not isinstance(row.get("email"), str)
+                    or row["email"] not in signed_aliases
+                    or row["email"] in observed_aliases):
+                raise ValueError("duplicate or foreign old WAL inbound row identity")
+            observed_aliases.add(row["email"])
             for direction in ("uplink", "downlink"):
                 value = row.get(direction + "Bytes")
                 if type(value) is not int or not 0 <= value <= (1 << 63) - 1:
