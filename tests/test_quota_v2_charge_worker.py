@@ -25,6 +25,54 @@ def signed(doc):
 
 
 class ChargeWorkerTests(unittest.TestCase):
+    def test_empty_wal_still_requires_same_live_xray_after_sync(self):
+        if os.geteuid() != 0:
+            self.skipTest("installed root-owned Xray state and WAL")
+        with tempfile.TemporaryDirectory(prefix="xmesh-charge-runtime-") as root:
+            wal = Path(root) / "wal"
+            state = Path(root) / "state"
+            wal.mkdir(mode=0o700)
+            state.mkdir(mode=0o700)
+            initial = {
+                "Id": "a" * 64,
+                "State": {"Pid": os.getpid(),
+                          "StartedAt": "2026-11-24T07:00:00Z"},
+            }
+            changed = dict(initial, Id="b" * 64)
+            env = {
+                "XMESH_QUOTA_V2_AUTO_RENEW_STAGING": "1",
+                "XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY": "1",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(wal_transport, "run"),
+                mock.patch.object(wal_transport, "_bound_journal",
+                                  side_effect=[(initial, str(wal)),
+                                               (changed, str(wal))]) as inspect,
+                mock.patch.object(worker.journal, "_verify_mount"),
+                mock.patch.object(worker.registry, "verify_meter_inventory",
+                                  return_value=({}, {})),
+                mock.patch.object(wal_transport, "_post") as post,
+            ):
+                with self.assertRaisesRegex(
+                        ValueError, "Xray or journal changed during authenticated WAL charging"):
+                    worker.run("https://isolated.test", 7, str(state), set())
+                self.assertEqual(inspect.call_count, 2)
+                post.assert_not_called()
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(wal_transport, "run"),
+                mock.patch.object(wal_transport, "_bound_journal",
+                                  return_value=(initial, str(wal))),
+                mock.patch.object(worker.journal, "_verify_mount"),
+                mock.patch.object(worker.registry, "verify_meter_inventory",
+                                  return_value=({}, {})),
+                mock.patch.object(wal_transport, "_post") as post,
+            ):
+                self.assertEqual(
+                    worker.run("https://isolated.test", 7, str(state), set()), 0)
+                post.assert_not_called()
+
     def test_wal_charge_refuses_replaced_docker_kernel_or_private_journal(self):
         before = {"Id": "a" * 64,
                   "State": {"Pid": 23456,
