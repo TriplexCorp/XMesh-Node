@@ -8,7 +8,7 @@ export LC_ALL=C
 
 if [[ $EUID -ne 0 ]]; then
   command -v sudo >/dev/null 2>&1 || { echo "Run as root (sudo is unavailable)." >&2; exit 1; }
-  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF bash "$0" "$@"
+  exec sudo --preserve-env=XMESH_NODE_RELEASE_REF,XMESH_NEXUS_RELEASE_REF,XMESH_QUOTA_V2_WAL_STAGE_AGENT,XMESH_QUOTA_V2_AUTO_RENEW_STAGING bash "$0" "$@"
 fi
 if [[ $# -lt 2 || $# -gt 3 ]]; then
   echo "Usage: XMESH_NODE_RELEASE_REF=<40-hex-reviewed-sha> bash bootstrap.sh https://panel.example.com NODE_ID [node-port]" >&2
@@ -39,6 +39,15 @@ fi
   echo "Port must be 1-65535." >&2; exit 2;
 }
 NODE_PORT="$((10#$NODE_PORT))"
+
+# A cold install replaces systemd units and re-enrolls the Node. With a
+# signed spending ledger that operation needs an explicit migration path.
+for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-quarantine-envelope.json,genesis-reservation-prepared-u*.json,genesis-reservation-confirmed-u*.json,genesis-positive-cap-u*.json,genesis-renewal-u*.json,genesis-renewal-request-u*.json,calendar-*-u*.json,wal-cap-u*.json,wal-charge-*.json,ingress-u*,xmesh-quota-u*}; do
+  if [[ -e "$quota_evidence" || -L "$quota_evidence" ]]; then
+    echo "Quota V2 spending state exists; cold bootstrap is blocked before changing the installed Agent." >&2
+    exit 2
+  fi
+done
 
 apt_get() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"; }
 command -v apt-get >/dev/null 2>&1 || { echo "Automatic bootstrap supports Ubuntu with apt only." >&2; exit 1; }
@@ -88,7 +97,45 @@ NODE_RELEASE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
 [[ "$(tr -d '\r\n' < "$INSTALL_DIR/VERSION")" == "6.0.0" ]] || {
   echo "Fresh strict-PQ bootstrap requires XMesh Node v6.0.0." >&2; exit 1;
 }
+AGENT_VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/AGENT_VERSION")"
+WAL_STAGE_AGENT="${XMESH_QUOTA_V2_WAL_STAGE_AGENT:-0}"
+WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
+if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]];then
+  echo "Invalid quota auto renewal staging flag" >&2;exit 2
+fi
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.27 ) ]];then
+  echo "Quota auto renewal requires the explicit control-v6.0.27 WAL staging Agent." >&2;exit 2
+fi
+if [[ "$AGENT_VERSION" == control-v6.0.27 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
+  echo "control-v6.0.27 requires an exact Nexus release revision." >&2
+  exit 2
+fi
+if [[ "$WAL_STAGE_AGENT" != 0 || "$AGENT_VERSION" == control-v6.0.25 ]];then
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.27 ) || "$WAL_STAGE_AGENT" != 1 ||
+        ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
+    echo "Experimental WAL/Genesis Agent requires explicit staging and an exact Nexus revision." >&2
+    exit 2
+  fi
+  for path in /usr/local/sbin/xmesh-node-control /etc/systemd/system/xmesh-node-control.{service,timer};do
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+      echo "WAL staging requires a fresh test node without an existing control worker." >&2; exit 2
+    }
+  done
+fi
 
+# A bound product must prove the candidate is byte-identical BEFORE we
+# disable any working services. The direct installer is an exact no-op on
+# an enrolled artifact; it refuses an uncoordinated identity replacement.
+source "$INSTALL_DIR/deploy/xmesh-pq-install-guard.sh"
+xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
+PRODUCT_PREINSTALLED=0
+PRODUCT_ACTIVATION_STATE=fresh
+if xmesh_product_binding_exists /var/lib/xmesh-agent/product; then
+  bash "$INSTALL_DIR/deploy/install-xsp-v2-product-client.sh" "$NODE_RELEASE_SHA"
+  PRODUCT_PREINSTALLED=1
+  # This must complete before ANY running services are stopped.
+  PRODUCT_ACTIVATION_STATE="$(xmesh_verify_or_resume_enrolled_product /var/lib/xmesh-agent/product /usr/local/bin/xmesh-agent-xspv2-product "$PANEL" "$NODE")"
+fi
 echo "XMesh Node reviewed revision: $NODE_RELEASE_SHA"
 echo "Enforcing pre-activation fail-closed state..."
 # An upgrade/retry must never leave an older managed runtime serving while the
@@ -97,6 +144,7 @@ for unit in \
   xmesh-node-metrics.timer xmesh-node-metrics.service \
   xmesh-node-control.timer xmesh-node-control.service \
   xmesh-xray-sync.timer xmesh-xray-sync.service \
+  xmesh-quota-v2-renewal.timer xmesh-quota-v2-renewal.service \
   xmesh-node-user-meter.timer xmesh-node-user-meter.service \
   xmesh-node-tls-renew.timer xmesh-node-tls-renew.service \
   xmesh-geodata-sync.timer xmesh-geodata-sync.service; do
@@ -110,13 +158,16 @@ for container in xmesh-node xmesh-managed-xray; do
 done
 
 # Install the product client before consuming the short-lived owner token.
-bash "$INSTALL_DIR/deploy/install-xsp-v2-product-client.sh" "$NODE_RELEASE_SHA"
+if [[ "$PRODUCT_PREINSTALLED" == 0 ]]; then
+  bash "$INSTALL_DIR/deploy/install-xsp-v2-product-client.sh" "$NODE_RELEASE_SHA"
+fi
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo "strict-PQ product client installation failed." >&2; exit 1; }
 
-if "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null 2>&1; then
-  echo "Existing strict-PQ activation receipt verified."
+if [[ "$PRODUCT_ACTIVATION_STATE" == active || "$PRODUCT_ACTIVATION_STATE" == resumed ]]; then
+  echo "Existing original strict-PQ activation receipt verified or recovered."
 else
+  [[ "$PRODUCT_ACTIVATION_STATE" == fresh ]] || { echo "Invalid PQ activation state" >&2; exit 2; }
   [[ -r /dev/tty ]] || { echo "Interactive TTY required for secure one-time enrollment token entry." >&2; exit 1; }
   TOKEN_FILE="$(mktemp /run/xmesh-v6-enroll.XXXXXXXX)"
   chmod 0600 "$TOKEN_FILE"
@@ -217,7 +268,16 @@ bash "$INSTALL_DIR/deploy/install-v6-strict-operational-agents.sh" "$PANEL" "$NO
 "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null
 systemctl is-enabled --quiet xmesh-xray-sync.timer
 systemctl is-enabled --quiet xmesh-node-metrics.timer
-systemctl is-enabled --quiet xmesh-node-control.timer
+if [[ "$WAL_STAGE_AGENT" == 0 ]];then
+  systemctl is-enabled --quiet xmesh-node-control.timer
+else
+  if systemctl is-enabled --quiet xmesh-node-control.timer ||
+     systemctl is-active --quiet xmesh-node-control.service;then
+    echo "Independent control worker must stay disabled on a WAL staging Node." >&2
+    exit 1
+  fi
+  echo "Staged WAL qualification services installed; cold Xray remains stopped."
+fi
 
 echo
 echo "XMesh Node v6.0.0 POSTQUANTUM installation complete."

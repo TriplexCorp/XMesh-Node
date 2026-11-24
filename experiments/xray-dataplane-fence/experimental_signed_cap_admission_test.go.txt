@@ -1,0 +1,737 @@
+package xmeshdrain
+
+import (
+    "bytes"
+    "context"
+    "crypto/ed25519"
+    "crypto/rand"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "os"
+    "path/filepath"
+    "strings"
+    "sync"
+    "testing"
+    "time"
+
+    xstats "github.com/xtls/xray-core/app/stats"
+    "github.com/xtls/xray-core/features/stats"
+)
+
+func signedCapTestFixture(t *testing.T) (string,interface{
+    GetCounter(string) stats.Counter
+    RegisterCounter(string)(stats.Counter,error)
+},signedCapPayload,signedCapContext,ed25519.PublicKey,ed25519.PrivateKey) {
+    t.Helper()
+    // Only the cross-process PostgreSQL job uses a stable, root-private
+    // WAL directory, so a genuinely NEW Go Xray process can verify prior
+    // history after the first process exits. All normal unit tests retain
+    // independent t.TempDir() sandboxes.
+    var dir string
+    var manager *xstats.Manager
+    root:=os.Getenv("XMESH_CI_QUOTA_PERSIST_DIR")
+    if root!="" && t.Name()=="TestV2SignedRealPostgreSQLTwoNodeProcess" &&
+        os.Getenv("XMESH_AUDIT_DISPOSABLE")=="1" {
+        dir=filepath.Join(root,"node-"+os.Getenv("XMESH_CI_QUOTA_NODE"))
+        if err:=os.MkdirAll(dir,0700);err!=nil{t.Fatal(err)}
+        if err:=os.Chmod(dir,0700);err!=nil{t.Fatal(err)}
+        resetGate()
+        observed.Lock()
+        observed.manager=nil
+        observed.directory=""
+        observed.runtimeID=""
+        observed.Unlock()
+        if err:=configureObservedCheckpoint(dir);err!=nil{t.Fatal(err)}
+        var err error
+        manager,err=xstats.NewManager(context.Background(),&xstats.Config{})
+        if err!=nil{t.Fatal(err)}
+        BindStatsManager(manager)
+    } else {
+        dir,manager=setupUnfencedMeter(t)
+    }
+    gate.Lock()
+    run:=gate.runtimeID
+    gate.Unlock()
+    now:=experimentalCapClockMs()
+    aliases:=[]signedCapAlias{
+        {Email:capCDN,Class:"cdn"},
+        {Email:capMain,Class:"main"},
+    }
+    p:=signedCapPayload{
+        SchemaVersion:1,Kind:signedCapKind,NodeID:47,UserID:101,
+        ActivationReceiptSHA256:strings.Repeat("a",64),
+        RuntimeID:run,PolicySHA256:strings.Repeat("b",64),
+        AccountEpoch:"11111111-1111-4111-8111-111111111111",
+        MeterEpoch:"22222222-2222-4222-8222-222222222222",
+        ReservationID:"33333333-3333-4333-8333-333333333333",
+        ReservationRevision:3,Nonce:strings.Repeat("c",64),
+        InventoryTailDigest:strings.Repeat("0",64),
+        WitnessedWalBytes:0,WitnessedCdnBytes:0,
+        SharedCeilingBytes:100,NodeCeilingBytes:70,CdnCeilingBytes:20,
+        AliasScopes:aliases,IssuedAtMs:now-1000,
+        InstallBeforeMs:now+60_000,ValidUntilMs:now+3600_000,
+        CanSpend:true,CanStart:false,CanResume:false,
+        FinalMeterVerified:false,RefundableBytes:0,
+    }
+    ctx:=signedCapContext{
+        NodeID:p.NodeID,UserID:p.UserID,
+        ActivationReceiptSHA256:p.ActivationReceiptSHA256,
+        RuntimeID:run,PolicySHA256:p.PolicySHA256,
+        AccountEpoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,
+        ReservationRevision:p.ReservationRevision,
+        InventoryTailDigest:p.InventoryTailDigest,
+        Aliases:append([]signedCapAlias(nil),aliases...),FirstGenesisIndependentlyProved:true,
+        Current:func(email,direction string)(uint64,error){
+            c:=manager.GetCounter(rawMeterName(email,direction))
+            if c==nil{return 0,nil}
+            n:=c.Value()
+            if n<0{return 0,errors.New("negative live Xray meter")}
+            return uint64(n),nil
+        },
+    }
+    pub,priv,err:=ed25519.GenerateKey(rand.Reader)
+    if err!=nil {t.Fatal(err)}
+    gate.Lock()
+    experimentalByteCaps.strict=true
+    experimentalByteCaps.users=nil
+    gate.Unlock()
+    t.Cleanup(func(){
+        gate.Lock()
+        experimentalByteCaps.strict=false
+        experimentalByteCaps.users=nil
+        gate.Unlock()
+    })
+    return dir,manager,p,ctx,pub,priv
+}
+
+func signedCapTestEnvelope(t *testing.T,p signedCapPayload,priv ed25519.PrivateKey) []byte {
+    t.Helper()
+    // Canonical map encoding matches the offline Python sorted-key
+    // encoding used for future Node/Nexus cross-language verification.
+    typed,err:=json.Marshal(p)
+    if err!=nil{t.Fatal(err)}
+    var value map[string]interface{}
+    if err:=json.Unmarshal(typed,&value);err!=nil{t.Fatal(err)}
+    canonical,err:=json.Marshal(value)
+    if err!=nil{t.Fatal(err)}
+    signature:=ed25519.Sign(priv,append([]byte(signedCapDomain),canonical...))
+    raw,err:=json.Marshal(map[string]interface{}{
+        "algorithm":"Ed25519","payload":value,"signature":hex.EncodeToString(signature),
+    })
+    if err!=nil{t.Fatal(err)}
+    return append(raw,'\n')
+}
+
+func TestV2SignedFirstGenesisCapBindsExistingReservationAndRealWAL(t *testing.T) {
+    dir,manager,p,expected,pub,priv:=signedCapTestFixture(t)
+    gate.Lock()
+    noGrant:=checkSignedCapBeforeRegisterLocked(capMain)
+    gate.Unlock()
+    if noGrant==nil{t.Fatal("user inbound opened before signed cap")}
+    raw:=signedCapTestEnvelope(t,p,priv)
+    if err:=installSignedFirstGenesisCap(raw,pub,expected);err!=nil{
+        t.Fatalf("valid process-bound signed cap rejected: %v",err)
+    }
+    saved:=filepath.Join(dir,"positive-cap-u101.json")
+    contents,err:=os.ReadFile(saved)
+    if err!=nil || !bytes.Equal(contents,raw){
+        t.Fatal("signed admission not persisted before use")
+    }
+    st,err:=os.Stat(saved)
+    if err!=nil || st.Mode().Perm()!=0600 {t.Fatal("unsafe stored signed permit")}
+    gate.Lock()
+    admitMain:=checkSignedCapBeforeRegisterLocked(capMain)
+    admitCDN:=checkSignedCapBeforeRegisterLocked(capCDN)
+    admitForeign:=checkSignedCapBeforeRegisterLocked("xmesh-u101--other")
+    gate.Unlock()
+    if admitMain!=nil||admitCDN!=nil||admitForeign==nil{
+        t.Fatalf("alias admission: main=%v CDN=%v unknown=%v",
+            admitMain,admitCDN,admitForeign)
+    }
+    up:=newCapCounter(t,manager,capMain,"uplink")
+    down:=newCapCounter(t,manager,capMain,"downlink")
+    cdn:=newCapCounter(t,manager,capCDN,"downlink")
+    for _,w:=range []struct{c stats.Counter;email,dir string;n int64}{
+        {up,capMain,"uplink",20},{down,capMain,"downlink",30},
+        {cdn,capCDN,"downlink",20},
+    }{
+        if !capAttempt(t,w.c,w.email,w.dir,w.n){
+            t.Fatal("valid counted Xray write was rejected")
+        }
+    }
+    if capAttempt(t,cdn,capCDN,"downlink",1) {
+        t.Fatal("signed CDN reservation overspent")
+    }
+    if capAttempt(t,up,capMain,"uplink",1){
+        t.Fatal("signed Node 70-byte budget overspent through uplink")
+    }
+    all,cdnUsed:=capValues(t)
+    if all!=70 || cdnUsed!=20 {t.Fatalf("signed spend diverged: %d/%d",all,cdnUsed)}
+    if up.Value()!=20 || down.Value()!=30 || cdn.Value()!=20 {
+        t.Fatal("Xray raw byte counters differ from signed cap spend")
+    }
+    // A lost local acknowledgment can be recovered without refilling the
+    // exhausted permit, even after it has written WAL.
+    if err:=installSignedFirstGenesisCap(raw,pub,expected);err!=nil {
+        t.Fatalf("exact first-cap replay could not recover acknowledgment: %v",err)
+    }
+    if capAttempt(t,up,capMain,"uplink",1) {
+        t.Fatal("signed cap replay reopened exhausted reservation")
+    }
+    if st,err:=os.Stat(meterTestFile(t,dir,capMain,"uplink"));err!=nil||st.Size()==0{
+        t.Fatal("positive admitted byte was not fsynced to real WAL")
+    }
+}
+
+func TestV2SignedFirstGenesisCapNegativeCryptographicAndContextMatrix(t *testing.T) {
+    mutations:=[]struct{
+        name string
+        change func(*signedCapPayload)
+    }{
+        {"wrong-node",func(p *signedCapPayload){p.NodeID++}},
+        {"wrong-user",func(p *signedCapPayload){p.UserID++}},
+        {"other-process",func(p *signedCapPayload){p.RuntimeID=strings.Repeat("f",64)}},
+        {"policy-switch",func(p *signedCapPayload){p.PolicySHA256=strings.Repeat("f",64)}},
+        {"wrong-activation",func(p *signedCapPayload){p.ActivationReceiptSHA256=strings.Repeat("f",64)}},
+        {"wrong-epoch",func(p *signedCapPayload){p.AccountEpoch="ffffffff-ffff-4fff-8fff-ffffffffffff"}},
+        {"wrong-meter",func(p *signedCapPayload){p.MeterEpoch="ffffffff-ffff-4fff-8fff-ffffffffffff"}},
+        {"wrong-lease",func(p *signedCapPayload){p.ReservationID="ffffffff-ffff-4fff-8fff-ffffffffffff"}},
+        {"revision-replay",func(p *signedCapPayload){p.ReservationRevision--}},
+        {"unknown-alias",func(p *signedCapPayload){p.AliasScopes[0].Email="xmesh-u101--new"}},
+        {"reclassified-cdn",func(p *signedCapPayload){p.AliasScopes[0].Class="main"}},
+        {"duplicate-alias",func(p *signedCapPayload){p.AliasScopes[0].Email=p.AliasScopes[1].Email}},
+        {"expired",func(p *signedCapPayload){p.InstallBeforeMs=p.IssuedAtMs+1}},
+        {"too-long-install",func(p *signedCapPayload){p.InstallBeforeMs=p.IssuedAtMs+120001}},
+        {"too-long-lease",func(p *signedCapPayload){p.ValidUntilMs=p.IssuedAtMs+24*60*60*1000+1}},
+        {"claimed-start",func(p *signedCapPayload){p.CanStart=true}},
+        {"claimed-resume",func(p *signedCapPayload){p.CanResume=true}},
+        {"claimed-refund",func(p *signedCapPayload){p.RefundableBytes=1}},
+        {"negative-authority",func(p *signedCapPayload){p.CanSpend=false}},
+        {"historical-spend",func(p *signedCapPayload){p.WitnessedWalBytes=1}},
+        {"oversized-reserve",func(p *signedCapPayload){p.SharedCeilingBytes=maxSignedCapGrant+1}},
+        {"empty-node-cap",func(p *signedCapPayload){p.NodeCeilingBytes=0}},
+    }
+    for _,tc:=range mutations {
+        t.Run(tc.name,func(t *testing.T){
+            dir,_,p,ctx,pub,priv:=signedCapTestFixture(t)
+            tc.change(&p)
+            signed:=signedCapTestEnvelope(t,p,priv)
+            if err:=installSignedFirstGenesisCap(signed,pub,ctx);err==nil{
+                t.Fatalf("invalid SIGNED %s cap granted bytes",tc.name)
+            }
+            if _,err:=os.Stat(filepath.Join(dir,"positive-cap-u101.json"));
+                !os.IsNotExist(err) {
+                t.Fatal("rejected signed packet created grant file")
+            }
+        })
+    }
+}
+
+func TestV2SignedFirstGenesisCapRefusesForeignSignerAndAmbiguousJSON(t *testing.T){
+    _,_,p,ctx,pub,priv:=signedCapTestFixture(t)
+    original:=signedCapTestEnvelope(t,p,priv)
+    foreign,_,err:=ed25519.GenerateKey(rand.Reader)
+    if err!=nil{t.Fatal(err)}
+    invalid:=[][]byte{
+        bytes.TrimSuffix(original,[]byte{'\n'}),
+        append(append([]byte{},original...),[]byte("{}")...),
+        bytes.Replace(original,[]byte(`"canStart":false`),
+            []byte(`"canStart":true,"canStart":false`),1),
+        bytes.Replace(original,[]byte(`"algorithm":"Ed25519"`),
+            []byte(`"algorithm":"none"`),1),
+        bytes.Replace(original,[]byte(`"schemaVersion":1`),
+            []byte(`"schemaVersion":1,"unexpected":0`),1),
+        bytes.Replace(original,[]byte(`"nodeId":47`),
+            []byte(`"nodeId":4.7e1`),1),
+    }
+    if err:=installSignedFirstGenesisCap(original,foreign,ctx);err==nil {
+        t.Fatal("a different Ed25519 public key authorized traffic")
+    }
+    for i,raw:=range invalid{
+        if err:=installSignedFirstGenesisCap(raw,pub,ctx);err==nil{
+            t.Fatalf("ambiguous/noncanonical signed packet %d installed",i)
+        }
+    }
+}
+
+func TestV2SignedCapRequiresIndependentGenesisAndEmptyHonestMeterHistory(t *testing.T) {
+    t.Run("missing-independent-genesis",func(t *testing.T){
+        _,_,p,ctx,pub,priv:=signedCapTestFixture(t)
+        ctx.FirstGenesisIndependentlyProved=false
+        if err:=installSignedFirstGenesisCap(
+            signedCapTestEnvelope(t,p,priv),pub,ctx);err==nil {
+            t.Fatal("unverified first Genesis became traffic authority")
+        }
+    })
+    t.Run("existing-counted-WAL",func(t *testing.T){
+        _,manager,p,ctx,pub,priv:=signedCapTestFixture(t)
+        gate.Lock()
+        experimentalByteCaps.strict=false
+        gate.Unlock()
+        c:=newCapCounter(t,manager,capMain,"uplink")
+        if !capAttempt(t,c,capMain,"uplink",1) {
+            t.Fatal("failed to seed genuine historic byte intent")
+        }
+        gate.Lock()
+        experimentalByteCaps.strict=true
+        gate.Unlock()
+        if err:=installSignedFirstGenesisCap(
+            signedCapTestEnvelope(t,p,priv),pub,ctx);err==nil {
+            t.Fatal("unsettled old WAL was treated as zero-spend Genesis")
+        }
+    })
+    t.Run("nonzero-live-counters",func(t *testing.T){
+        _,_,p,ctx,pub,priv:=signedCapTestFixture(t)
+        ctx.Current=func(string,string)(uint64,error){return 1,nil}
+        if err:=installSignedFirstGenesisCap(
+            signedCapTestEnvelope(t,p,priv),pub,ctx);err==nil{
+            t.Fatal("old live counter was reauthorized at zero")
+        }
+    })
+}
+
+func TestV2SignedFirstCapsIsolateUsersInALiveRuntime(t *testing.T) {
+    dir,manager,first,ctx,pub,priv:=signedCapTestFixture(t)
+    raw:=signedCapTestEnvelope(t,first,priv)
+    if err:=installSignedFirstGenesisCap(raw,pub,ctx);err!=nil {t.Fatal(err)}
+    firstCounter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,firstCounter,capMain,"uplink",70) {
+        t.Fatal("could not spend first user's cap")
+    }
+    second:=first
+    second.UserID=102
+    second.Nonce=strings.Repeat("d",64)
+    second.AliasScopes=[]signedCapAlias{{Email:"xmesh-u102--vless-main",Class:"main"}}
+    second.CdnCeilingBytes=0
+    secondCtx:=ctx
+    secondCtx.UserID=second.UserID
+    secondCtx.Aliases=second.AliasScopes
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,second,priv),pub,secondCtx);err==nil {
+        t.Fatal("second user reused the first user's reservation")
+    }
+    second.ReservationID="44444444-4444-4444-8444-444444444444"
+    secondCtx.ReservationID=second.ReservationID
+    secondRaw:=signedCapTestEnvelope(t,second,priv)
+    wal:=meterLedgerPath(dir,first.RuntimeID,capMain,"uplink")
+    if err:=os.Rename(wal,wal+".backup");err!=nil {t.Fatal(err)}
+    if err:=installSignedFirstGenesisCap(secondRaw,pub,secondCtx);err==nil {
+        t.Fatal("second user admitted while the first user's WAL was missing")
+    }
+    if err:=os.Rename(wal+".backup",wal);err!=nil {t.Fatal(err)}
+    if err:=installSignedFirstGenesisCap(secondRaw,pub,secondCtx);err!=nil {t.Fatal(err)}
+    secondCounter:=newCapCounter(t,manager,second.AliasScopes[0].Email,"uplink")
+    if !capAttempt(t,secondCounter,second.AliasScopes[0].Email,"uplink",70) {
+        t.Fatal("first user's spend affected the second user's cap")
+    }
+    if err:=installSignedFirstGenesisCap(secondRaw,pub,secondCtx);err!=nil {t.Fatal(err)}
+    if capAttempt(t,firstCounter,capMain,"uplink",1) ||
+        capAttempt(t,secondCounter,second.AliasScopes[0].Email,"uplink",1) {
+        t.Fatal("peer installation or exact replay refilled already spent bytes")
+    }
+}
+
+func TestV2SignedCapDeadlineCancelsOnlyItsIdleUser(t *testing.T) {
+    _,_,first,scope,pub,priv:=signedCapTestFixture(t)
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,first,priv),pub,scope);err!=nil {
+        t.Fatal(err)
+    }
+    second:=first
+    second.UserID=102
+    second.Nonce=strings.Repeat("d",64)
+    second.ReservationID="44444444-4444-4444-8444-444444444444"
+    second.AliasScopes=[]signedCapAlias{{Email:"xmesh-u102--vless-main",Class:"main"}}
+    second.CdnCeilingBytes=0
+    secondScope:=scope
+    secondScope.UserID=second.UserID
+    secondScope.ReservationID=second.ReservationID
+    secondScope.Aliases=second.AliasScopes
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,second,priv),pub,secondScope);err!=nil {
+        t.Fatal(err)
+    }
+    firstClosed,secondClosed:=make(chan struct{}),make(chan struct{})
+    if err:=Register(ctx(717),capMain,func(){close(firstClosed)});err!=nil {t.Fatal(err)}
+    if err:=Register(ctx(718),second.AliasScopes[0].Email,func(){close(secondClosed)});err!=nil {t.Fatal(err)}
+    gate.Lock()
+    identity:=canonicalMeterUser(capMain)
+    armSignedCapExpiryLocked(identity,experimentalByteCaps.users[identity],time.Now().Add(10*time.Millisecond))
+    gate.Unlock()
+    select {
+    case <-firstClosed:
+    case <-time.After(time.Second):
+        t.Fatal("signed deadline did not cancel idle transport")
+    }
+    select {
+    case <-secondClosed:
+        t.Fatal("one signed deadline cancelled another user's transport")
+    default:
+    }
+    if err:=Register(ctx(719),capMain,func(){});err==nil {t.Fatal("expired cap accepted another stream")}
+    if err:=Register(ctx(720),second.AliasScopes[0].Email,func(){});err!=nil {t.Fatal(err)}
+}
+
+func TestV2SignedCapFsyncAtDeadlineKeepsDebtWithoutDelivery(t *testing.T) {
+    dir,manager,permit,ctx,pub,priv:=signedCapTestFixture(t)
+    now:=permit.IssuedAtMs
+    originalClock:=experimentalCapClockMs
+    experimentalCapClockMs=func()int64{return now}
+    t.Cleanup(func(){experimentalCapClockMs=originalClock})
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,permit,priv),pub,ctx);err!=nil {
+        t.Fatal(err)
+    }
+    counter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,counter,capMain,"uplink",1) {t.Fatal("pre-deadline write failed")}
+
+    originalSync:=experimentalMeterFileSync
+    experimentalMeterFileSync=func(file *os.File)error{
+        err:=originalSync(file)
+        now=permit.ValidUntilMs
+        return err
+    }
+    t.Cleanup(func(){experimentalMeterFileSync=originalSync})
+    if capAttempt(t,counter,capMain,"uplink",2) || counter.Value()!=1 {
+        t.Fatal("a buffer whose WAL fsync crossed the deadline was delivered")
+    }
+    tail,err:=readMeterTail(meterLedgerPath(dir,permit.RuntimeID,capMain,"uplink"))
+    if err!=nil || tail.last.NextBytes!=3 {
+        t.Fatalf("pre-delivery charge was lost: %v %v",tail,err)
+    }
+    now=permit.ValidUntilMs-1
+    if capAttempt(t,counter,capMain,"uplink",1) {
+        t.Fatal("clock rollback reopened an expired reservation")
+    }
+}
+
+func TestV2SignedCapConcurrentReplayExactlyOnceNoDebtReset(t *testing.T){
+    dir,manager,p,ctx,pub,priv:=signedCapTestFixture(t)
+    raw:=signedCapTestEnvelope(t,p,priv)
+    result:=make(chan error,24)
+    var wg sync.WaitGroup
+    for i:=0;i<24;i++{
+        wg.Add(1)
+        go func(){
+            defer wg.Done()
+            result<-installSignedFirstGenesisCap(raw,pub,ctx)
+        }()
+    }
+    wg.Wait()
+    close(result)
+    for err:=range result{if err!=nil{t.Fatalf("exact retry refused: %v",err)}}
+    meter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,meter,capMain,"uplink",70)||capAttempt(t,meter,capMain,"uplink",1){
+        t.Fatal("concurrent exact retries changed the 70-byte ceiling")
+    }
+    conflicting:=p
+    conflicting.Nonce=strings.Repeat("a",64)
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,conflicting,priv),pub,ctx);err==nil{
+        t.Fatal("different signed bytes replaced the installed grant")
+    }
+    contents,err:=os.ReadFile(filepath.Join(dir,"positive-cap-u101.json"))
+    if err!=nil||!bytes.Equal(contents,raw){t.Fatal("lost exact signed grant on retry")}
+}
+
+func TestV2SignedFirstGenesisActualRegisterEnforcesCapBeforeUserSession(t *testing.T) {
+    _,manager,p,expected,pub,priv:=signedCapTestFixture(t)
+    incoming:=ctx(50001)
+    if err:=Register(incoming,capMain,func(){});err==nil {
+        t.Fatal("user session created before trusted Ed25519 grant")
+    }
+    if err:=installSignedFirstGenesisCap(
+        signedCapTestEnvelope(t,p,priv),pub,expected);err!=nil {
+        t.Fatalf("signed grant rejected: %v",err)
+    }
+    if err:=Register(incoming,capMain,func(){});err!=nil {
+        t.Fatalf("confirmed scoped user failed actual Register admission: %v",err)
+    }
+    Finish(incoming)
+    RouteFinish(incoming)
+    if err:=Register(ctx(50002),"xmesh-u101--unlisted",func(){});err==nil {
+        t.Fatal("unknown user inbound opened outside signed alias set")
+    }
+    c:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,c,capMain,"uplink",70) {
+        t.Fatal("failed to spend the exact signed Node allowance")
+    }
+    if err:=Register(ctx(50003),capMain,func(){});err==nil {
+        t.Fatal("exhausted Node quota still admitted a new VLESS stream")
+    }
+    if err:=Register(ctx(50004),capCDN,func(){});err==nil {
+        t.Fatal("switching to CDN reopens exhausted shared Node allowance")
+    }
+}
+
+func TestV2SignedCapCannotPublishAfterInstallDeadlineOrClockRollback(t *testing.T) {
+    for _, scenario := range []string{"deadline", "rollback"} {
+        t.Run(scenario, func(t *testing.T) {
+            dir, _, payload, expected, public, private := signedCapTestFixture(t)
+            now := payload.IssuedAtMs + 1000
+            originalClock := experimentalCapClockMs
+            experimentalCapClockMs = func() int64 { return now }
+            t.Cleanup(func() { experimentalCapClockMs = originalClock })
+            raw := signedCapTestEnvelope(t, payload, private)
+            originalRead := expected.Current
+            expected.Current = func(alias, direction string) (uint64, error) {
+                if scenario == "deadline" {
+                    now = payload.InstallBeforeMs
+                } else {
+                    now = payload.IssuedAtMs
+                }
+                return originalRead(alias, direction)
+            }
+            if err := installSignedFirstGenesisCap(raw, public, expected); err == nil ||
+                !strings.Contains(err.Error(), "before publication") {
+                t.Fatalf("signed cap installation accepted an invalid clock at publication: %v", err)
+            }
+            persisted, err := os.ReadFile(filepath.Join(dir, "positive-cap-u101.json"))
+            if err != nil || !bytes.Equal(persisted, raw) {
+                t.Fatalf("failed publication lost its durable attempt: %v", err)
+            }
+            now = payload.IssuedAtMs + 1000
+            expected.Current = originalRead
+            gate.Lock()
+            denied := checkSignedCapBeforeRegisterLocked(capMain)
+            gate.Unlock()
+            if denied == nil {
+                t.Fatal("failed publication still exposed spending authority")
+            }
+            if err := installSignedFirstGenesisCap(raw, public, expected); err == nil {
+                t.Fatal("an old durable attempt was reusable after the clock changed")
+            }
+        })
+    }
+}
+
+func TestV2SignedRenewalKeepsWALAndCumulativeSpend(t *testing.T) {
+	dir, manager, p, expected, pub, priv := signedCapTestFixture(t)
+	if err := installSignedFirstGenesisCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	up := newCapCounter(t, manager, capMain, "uplink")
+	cdn := newCapCounter(t, manager, capCDN, "downlink")
+	if !capAttempt(t, up, capMain, "uplink", 40) || !capAttempt(t, cdn, capCDN, "downlink", 20) {
+		t.Fatal("cannot spend initial reserve")
+	}
+	snapshot, err := readInventory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected.FirstGenesisIndependentlyProved = false
+	p.Kind = signedCapRenewalKind
+	p.WitnessedWalBytes, p.WitnessedCdnBytes = 60, 20
+	p.InventoryTailDigest = snapshot.tail.Digest
+	p.SharedCeilingBytes, p.NodeCeilingBytes, p.CdnCeilingBytes = 120, 100, 25
+	p.ReservationRevision++
+	expected.ReservationRevision = p.ReservationRevision
+	p.Nonce = strings.Repeat("d", 64)
+	rejected := []struct {
+		name   string
+		change func(*signedCapPayload, *signedCapContext)
+	}{
+		{"revision gap", func(p *signedCapPayload, c *signedCapContext) { p.ReservationRevision++; c.ReservationRevision++ }},
+		{"foreign lease", func(p *signedCapPayload, c *signedCapContext) {
+			p.ReservationID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+			c.ReservationID = p.ReservationID
+		}},
+		{"foreign policy", func(p *signedCapPayload, c *signedCapContext) {
+			p.PolicySHA256 = strings.Repeat("a", 64)
+			c.PolicySHA256 = p.PolicySHA256
+		}},
+		{"unobserved spend", func(p *signedCapPayload, _ *signedCapContext) { p.WitnessedWalBytes++ }},
+		{"deadline extension", func(p *signedCapPayload, _ *signedCapContext) { p.ValidUntilMs += 60_000 }},
+		{"changed deadline", func(p *signedCapPayload, _ *signedCapContext) { p.ValidUntilMs-- }},
+		{"unknown WAL digest", func(p *signedCapPayload, _ *signedCapContext) { p.InventoryTailDigest = strings.Repeat("a", 64) }},
+		{"decreased ceiling", func(p *signedCapPayload, _ *signedCapContext) { p.CdnCeilingBytes = 20; p.NodeCeilingBytes = 69 }},
+		{"excess increment", func(p *signedCapPayload, _ *signedCapContext) { p.SharedCeilingBytes += maxSignedCapGrant }},
+	}
+	for _, test := range rejected {
+		bad, ctx := p, expected
+		test.change(&bad, &ctx)
+		if err := renewSignedCap(signedCapTestEnvelope(t, bad, priv), pub, ctx); err == nil {
+			t.Fatalf("renewed an invalid permit: %s", test.name)
+		}
+	}
+	raw := signedCapTestEnvelope(t, p, priv)
+	if err := renewSignedCap(raw, pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	record, err := os.ReadFile(filepath.Join(dir, "positive-cap-u101-r4.json"))
+	if err != nil || !bytes.Equal(record, raw) {
+		t.Fatal("renewed permit was not durably recorded")
+	}
+	if err := renewSignedCap(raw, pub, expected); err != nil {
+		t.Fatal("exact replay should be idempotent", err)
+	}
+	conflicting := p
+	conflicting.NodeCeilingBytes++
+	if err := renewSignedCap(signedCapTestEnvelope(t, conflicting, priv), pub, expected); err == nil {
+		t.Fatal("different permit reused the same revision")
+	}
+	if !capAttempt(t, cdn, capCDN, "downlink", 5) || capAttempt(t, cdn, capCDN, "downlink", 1) ||
+		!capAttempt(t, up, capMain, "uplink", 35) || capAttempt(t, up, capMain, "uplink", 1) {
+		t.Fatal("renewed cumulative limits did not retain prior debits")
+	}
+	all, cdnUsed := capValues(t)
+	if all != 100 || cdnUsed != 25 {
+		t.Fatalf("renewed spend diverged: %d/%d", all, cdnUsed)
+	}
+	if up.Value() != 75 || cdn.Value() != 25 {
+		t.Fatal("StatsService counters changed during renewal")
+	}
+
+	next := p
+	next.ReservationRevision++
+	next.Nonce = strings.Repeat("e", 64)
+	next.NodeCeilingBytes += 10
+	expected.ReservationRevision = next.ReservationRevision
+	if err := renewSignedCap(signedCapTestEnvelope(t, next, priv), pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	if !capAttempt(t, up, capMain, "uplink", 10) || capAttempt(t, up, capMain, "uplink", 1) {
+		t.Fatal("second renewal did not preserve cumulative spend")
+	}
+	expected.ReservationRevision = p.ReservationRevision
+	if err := renewSignedCap(raw, pub, expected); err == nil {
+		t.Fatal("older revision accepted after renewal")
+	}
+}
+
+func TestV2SignedMixedMainTopupKeepsCDNSubCapExhausted(t *testing.T) {
+    dir, manager, p, expected, pub, priv := signedCapTestFixture(t)
+    if err := installSignedFirstGenesisCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal(err)
+    }
+    main := newCapCounter(t, manager, capMain, "uplink")
+    cdn := newCapCounter(t, manager, capCDN, "downlink")
+    if !capAttempt(t, cdn, capCDN, "downlink", 20) ||
+        !capAttempt(t, main, capMain, "uplink", 30) {
+        t.Fatal("could not precharge the original independent MAIN/CDN grant")
+    }
+    snapshot, err := readInventory(dir)
+    if err != nil {
+        t.Fatal(err)
+    }
+    expected.FirstGenesisIndependentlyProved = false
+    p.Kind = signedCapRenewalKind
+    p.WitnessedWalBytes = 50
+    p.WitnessedCdnBytes = 20
+    p.InventoryTailDigest = snapshot.tail.Digest
+    p.SharedCeilingBytes = 140
+    p.NodeCeilingBytes = 140
+    // Nexus's immutable mixed CDN hold is already consumed. An independently
+    // signed MAIN refill MUST leave this cumulative class ceiling unchanged.
+    p.CdnCeilingBytes = 20
+    p.ReservationRevision++
+    expected.ReservationRevision = p.ReservationRevision
+    p.Nonce = strings.Repeat("d", 64)
+    if err := renewSignedCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal(err)
+    }
+    if capAttempt(t, cdn, capCDN, "downlink", 1) || cdn.Value() != 20 {
+        t.Fatal("MAIN renewal silently refilled the fixed CDN class hold")
+    }
+    if !capAttempt(t, main, capMain, "uplink", 90) {
+        t.Fatal("MAIN could not continue after independently exhausted CDN quota")
+    }
+    if capAttempt(t, main, capMain, "uplink", 1) {
+        t.Fatal("MAIN exceeded its own new finite signed cumulative ceiling")
+    }
+    all, usedCDN := capValues(t)
+    if all != 140 || usedCDN != 20 || main.Value() != 120 || cdn.Value() != 20 {
+        t.Fatalf("mixed renewal changed CDN spending: %d/%d MAIN=%d CDN=%d",
+            all, usedCDN, main.Value(), cdn.Value())
+    }
+    // A later, *independently funded* CDN pool top-up can restore exactly
+    // five CDN bytes without ever resetting old class or global counters.
+    index, err := readInventory(dir)
+    if err != nil {
+        t.Fatal(err)
+    }
+    p.ReservationRevision++
+    expected.ReservationRevision = p.ReservationRevision
+    p.Nonce = strings.Repeat("e", 64)
+    p.InventoryTailDigest = index.tail.Digest
+    p.WitnessedWalBytes = 140
+    p.WitnessedCdnBytes = 20
+    p.SharedCeilingBytes = 220
+    p.NodeCeilingBytes = 220
+    p.CdnCeilingBytes = 25
+    if err := renewSignedCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal(err)
+    }
+    if !capAttempt(t, cdn, capCDN, "downlink", 5) ||
+        capAttempt(t, cdn, capCDN, "downlink", 1) ||
+        !capAttempt(t, main, capMain, "uplink", 35) ||
+        capAttempt(t, main, capMain, "uplink", 41) {
+        t.Fatal("separately signed CDN top-up failed class/global accounting")
+    }
+    all, usedCDN = capValues(t)
+    if all != 180 || usedCDN != 25 || main.Value() != 155 || cdn.Value() != 25 {
+        t.Fatalf("mixed CDN refill changed conserved meters: %d/%d MAIN=%d CDN=%d",
+            all, usedCDN, main.Value(), cdn.Value())
+    }
+    // CDN can obtain a new independently funded class revision while the
+    // shared/MAIN 220-byte grant remains exactly unchanged. No artificial
+    // MAIN usage or shared-account expansion is required for this CDN-only
+    // renewal, but the additional CDN bytes must still fit inside shared.
+    last, err := readInventory(dir)
+    if err != nil {
+        t.Fatal(err)
+    }
+    p.ReservationRevision++
+    expected.ReservationRevision = p.ReservationRevision
+    p.Nonce = strings.Repeat("f", 64)
+    p.InventoryTailDigest = last.tail.Digest
+    p.WitnessedWalBytes = 180
+    p.WitnessedCdnBytes = 25
+    p.CdnCeilingBytes = 30
+    if err := renewSignedCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+        t.Fatal("CDN-only signed renewal with unchanged MAIN ceiling was denied", err)
+    }
+    if !capAttempt(t, cdn, capCDN, "downlink", 5) ||
+        capAttempt(t, cdn, capCDN, "downlink", 1) ||
+        !capAttempt(t, main, capMain, "uplink", 35) ||
+        capAttempt(t, main, capMain, "uplink", 1) {
+        t.Fatal("class-only CDN top-up bypassed the original shared budget")
+    }
+    all, usedCDN = capValues(t)
+    if all != 220 || usedCDN != 30 || main.Value() != 190 || cdn.Value() != 30 {
+        t.Fatalf("CDN-only revision changed accounted MAIN/WAL: %d/%d MAIN=%d CDN=%d",
+            all, usedCDN, main.Value(), cdn.Value())
+    }
+}
+
+func TestV2SignedRenewalRejectsWALLossAndFreshRuntime(t *testing.T) {
+	dir, manager, p, expected, pub, priv := signedCapTestFixture(t)
+	if err := installSignedFirstGenesisCap(signedCapTestEnvelope(t, p, priv), pub, expected); err != nil {
+		t.Fatal(err)
+	}
+	up := newCapCounter(t, manager, capMain, "uplink")
+	if !capAttempt(t, up, capMain, "uplink", 1) {
+		t.Fatal("cannot create live WAL")
+	}
+	snapshot, err := readInventory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Kind = signedCapRenewalKind
+	p.ReservationRevision++
+	p.Nonce = strings.Repeat("d", 64)
+	p.WitnessedWalBytes = 1
+	p.InventoryTailDigest = snapshot.tail.Digest
+	p.SharedCeilingBytes++
+	expected.ReservationRevision = p.ReservationRevision
+	raw := signedCapTestEnvelope(t, p, priv)
+	if err := os.Remove(meterTestFile(t, dir, capMain, "uplink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := renewSignedCap(raw, pub, expected); err == nil {
+		t.Fatal("renewed with a missing indexed WAL")
+	}
+	gate.Lock()
+	experimentalByteCaps.users = nil
+	gate.Unlock()
+	if err := renewSignedCap(raw, pub, expected); err == nil {
+		t.Fatal("renewal opened fresh Xray state")
+	}
+}

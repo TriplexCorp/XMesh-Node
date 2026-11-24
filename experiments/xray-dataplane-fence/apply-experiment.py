@@ -75,6 +75,38 @@ def run(root: Path):
         shared / "durable_meter_intent_test.go",
     )
     shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_byte_cap.go.txt",
+        shared / "experimental_byte_cap.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_byte_cap_test.go.txt",
+        shared / "experimental_byte_cap_test.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_signed_cap_admission.go.txt",
+        shared / "experimental_signed_cap_admission.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_cap_socket.go.txt",
+        shared / "experimental_cap_socket.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_zero_meter_preflight.go.txt",
+        shared / "experimental_zero_meter_preflight.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_zero_meter_preflight_test.go.txt",
+        shared / "experimental_zero_meter_preflight_test.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt",
+        shared / "experimental_signed_cap_admission_test.go",
+    )
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_signed_cap_pg_integration_test.go.txt",
+        shared / "experimental_signed_cap_pg_integration_test.go",
+    )
+    shutil.copyfile(
         NODE_ROOT / "experiments/xray-dataplane-fence/meter_inventory.go.txt",
         shared / "meter_inventory.go",
     )
@@ -90,6 +122,57 @@ def run(root: Path):
         NODE_ROOT / "experiments/xray-dataplane-fence/historic_runtime_debt_test.go.txt",
         shared / "historic_runtime_debt_test.go",
     )
+
+    quota_errors = root / "common/xmeshquota"
+    quota_errors.mkdir()
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_limit_error.go.txt",
+        quota_errors / "limit_error.go",
+    )
+
+    shutil.copyfile(NODE_ROOT / "experiments/xray-dataplane-fence/experimental_ingress.go.txt",
+                    shared / "experimental_ingress.go")
+    inbound_file = root / "app/proxyman/inbound/always.go"
+    inbound_source = replace_once(inbound_file.read_text(), '"github.com/xtls/xray-core/app/proxyman"',
+                                  '"github.com/xtls/xray-core/app/proxyman"\n    "github.com/xtls/xray-core/app/xmeshdrain"')
+    inbound_source = replace_once(inbound_source, "if pl == nil {", """
+    private, err := xmeshdrain.MeterListener(tag)
+    if err != nil { return nil, err }
+    if private != "" {
+        msg, ok := proxyConfig.(proto.Message)
+        configName := ""
+        if ok { configName = string(proto.MessageName(msg)) }
+        if !ok || configName != "xray.proxy.vless.inbound.Config" ||
+            !net.HasNetwork(nl, net.Network_UNIX) || mss.ProtocolName != "tcp" ||
+            mss.SecurityType != "" || receiverConfig.ReceiveOriginalDestination {
+            return nil, errors.New("incompatible private VLESS transport",
+                ": config=",configName,", ports=",pl!=nil,", unix=",net.HasNetwork(nl, net.Network_UNIX))
+        }
+        // Native VLESS authentication, scoped tag, dispatcher and meter.
+        // Public transport security terminates on the stable Xray frontend.
+        h.workers = append(h.workers, &dsWorker{
+            address: net.DomainAddress(private), proxy: p, tag: tag,
+            stream: mss, dispatcher: h.mux, sniffingRequest: sniffingRequest, ctx: ctx,
+            uplinkCounter: uplinkCounter, downlinkCounter: downlinkCounter,
+        })
+    }
+    // Do not instantiate a second listener at the signed, original path:
+    // a duplicate Unix listener can either fail startup or bypass our
+    // source-pinned runtime/peer identity. The private worker is exclusive.
+    if private == "" && pl == nil {""")
+    inbound_source = replace_once(inbound_source, "\n\tif pl != nil {",
+                                  "\n\tif private == \"\" && pl != nil {")
+    inbound_file.write_text(inbound_source)
+    outbound_file = root / "proxy/vless/outbound/outbound.go"
+    outbound_source = replace_once(outbound_file.read_text(), '"github.com/xtls/xray-core/app/reverse"',
+                                   '"github.com/xtls/xray-core/app/reverse"\n    "github.com/xtls/xray-core/app/xmeshdrain"')
+    outbound_source = replace_once(outbound_source, "if h.testpre > 0 && h.reverse == nil {", """
+    if rec.Destination.Address.String() == "xmesh-meter.invalid" {
+        var err error
+        conn, err = xmeshdrain.DialIngressMeter(ctx, rec.User)
+        if err != nil { return err }
+    } else if h.testpre > 0 && h.reverse == nil {""")
+    outbound_file.write_text(outbound_source)
 
     dispatcher_file = root / "app/dispatcher/default.go"
     source = dispatcher_file.read_text(encoding="utf-8")
@@ -350,6 +433,12 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
     )
     meter_source = replace_once(
         meter_source,
+        '"github.com/xtls/xray-core/common/buf"\n',
+        '"github.com/xtls/xray-core/common/buf"\n'
+        '\t"github.com/xtls/xray-core/common/xmeshquota"\n',
+    )
+    meter_source = replace_once(
+        meter_source,
         '\tWriter  buf.Writer\n',
         '\tWriter  buf.Writer\n\tExperimentalEmail string\n'
         '\tExperimentalDirection string\n',
@@ -370,13 +459,21 @@ func (w *dsWorker) Proxy() proxy.Inbound {''',
             buf.ReleaseMulti(mb)
             panic("experimental Xray stats writer lacks trusted counter method")
         }
-        audited.ExperimentalAddMetered(int64(mb.Len()))
+        if err := xmeshquota.TryCharge(audited.ExperimentalAddMetered, int64(mb.Len())); err != nil {
+            buf.ReleaseMulti(mb)
+            return err
+        }
     } else {
         w.Counter.Add(int64(mb.Len()))
     }
     return w.Writer.WriteMultiBuffer(mb)''',
     )
     meter_writer_file.write_text(meter_source, encoding="utf-8")
+    meter_writer_test = root / "app/dispatcher/stats_experimental_quota_test.go"
+    shutil.copyfile(
+        NODE_ROOT / "experiments/xray-dataplane-fence/experimental_quota_writer_test.go.txt",
+        meter_writer_test,
+    )
 
     # Xray's raw TCPConn.ReadFrom splice bypasses SizeStatWriter entirely:
     # upstream proxy.CopyRawConnIfExist increments statWriter.Counter.Add
@@ -572,6 +669,12 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
     )
     reader_source = replace_once(
         reader_source,
+        '"github.com/xtls/xray-core/common/errors"\n',
+        '"github.com/xtls/xray-core/common/errors"\n'
+        '\t"github.com/xtls/xray-core/common/xmeshquota"\n',
+    )
+    reader_source = replace_once(
+        reader_source,
         '\tdone chan struct{}\n}',
         '\tdone chan struct{}\n'
         '\tExperimentalMu sync.Mutex\n'
@@ -604,8 +707,12 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
             return nil, io.EOF
         }
         mb, err := r.Reader.ReadMultiBuffer()
-        r.experimentalMeterAdd(mb)
+        chargeErr := r.experimentalMeterAdd(mb)
         r.ExperimentalEnd()
+        if chargeErr != nil {
+            ReleaseMulti(mb)
+            return nil, chargeErr
+        }
         if r.ExperimentalMayDeliver == nil || !r.ExperimentalMayDeliver() {
             ReleaseMulti(mb)
             return nil, io.EOF
@@ -633,7 +740,10 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
             // is counted before done is closed, even if this call times out.
             go func() {
                 r.mb, r.err = r.Reader.ReadMultiBuffer()
-                r.experimentalMeterAdd(r.mb)
+                if err := r.experimentalMeterAdd(r.mb); err != nil {
+                    ReleaseMulti(r.mb)
+                    r.mb, r.err = nil, err
+                }
                 r.ExperimentalEnd()
                 close(r.done)
             }()
@@ -662,12 +772,12 @@ func (m *Manager) SetExperimentalCounterMutationAudit(
         """// Every experimental timed/direct user-buffer read needs the trusted
 // StatsService counter method, not an ordinary Counter.Add shared with
 // untracked background callers. ExperimentalBegin/End bound the operation.
-func (r *TimeoutWrapperReader) experimentalMeterAdd(mb MultiBuffer) {
+func (r *TimeoutWrapperReader) experimentalMeterAdd(mb MultiBuffer) error {
     audited, ok := r.Counter.(interface { ExperimentalAddMetered(int64) int64 })
     if !ok || audited == nil {
         panic("experimental Xray timed meter lacks trusted counter method")
     }
-    audited.ExperimentalAddMetered(int64(mb.Len()))
+    return xmeshquota.TryCharge(audited.ExperimentalAddMetered, int64(mb.Len()))
 }
 
 type Writer interface {""",
@@ -679,7 +789,10 @@ type Writer interface {""",
     )
 
     subprocess.run(
-        ["gofmt", "-w", str(shared / "xmeshdrain.go"),
+        ["gofmt", "-w", str(inbound_file), str(outbound_file), str(shared / "experimental_ingress.go"), str(shared / "xmeshdrain.go"),
+         str(shared / "experimental_cap_socket.go"),
+         str(shared / "experimental_zero_meter_preflight.go"),
+         str(shared / "experimental_zero_meter_preflight_test.go"),
          str(shared / "observed_checkpoint.go"),
          str(shared / "runtime_identity.go"),
          str(shared / "observed_checkpoint_test.go"),
@@ -688,8 +801,8 @@ type Writer interface {""",
          str(shared / "durable_counter_taint.go"),
          str(shared / "durable_counter_taint_test.go"),
          str(dispatcher_file), str(worker_file), str(mux_file),
-         str(meter_writer_file), str(counter_file), str(manager_file),
-         str(reader_file),
+         str(meter_writer_file), str(meter_writer_test), str(counter_file), str(manager_file),
+         str(reader_file), str(quota_errors / "limit_error.go"),
          str(root / "common/buf/io_experimental_timeout_test.go")],
         check=True,
         cwd=root,

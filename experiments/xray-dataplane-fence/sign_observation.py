@@ -18,16 +18,19 @@ import stat
 import subprocess
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 from runtime_identity import (
     inspect_managed_xray, trusted_runtime_identity,
     verify_live_runtime, verify_managed_xray_runtime,
 )
 from meter_floor import verify_monotonic_meter_floor
 
-ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location(
-    "quota_observed_guard", ROOT / "deploy/xmesh-policy-guard-base.py")
+ROOT = HERE.parents[1]
+GUARD_PATH = ROOT / "deploy/xmesh-policy-guard-base.py"
+if HERE == Path("/usr/local/libexec/xmesh-quota-wal/xray-dataplane-fence"):
+    GUARD_PATH = Path("/usr/local/libexec/xmesh-policy-guard-base.py")
+SPEC = importlib.util.spec_from_file_location("quota_observed_guard", GUARD_PATH)
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
 
@@ -49,8 +52,8 @@ def unique_pairs(pairs):
     return result
 
 
-def strict_json(raw):
-    if not 0 < len(raw) <= MAX_RECORD:
+def strict_json(raw, *, limit=MAX_RECORD):
+    if not 0 < len(raw) <= limit:
         raise ValueError("invalid evidence size")
     value = json.loads(
         raw, object_pairs_hook=unique_pairs,

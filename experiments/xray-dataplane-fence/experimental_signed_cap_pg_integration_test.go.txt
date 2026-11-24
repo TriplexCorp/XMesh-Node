@@ -1,0 +1,234 @@
+// Cross-repository disposable integration. Real PostgreSQL quota allocator,
+// real Ed25519 signature and real Xray StatsService/WAL in a live Go process.
+// The CI fixtures SIMULATE independent strict-XSP/2 process/policy attestation;
+// signature generation uses the genuine Nexus Rust PolicySigner with a CI key.
+package xmeshdrain
+
+import (
+    "bytes"
+    "encoding/hex"
+    "encoding/json"
+    "fmt"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "strconv"
+    "strings"
+    "testing"
+)
+
+func TestV2SignedRealPostgreSQLTwoNodeProcess(t *testing.T) {
+    signer:=os.Getenv("XMESH_CI_QUOTA_SQL_SIGNER")
+    if signer=="" {t.Skip("only the disposable cross-repository PostgreSQL job")}
+    if os.Getenv("GITHUB_ACTIONS")!="true" ||
+        os.Getenv("RUNNER_ENVIRONMENT")!="github-hosted" ||
+        os.Getenv("XMESH_AUDIT_DISPOSABLE")!="1" {
+        t.Fatal("never request SQL-signed caps outside disposable hosted CI")
+    }
+    node,err:=strconv.ParseInt(os.Getenv("XMESH_CI_QUOTA_NODE"),10,64)
+    if err!=nil || (node!=47 && node!=48){t.Fatal("unknown test Node")}
+    dir,manager,p,_,_,_:=signedCapTestFixture(t)
+    policyHash:=strings.Repeat("b",64)
+    cmd:=exec.Command("python3",signer,"issue","--node",
+        strconv.FormatInt(node,10),"--runtime",p.RuntimeID,
+        "--policy-sha",policyHash,"--xray-pid",strconv.Itoa(os.Getpid()))
+    output,err:=cmd.CombinedOutput()
+    if err!=nil{t.Fatalf("real SQL preflight / signer failed: %s: %v",output,err)}
+    var issued struct{
+        NodeID int64 `json:"nodeId"`
+        Ceiling uint64 `json:"ceiling"`
+        SignedEnvelope string `json:"signedEnvelope"`
+        PublicKeyHex string `json:"publicKeyHex"`
+        Phase string `json:"phase"`
+    }
+    if err:=json.Unmarshal(output,&issued);err!=nil{
+        t.Fatalf("bad independent SQL output: %v",err)
+    }
+    if issued.Phase!="sql-committed-nexus-policy-signer-disposable" ||
+        issued.NodeID!=node || issued.Ceiling==0 ||
+        issued.Ceiling>1000 {
+        t.Fatal("SQL signer reported invalid grant")
+    }
+    // Never accept the verifying key as authoritative simply because it
+    // accompanies an otherwise self-consistent signed grant. The test Node
+    // independently pinned it before requesting ANY budget from Nexus.
+    original,err:=os.ReadFile(os.Getenv("XMESH_CI_NEXUS_PINNED_PUBLIC"))
+    if err!=nil{t.Fatal("missing bootstrap-pinned Nexus policy public key")}
+    pub,err:=hex.DecodeString(strings.TrimSpace(string(original)))
+    if err!=nil || len(pub)!=32{t.Fatal("invalid independently pinned signer")}
+    supplied,err:=hex.DecodeString(issued.PublicKeyHex)
+    if err!=nil || !bytes.Equal(pub,supplied){
+        t.Fatal("grant attempted to swap previously pinned Nexus signer")
+    }
+    activation:="c"
+    meter:="22222222-2222-4222-8222-222222222247"
+    reservation:="33333333-3333-4333-8333-333333333347"
+    if node==48 {
+        activation="d"
+        meter="22222222-2222-4222-8222-222222222248"
+        reservation="33333333-3333-4333-8333-333333333348"
+    }
+    aliases:=[]signedCapAlias{
+        {Email:capCDN,Class:"cdn"},
+        {Email:capMain,Class:"main"},
+    }
+    context:=signedCapContext{
+        NodeID:node,UserID:101,ActivationReceiptSHA256:strings.Repeat(activation,64),
+        RuntimeID:p.RuntimeID,PolicySHA256:policyHash,
+        AccountEpoch:"11111111-1111-4111-8111-111111111111",
+        MeterEpoch:meter,ReservationID:reservation,
+        ReservationRevision:1,
+        InventoryTailDigest:strings.Repeat("0",64),
+        Aliases:aliases,FirstGenesisIndependentlyProved:true,
+        Current:func(alias,direction string)(uint64,error) {
+            c:=manager.GetCounter(rawMeterName(alias,direction))
+            if c==nil{return 0,nil}
+            if c.Value()<0{return 0,fmt.Errorf("negative raw Xray bytes")}
+            return uint64(c.Value()),nil
+        },
+    }
+    gate.Lock()
+    before:=checkSignedCapBeforeRegisterLocked(capMain)
+    gate.Unlock()
+    if before==nil{t.Fatal("unsigned Node was admitted before SQL reserve")}
+    if err:=installSignedFirstGenesisCap(
+        []byte(issued.SignedEnvelope),pub,context);err!=nil {
+        t.Fatalf("verified SQL-backed Ed25519 grant rejected by Xray: %v",err)
+    }
+    cdnBytes:=int64(150)
+    if issued.Ceiling<150 {cdnBytes=int64(issued.Ceiling)}
+    mainBytes:=int64(issued.Ceiling)-cdnBytes
+    cdn:=newCapCounter(t,manager,capCDN,"downlink")
+    main:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,cdn,capCDN,"downlink",cdnBytes) {
+        t.Fatal("validated per-Node CDN spending failed")
+    }
+    if mainBytes>0 && !capAttempt(t,main,capMain,"uplink",mainBytes){
+        t.Fatal("validated remaining MAIN spending failed")
+    }
+    // All attempted extra bytes are denied *before* WAL mutation.
+    if capAttempt(t,main,capMain,"uplink",1) ||
+        capAttempt(t,cdn,capCDN,"downlink",1) {
+        t.Fatal("one Node overspent its SQL-backed grant via another inbound")
+    }
+    all,cdnUsed:=capValues(t)
+    if all!=issued.Ceiling || cdnUsed!=uint64(cdnBytes) {
+        t.Fatalf("real SQL cap mismatch: %d/%d, expected %d/%d",
+            all,cdnUsed,issued.Ceiling,cdnBytes)
+    }
+    if main.Value()!=mainBytes || cdn.Value()!=cdnBytes {
+        t.Fatal("raw StatsService differs from accepted signed byte count")
+    }
+    mainTail,err:=readMeterTail(meterTestFile(t,dir,capMain,"uplink"))
+    if err!=nil || mainTail.last.NextBytes!=uint64(mainBytes) {
+        t.Fatalf("MAIN byte WAL lost committed bytes: %v",err)
+    }
+    cdnTail,err:=readMeterTail(meterTestFile(t,dir,capCDN,"downlink"))
+    if err!=nil || cdnTail.last.NextBytes!=uint64(cdnBytes) {
+        t.Fatalf("CDN byte WAL lost committed bytes: %v",err)
+    }
+    report:=struct {
+        NodeID int64 `json:"nodeId"`
+        GrantBytes uint64 `json:"grantBytes"`
+        WalBytes uint64 `json:"walBytes"`
+        RawBytes uint64 `json:"rawBytes"`
+        RuntimeID string `json:"runtimeId"`
+    }{node,issued.Ceiling,
+        mainTail.last.NextBytes+cdnTail.last.NextBytes,
+        uint64(main.Value()+cdn.Value()),p.RuntimeID}
+    encoded,err:=json.Marshal(report)
+    if err!=nil{t.Fatal(err)}
+    dest:=filepath.Join(os.Getenv("XMESH_CI_QUOTA_RESULTS"),
+        fmt.Sprintf("node-%d.json",node))
+    if err:=os.WriteFile(dest,encoded,0600);err!=nil{t.Fatal(err)}
+    keyPath:=filepath.Join(os.Getenv("XMESH_CI_QUOTA_RESULTS"),
+        fmt.Sprintf("node-%d-public-key.txt",node))
+    if err:=os.WriteFile(keyPath,[]byte(issued.PublicKeyHex),0600);err!=nil{t.Fatal(err)}
+    t.Logf("PASS: measured Node %d spent exactly %d PostgreSQL reserved bytes; "+
+        "no refunds or terminal metering claimed",node,issued.Ceiling)
+}
+
+func TestV2SignedOldXrayRuntimeCannotReuseOldGrant(t *testing.T) {
+    signer:=os.Getenv("XMESH_CI_QUOTA_SQL_SIGNER")
+    if signer=="" {t.Skip("only disposable cross-process restart check")}
+    if os.Getenv("GITHUB_ACTIONS")!="true" ||
+        os.Getenv("RUNNER_ENVIRONMENT")!="github-hosted" ||
+        os.Getenv("XMESH_AUDIT_DISPOSABLE")!="1" {
+        t.Fatal("restart check requires disposable hosted CI")
+    }
+    node,err:=strconv.ParseInt(os.Getenv("XMESH_CI_QUOTA_NODE"),10,64)
+    if err!=nil||(node!=47&&node!=48){t.Fatal("invalid Node")}
+    dir:=filepath.Join(os.Getenv("XMESH_CI_QUOTA_PERSIST_DIR"),
+        fmt.Sprintf("node-%d",node))
+    signedRaw,err:=os.ReadFile(filepath.Join(dir,"positive-cap-u101.json"))
+    if err!=nil{t.Fatalf("first process did not fsync a signed grant: %v",err)}
+    originalReport,err:=os.ReadFile(filepath.Join(
+        os.Getenv("XMESH_CI_QUOTA_RESULTS"),fmt.Sprintf("node-%d.json",node)))
+    if err!=nil{t.Fatal(err)}
+    var previous struct{RuntimeID string `json:"runtimeId"`}
+    if err:=json.Unmarshal(originalReport,&previous);err!=nil{t.Fatal(err)}
+    publicRaw,err:=os.ReadFile(os.Getenv("XMESH_CI_NEXUS_PINNED_PUBLIC"))
+    if err!=nil{t.Fatal("missing independently pinned signer during restart")}
+    pub,err:=hex.DecodeString(strings.TrimSpace(string(publicRaw)))
+    if err!=nil||len(pub)!=32{t.Fatal("untrusted pinned signer key")}
+    resetGate()
+    observed.Lock()
+    observed.manager=nil
+    observed.directory=""
+    observed.runtimeID=""
+    observed.Unlock()
+    // New process reads the *real first process's fsynced WAL and receipt*,
+    // not a synthetic copy. If Linux refuses startup entirely, this is
+    // safely fail closed and no old grant may be reissued.
+    if err:=configureObservedCheckpoint(dir);err!=nil{
+        t.Logf("PASS: restarted Xray refused old WAL before serving: %v",err)
+        return
+    }
+    gate.Lock()
+    newRuntime:=gate.runtimeID
+    experimentalByteCaps.strict=true
+    experimentalByteCaps.users=nil
+    oldDebt:=gate.users["xmesh-u101"]
+    gate.Unlock()
+    if previous.RuntimeID==newRuntime||newRuntime=="" {
+        t.Fatal("fresh Xray process inherited old kernel runtime identity")
+    }
+    if oldDebt==nil||!oldDebt.historicDebtUnresolved {
+        t.Fatal("new Xray lost old in-flight WAL byte debt")
+    }
+    envelope,_,err:=decodeCanonicalSignedCap(signedRaw)
+    if err!=nil{t.Fatalf("old signed envelope corrupted: %v",err)}
+    scopes:=[]signedCapAlias{
+        {Email:capCDN,Class:"cdn"},{Email:capMain,Class:"main"},
+    }
+    p:=envelope.Payload
+    ctx:=signedCapContext{
+        NodeID:p.NodeID,UserID:p.UserID,
+        ActivationReceiptSHA256:p.ActivationReceiptSHA256,
+        RuntimeID:p.RuntimeID,PolicySHA256:p.PolicySHA256,
+        AccountEpoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,
+        ReservationRevision:p.ReservationRevision,
+        InventoryTailDigest:p.InventoryTailDigest,
+        Aliases:scopes,FirstGenesisIndependentlyProved:true,
+        Current:func(string,string)(uint64,error){return 0,nil},
+    }
+    if err:=installSignedFirstGenesisCap(signedRaw,pub,ctx);err==nil{
+        t.Fatal("expired process-bounded grant reused after Xray restarted")
+    }
+    gate.Lock()
+    open:=checkSignedCapBeforeRegisterLocked(capMain)
+    gate.Unlock()
+    if open==nil{t.Fatal("new Xray admitted old account without new lease")}
+    // A forged second first-genesis attempt against the same real Nexus
+    // PostgreSQL account must fail due to immutable Node creation evidence.
+    cmd:=exec.Command("python3",signer,"issue","--node",
+        strconv.FormatInt(node,10),"--runtime",newRuntime,
+        "--policy-sha",strings.Repeat("b",64),
+        "--xray-pid",strconv.Itoa(os.Getpid()))
+    if output,err:=cmd.CombinedOutput();err==nil{
+        t.Fatalf("SQL allowed a second first genesis: %s",output)
+    }
+    t.Logf("PASS: Xray Node %d runtime changed; old WAL remains charged, "+
+        "old signed cap denied, new SQL first genesis refused",node)
+}

@@ -1,0 +1,105 @@
+name: Quota V2 cancel superseded PR runs
+on:
+  push:
+    branches:
+      - feature/quota-v2-signed-xray-cap-admission
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: quota-v2-node-pr-ci-cleanup
+  cancel-in-progress: true
+jobs:
+  cancel-superseded:
+    if: github.repository == 'TriplexCorp/XMesh-Node' && github.ref == 'refs/heads/feature/quota-v2-signed-xray-cap-admission'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Cancel only outdated runs of Node PR 170, preserve current SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import time
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+          
+          REPO = "TriplexCorp/XMesh-Node"
+          BRANCH = "feature/quota-v2-signed-xray-cap-admission"
+          PR_NUMBER = 170
+          TOKEN = os.environ["GH_TOKEN"]
+          HEAD = os.environ["GITHUB_SHA"]
+          RUN_ID = int(os.environ["GITHUB_RUN_ID"])
+          ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
+          assert os.environ["GITHUB_REPOSITORY"] == REPO
+          assert os.environ["GITHUB_REF"] == "refs/heads/" + BRANCH
+          assert re.fullmatch(r"[a-f0-9]{40}", HEAD)
+          
+          headers = {
+              "Authorization": "Bearer " + TOKEN,
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "xmesh-quota-v2-pr-ci-gc",
+          }
+          root = "https://api.github.com/repos/" + REPO
+          
+          def api(path, method="GET"):
+              req = Request(root + path, method=method, headers=headers)
+              try:
+                  with urlopen(req, timeout=30) as response:
+                      raw = response.read()
+                      return json.loads(raw) if raw and method == "GET" else None
+              except HTTPError as error:
+                  if method == "POST" and error.code in (409, 422):
+                      print("No longer cancelable:", path, "HTTP", error.code, flush=True)
+                      return None
+                  raise
+          
+          def assert_current_head():
+              latest = api("/branches/" + quote(BRANCH, safe=""))["commit"]["sha"]
+              if latest != HEAD:
+                  raise SystemExit("Branch advanced; refusing to prune from superseded cleanup run")
+          
+          assert_current_head()
+          targets = []
+          for page in range(1, 16):
+              data = api("/actions/runs?branch=" + quote(BRANCH, safe="") +
+                         "&per_page=100&page=" + str(page))["workflow_runs"]
+              for run in data:
+                  if run["status"] not in ACTIVE or run.get("id") == RUN_ID:
+                      continue
+                  if run.get("head_branch") != BRANCH:
+                      continue
+                  if run.get("head_sha") == HEAD:
+                      continue
+                  event = run.get("event")
+                  if event == "pull_request":
+                      prs = run.get("pull_requests") or []
+                      if not any(p.get("number") == PR_NUMBER and
+                                 p.get("head", {}).get("ref") == BRANCH and
+                                 p.get("head", {}).get("repo", {}).get("name") == "XMesh-Node"
+                                 for p in prs):
+                          continue
+                  elif event != "push":
+                      continue
+                  if run.get("head_repository", {}).get("full_name") not in (None, REPO):
+                      continue
+                  targets.append((run["id"], run["status"], run.get("head_sha", "")))
+              if len(data) < 100:
+                  break
+          
+          targets = sorted(set(targets), key=lambda item: item[1] != "in_progress")
+          print("Obsolete feature-branch runs:", len(targets), "latest head:", HEAD[:12], flush=True)
+          for index, (run_id, state, source) in enumerate(targets):
+              if index % 15 == 0:
+                  assert_current_head()
+              api("/actions/runs/" + str(run_id) + "/cancel", method="POST")
+              print("Cancel requested:", run_id, state, source[:12], flush=True)
+              time.sleep(0.5)
+          print("Cleanup completed. Current-head checks were preserved.", flush=True)
+          PY

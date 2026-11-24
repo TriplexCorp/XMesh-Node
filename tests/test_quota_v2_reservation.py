@@ -110,6 +110,39 @@ class ReservationGuardTests(unittest.TestCase):
         # to undo this node's prior locally enforced quota cutoff.
         self.assertEqual(denied.get(uid), "locally-revoked")
 
+    def test_existing_reservation_refuses_unlimited_or_legacy_transition(self):
+        uid = "550e8400-e29b-41d4-a716-446655440001"
+        config = {"inbounds": [{"tag": "MAIN", "protocol": "vless",
+                                "settings": {"clients": [{"id": uid}]}}]}
+        user = {"userId": 1, "xrayId": uid, "expireAtMs": 90000,
+                "panelUsedBytes": 0, "limitBytes": 100,
+                "offlineBudgetBytes": 50, "quotaReservation": lease()}
+        policy = {"version": 2, "nodeId": 1, "issuedAtMs": 1000,
+                  "validUntilMs": 100000, "users": [user]}
+        _, ledger, _ = guard.enforce(policy, copy.deepcopy(config), {},
+                                     {"1": 40}, "xray-a", False, 1000)
+        for version in (1, 2):
+            for offline in (False, True):
+                for limit in (0, 100):
+                    if version == 2 and limit > 0:
+                        continue
+                    with self.subTest(version=version, offline=offline, limit=limit):
+                        changed = copy.deepcopy(policy)
+                        changed["version"] = version
+                        changed["issuedAtMs"] = 2000
+                        changed["users"][0]["limitBytes"] = limit
+                        changed["users"][0]["offlineBudgetBytes"] = None
+                        changed["users"][0].pop("quotaReservation")
+                        with self.assertRaisesRegex(ValueError, "verified explicit close"):
+                            guard.enforce(changed, copy.deepcopy(config),
+                                          copy.deepcopy(ledger), {"1": 40},
+                                          "xray-a", offline, 2000)
+                        malformed = copy.deepcopy(ledger)
+                        malformed["users"]["1"]["quotaReservation"] = None
+                        with self.assertRaisesRegex(ValueError, "verified explicit close"):
+                            guard.enforce(changed, copy.deepcopy(config), malformed,
+                                          {"1": 40}, "xray-a", offline, 2000)
+
     def test_signed_ceiling_cannot_be_less_than_acknowledged_usage(self):
         invalid=lease(ceiling=40,ack=41)
         with self.assertRaises(ValueError):

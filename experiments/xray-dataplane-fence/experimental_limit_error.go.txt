@@ -1,0 +1,25 @@
+// Only injected into the disposable Xray experiment.
+package xmeshquota
+
+// Denied is a signed-budget refusal. It carries no WAL or integrity error.
+type Denied struct {
+	Reason error
+}
+
+func (d Denied) Error() string { return d.Reason.Error() }
+
+// TryCharge adapts Xray's Counter API, whose Add convention exposes only a
+// numeric result. Any panic other than a typed quota denial remains fatal.
+func TryCharge(add func(int64) int64, bytes int64) (err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			denial, ok := failure.(Denied)
+			if !ok {
+				panic(failure)
+			}
+			err = denial
+		}
+	}()
+	add(bytes)
+	return nil
+}

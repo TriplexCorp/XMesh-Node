@@ -1,0 +1,104 @@
+name: Quota V2 experimental fsynced byte ceilings (disposable)
+on:
+  pull_request:
+    paths:
+      - 'experiments/xray-dataplane-fence/experimental_byte_cap.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_byte_cap_test.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt'
+      - 'experiments/xray-dataplane-fence/observed_checkpoint.go.txt'
+      - 'experiments/xray-dataplane-fence/observed_checkpoint_test.go.txt'
+      - 'experiments/quota-v2-physical-stop/calendar_fence.py'
+      - 'experiments/quota-v2-physical-stop/journal_integrity.py'
+      - 'experiments/quota-v2-physical-stop/meter_inventory_audit.py'
+      - 'experiments/quota-v2-physical-stop/renewal_worker.py'
+      - 'tests/test_quota_v2_first_cap_handoff.py'
+      - 'experiments/xray-dataplane-fence/experimental_cap_socket.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_zero_meter_preflight.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_zero_meter_preflight_test.go.txt'
+      - 'experiments/quota-v2-physical-stop/successor_meter.py'
+      - 'tests/test_quota_v2_successor_meter.py'
+      - 'experiments/xray-dataplane-fence/xmeshdrain.go.txt'
+      - 'experiments/quota-v2-physical-stop/quarantine_policy.py'
+      - 'experiments/xray-dataplane-fence/test_xray_live_signed_cap.py'
+      - 'experiments/quota-v2-physical-stop/cap_install.py'
+      - 'experiments/xray-dataplane-fence/durable_meter_intent.go.txt'
+      - 'experiments/xray-dataplane-fence/apply-experiment.py'
+      - 'experiments/xray-dataplane-fence/experimental_ingress.go.txt'
+      - 'experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py'
+      - 'experiments/quota-v2-physical-stop/vless_ingress.py'
+      - 'tests/test_quota_v2_vless_ingress.py'
+      - '.github/workflows/quota-v2-byte-ceilings.yml'
+permissions:
+  contents: read
+jobs:
+  measured-byte-budget:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      # Go TestMain enables only the in-memory gate; no live Unix control listener.
+      XMESH_EXPERIMENTAL_DRAIN: '0'
+      GOTOOLCHAIN: go1.27.4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Check injection tool and exact upstream pin
+        run: |
+          set -euo pipefail
+          # Bytecode has no place in reviewed signed-Agent source trees.
+          if git ls-files | grep -E '(^|/)__pycache__/|[.]py[co]'; then
+            echo "Generated Python bytecode is tracked in the release source" >&2
+            exit 1
+          fi
+          python3 -m py_compile experiments/xray-dataplane-fence/apply-experiment.py
+          test -n "${GITHUB_ACTIONS:-}"
+          test "$XMESH_EXPERIMENTAL_DRAIN" = '0'
+      - name: Fetch exact reviewed upstream Xray and inject all experiment modules
+        run: |
+          set -Eeuo pipefail
+          source="$RUNNER_TEMP/xray-source"
+          git init "$source"
+          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+          python3 experiments/xray-dataplane-fence/apply-experiment.py "$source"
+          echo "XMESH_PINNED_XRAY_SOURCE=$source" >> "$GITHUB_ENV"
+      - name: Verify exact shared user, Node and CDN limits before byte delivery
+        run: |
+          set -euo pipefail
+          cd "$XMESH_PINNED_XRAY_SOURCE"
+          go test -race -count=1 -timeout=12m ./app/xmeshdrain -run '^(TestV2ExperimentalQuota|TestV2Signed)'
+      - name: Ensure all earlier WAL/fence/durable-meter regressions still pass
+        run: |
+          set -euo pipefail
+          cd "$XMESH_PINNED_XRAY_SOURCE"
+          go test -count=1 -timeout=12m ./app/xmeshdrain
+      - name: Renew a signed permit twice on one live VLESS connection
+        env:
+          XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: '1'
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/xmesh-xray-signed-cap"
+          (cd "$XMESH_PINNED_XRAY_SOURCE" && go build -trimpath -o "$binary" ./main)
+          python3 experiments/xray-dataplane-fence/test_xray_live_signed_cap.py "$binary"
+      - name: Real two-user stable VLESS ingress switches A without dropping B
+        env:
+          XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT: '1'
+        run: |
+          set -euo pipefail
+          python3 -m py_compile experiments/quota-v2-physical-stop/vless_ingress.py experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py
+          # First preserve the independently established same-namespace case.
+          python3 experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py "$RUNNER_TEMP/xmesh-xray-signed-cap"
+          # Then put ONLY A's successor metering Xray and echo endpoint in
+          # their own real network namespace. The public frontend, A's UUID
+          # and port, and B's existing connection stay on the host.
+          if ! command -v ip >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq iproute2
+          fi
+          XMESH_QUOTA_V2_CROSS_NETNS=1 python3 experiments/xray-dataplane-fence/test_xray_live_ingress_cutover.py "$RUNNER_TEMP/xmesh-xray-signed-cap"

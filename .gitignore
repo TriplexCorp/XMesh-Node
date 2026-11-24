@@ -2,3 +2,8 @@ config.json
 xmesh-node
 *.log
 .env
+
+# Generated Python bytecode must not enter reviewed Agent/release sources.
+__pycache__/
+*.py[cod]
+.pytest_cache/

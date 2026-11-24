@@ -1,0 +1,509 @@
+package xmeshdrain
+
+import (
+    "errors"
+    "fmt"
+    "os"
+    "strings"
+    "sync"
+    "testing"
+    "sync/atomic"
+
+    "github.com/xtls/xray-core/common/xmeshquota"
+    "github.com/xtls/xray-core/features/stats"
+)
+
+const capMain = "xmesh-u101--vless-main"
+const capCDN = "xmesh-u101--vless-cdn"
+
+func futureCapExpiryMs() int64 { return experimentalCapClockMs()+3600_000 }
+
+func installTestQuota(t *testing.T, grant, node, cdn uint64, aliases map[string]bool) {
+    t.Helper()
+    gate.Lock()
+    if gate.runtimeID == "" {
+        gate.Unlock()
+        t.Fatal("missing measured Xray runtime")
+    }
+    experimentalByteCaps.strict = true
+    experimentalByteCaps.users = map[string]*experimentalByteCap{
+        "xmesh-u101": {
+            runtimeID: gate.runtimeID, grantCeiling: grant,
+            nodeCeiling: node, cdnCeiling: cdn,
+            aliases: aliases, validUntilMs: futureCapExpiryMs(),
+        },
+    }
+    gate.Unlock()
+    t.Cleanup(func(){
+        gate.Lock()
+        experimentalByteCaps.strict = false
+        experimentalByteCaps.users = nil
+        gate.Unlock()
+    })
+}
+
+func newCapCounter(t *testing.T,manager interface {
+    RegisterCounter(string) (stats.Counter,error)
+},email,direction string) stats.Counter {
+    t.Helper()
+    counter,err:=manager.RegisterCounter(rawMeterName(email,direction))
+    if err!=nil{t.Fatal(err)}
+    return counter
+}
+
+func capAttempt(t *testing.T,c stats.Counter,email,direction string,n int64) bool {
+    t.Helper()
+    if err:=BeginMeterWrite(email,direction);err!=nil {t.Fatal(err)}
+    defer EndMeterWrite(email,direction)
+    audited:=c.(interface{ExperimentalAddMetered(int64)int64})
+    return xmeshquota.TryCharge(audited.ExperimentalAddMetered,n)==nil
+}
+
+func capValues(t *testing.T) (uint64,uint64) {
+    t.Helper()
+    gate.Lock()
+    defer gate.Unlock()
+    all,cdn,err:=diagnosticByteCapLocked(capMain)
+    if err!=nil {t.Fatal(err)}
+    return all,cdn
+}
+
+func TestV2ExperimentalQuotaFsyncFailureCannotChargeUncommittedBytes(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,50,50,20,map[string]bool{capMain:false,capCDN:true})
+    counter:=newCapCounter(t,manager,capMain,"downlink")
+    original:=experimentalMeterFileSync
+    defer func(){experimentalMeterFileSync=original}()
+    experimentalMeterFileSync=func(*os.File)error{
+        return errors.New("injected fsync failure before network delivery")
+    }
+    if err:=BeginMeterWrite(capMain,"downlink");err!=nil{t.Fatal(err)}
+    var thrown interface{}
+    func(){
+        defer func(){thrown=recover()}()
+        audited:=counter.(interface{ExperimentalAddMetered(int64)int64})
+        _=xmeshquota.TryCharge(audited.ExperimentalAddMetered,17)
+    }()
+    EndMeterWrite(capMain,"downlink")
+    if thrown==nil || !strings.Contains(fmt.Sprint(thrown),"cannot fsync") {
+        t.Fatalf("fsync failure did not fence metered charge: %v",thrown)
+    }
+    if counter.Value()!=0 {t.Fatal("byte counter advanced before fsync")}
+    all,cdn:=capValues(t)
+    if all!=0 || cdn!=0 {
+        t.Fatal("local shared reservation was charged from a failed fsync")
+    }
+    // A partially written WAL is a crash-uncertain precharge, not a
+    // refundable confirmed meter. The separate WAL startup suite detects
+    // corruption/unfinished intentions; no new grant is issued here.
+    _=dir
+}
+
+func TestV2ExperimentalQuotaUserAndNodeAndCDNBeforeDurableWAL(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,100,90,20,map[string]bool{capMain:false,capCDN:true})
+    up:=newCapCounter(t,manager,capMain,"uplink")
+    down:=newCapCounter(t,manager,capMain,"downlink")
+    cdnUp:=newCapCounter(t,manager,capCDN,"uplink")
+    cdnDown:=newCapCounter(t,manager,capCDN,"downlink")
+    for _,write:=range []struct{c stats.Counter;email,dir string;bytes int64}{
+        {up,capMain,"uplink",30},
+        {down,capMain,"downlink",30},
+        {cdnUp,capCDN,"uplink",10},
+        {cdnDown,capCDN,"downlink",10},
+    }{
+        if !capAttempt(t,write.c,write.email,write.dir,write.bytes) {
+            t.Fatalf("valid metered write rejected for %s",write.email)
+        }
+    }
+    all,cdn:=capValues(t)
+    if all!=80 || cdn!=20 {t.Fatalf("wrong combined budgets all=%d CDN=%d",all,cdn)}
+    if capAttempt(t,cdnUp,capCDN,"uplink",1) {
+        t.Fatal("CDN exceeded its independent 20-byte limit")
+    }
+    if cdnUp.Value()!=10 {t.Fatal("denied CDN delta entered StatsService")}
+    if !capAttempt(t,down,capMain,"downlink",10) {
+        t.Fatal("remaining 10 bytes of Node grant not usable on main inbound")
+    }
+    if capAttempt(t,up,capMain,"uplink",1) {
+        t.Fatal("shared Node ceiling exceeded through different alias/direction")
+    }
+    all,cdn=capValues(t)
+    if all!=90 || cdn!=20 || up.Value()!=30 || down.Value()!=40 {
+        t.Fatalf("quota cap leaked bytes: %d %d %d %d",all,cdn,up.Value(),down.Value())
+    }
+    for _,pair:=range []struct{email,dir string;c stats.Counter;value int64}{
+        {capMain,"uplink",up,30},
+        {capMain,"downlink",down,40},
+        {capCDN,"uplink",cdnUp,10},
+        {capCDN,"downlink",cdnDown,10},
+    }{
+        tail,err:=readMeterTail(meterTestFile(t,dir,pair.email,pair.dir))
+        if err!=nil || tail.last.NextBytes!=uint64(pair.value) {
+            t.Fatalf("durable WAL diverged from exact quota precharge %s/%s: %+v %v",
+                pair.email,pair.dir,tail.last,err)
+        }
+        if pair.c.Value()!=pair.value {t.Fatal("raw counter differs from durable charged bytes")}
+    }
+}
+
+func TestV2ExperimentalQuotaDoesNotWriteWALAboveGrant(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,5,7,2,map[string]bool{capMain:false,capCDN:true})
+    main:=newCapCounter(t,manager,capMain,"uplink")
+    if capAttempt(t,main,capMain,"uplink",6) {
+        t.Fatal("oversized initial write passed the policy ceiling")
+    }
+    if main.Value()!=0 {t.Fatal("rejected bytes changed the counter")}
+    path:=meterTestFile(t,dir,capMain,"uplink")
+    if _,err:=os.Stat(path);!errors.Is(err,os.ErrNotExist) {
+        t.Fatal("rejected write created a byte-intent WAL")
+    }
+    if !capAttempt(t,main,capMain,"uplink",5) {
+        t.Fatal("exactly available budget should precharge and then count")
+    }
+    if capAttempt(t,main,capMain,"uplink",1) {
+        t.Fatal("exhausted grant was replenished through another write")
+    }
+    all,cdn:=capValues(t)
+    if all!=5 || cdn!=0 {t.Fatal("wrong cap accounting")}
+}
+
+func TestV2ExperimentalQuotaRejectsUnknownAliasAndReplacementProcess(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,50,50,10,map[string]bool{capMain:false,capCDN:true})
+    forged:="xmesh-u101--unlisted"
+    outsider:=newCapCounter(t,manager,forged,"uplink")
+    if capAttempt(t,outsider,forged,"uplink",1) {
+        t.Fatal("unlisted alias bypassed signed inbound scope")
+    }
+    if outsider.Value()!=0 {t.Fatal("unlisted alias changed Xray byte counter")}
+    original:=newCapCounter(t,manager,capMain,"uplink")
+    gate.Lock()
+    if gate.runtimeID[0]=='f' {
+        gate.runtimeID="e"+gate.runtimeID[1:]
+    } else {
+        gate.runtimeID="f"+gate.runtimeID[1:]
+    }
+    gate.Unlock()
+    if capAttempt(t,original,capMain,"uplink",1) {
+        t.Fatal("old runtime quota reused for a replaced Xray process")
+    }
+    if original.Value()!=0 {t.Fatal("new process spent old runtime quota")}
+    _ = dir
+}
+
+func TestV2ExperimentalQuotaConcurrentWritersUseOneAtomicBudget(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    installTestQuota(t,60,60,0,map[string]bool{capMain:false})
+    counter:=newCapCounter(t,manager,capMain,"downlink")
+    var wg sync.WaitGroup
+    result:=make(chan bool,80)
+    for i:=0;i<8;i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for j:=0;j<10;j++{
+                result<-capAttempt(t,counter,capMain,"downlink",1)
+            }
+        }()
+    }
+    wg.Wait()
+    close(result)
+    accepted:=0
+    for ok:=range result {if ok {accepted++}}
+    if accepted!=60 || counter.Value()!=60 {
+        t.Fatalf("concurrent signed budget overspent/undercounted: %d, counter=%d",accepted,counter.Value())
+    }
+    all,cdn:=capValues(t)
+    if all!=60 || cdn!=0 {t.Fatal("wrong concurrent cap total")}
+    tail,err:=readMeterTail(meterTestFile(t,dir,capMain,"downlink"))
+    if err!=nil || tail.last.NextBytes!=60 || tail.last.Sequence!=60 {
+        t.Fatalf("concurrent quota WAL sequence gap: %+v, %v",tail.last,err)
+    }
+}
+
+func witnessHead(t *testing.T,dir string) string {
+    t.Helper()
+    i,err:=readInventory(dir)
+    if err!=nil || !i.exists {t.Fatalf("missing real on-disk WAL witness: %v",err)}
+    return i.tail.Digest
+}
+
+func liveMeterAt(t *testing.T,manager interface{
+    GetCounter(string) stats.Counter
+}) func(string,string)(uint64,error) {
+    t.Helper()
+    return func(alias,direction string)(uint64,error) {
+        c:=manager.GetCounter(rawMeterName(alias,direction))
+        if c==nil {return 0,nil}
+        value:=c.Value()
+        if value<0 {return 0,errors.New("negative Xray stats counter")}
+        return uint64(value),nil
+    }
+}
+
+func forgetTestCapButPreserveSameRunningXray(t *testing.T) {
+    t.Helper()
+    gate.Lock()
+    experimentalByteCaps.users=nil
+    gate.Unlock()
+}
+
+func TestV2ExperimentalQuotaWitnessedRecoveryOfMainAndCDNCaps(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    aliases:=map[string]bool{capMain:false,capCDN:true}
+    installTestQuota(t,65,55,15,aliases)
+    mUp:=newCapCounter(t,manager,capMain,"uplink")
+    mDown:=newCapCounter(t,manager,capMain,"downlink")
+    cDown:=newCapCounter(t,manager,capCDN,"downlink")
+    for _,write:=range []struct{c stats.Counter;email,dir string;amount int64}{
+        {mUp,capMain,"uplink",21},{mDown,capMain,"downlink",18},
+        {cDown,capCDN,"downlink",12},
+    } {
+        if !capAttempt(t,write.c,write.email,write.dir,write.amount) {
+            t.Fatal("failed to generate a real fsynced metered WAL")
+        }
+    }
+    head:=witnessHead(t,dir)
+    gate.Lock()
+    id:=gate.runtimeID
+    gate.Unlock()
+    forgetTestCapButPreserveSameRunningXray(t)
+    if err:=restoreExperimentalCapFromWitness("xmesh-u101",id,head,
+         aliases,65,55,15,futureCapExpiryMs(),liveMeterAt(t,manager));err!=nil{
+        t.Fatalf("same-runtime full WAL + external witness was rejected: %v",err)
+    }
+    all,cdn:=capValues(t)
+    if all!=51 || cdn!=12 {t.Fatalf("recovered local grants reset: %d,%d",all,cdn)}
+    // The 12 precharged CDN bytes cannot be "forgotten" by recovering
+    // caps for the same live Xray process. CDN has only three bytes left.
+    if !capAttempt(t,cDown,capCDN,"downlink",3) {
+        t.Fatal("valid remaining CDN quota rejected after replay")
+    }
+    if capAttempt(t,cDown,capCDN,"downlink",1) {
+        t.Fatal("recovered CDN cap exceeded")
+    }
+    if !capAttempt(t,mUp,capMain,"uplink",1) {
+        t.Fatal("last available Node byte denied")
+    }
+    if capAttempt(t,mDown,capMain,"downlink",1) {
+        t.Fatal("node grant replenished after control worker reinitialization")
+    }
+    all,cdn=capValues(t)
+    if all!=55 || cdn!=15 {t.Fatalf("restored caps diverged: %d,%d",all,cdn)}
+    // A second install, even with a larger entitlement, must not replace a
+    // live cap and reset in-memory committed spend.
+    if err:=restoreExperimentalCapFromWitness("xmesh-u101",id,
+        witnessHead(t,dir),aliases,100,100,100,futureCapExpiryMs(),liveMeterAt(t,manager));err==nil {
+        t.Fatal("duplicate cap install was allowed to enlarge grant")
+    }
+}
+
+func TestV2ExperimentalQuotaRecoveryRejectsUnprovedHistoryAndLiveMismatch(t *testing.T) {
+    for _,kind:=range []string{
+        "bad-witness","stale-birth","missing-inventory","missing-wal",
+        "wrong-runtime","wrong-alias","low-shared","low-node","low-cdn",
+        "wrong-live-counter","missing-current","different-billing-user",
+        "corrupted-wal-tail",
+    } {
+        t.Run(kind,func(t *testing.T) {
+            dir,manager:=setupUnfencedMeter(t)
+            aliases:=map[string]bool{capMain:false,capCDN:true}
+            installTestQuota(t,60,60,15,aliases)
+            m:=newCapCounter(t,manager,capMain,"uplink")
+            c:=newCapCounter(t,manager,capCDN,"downlink")
+            if !capAttempt(t,m,capMain,"uplink",25) ||
+                !capAttempt(t,c,capCDN,"downlink",10) {
+                t.Fatal("test precharge unavailable")
+            }
+            head:=witnessHead(t,dir)
+            gate.Lock()
+            id:=gate.runtimeID
+            gate.Unlock()
+            forgetTestCapButPreserveSameRunningXray(t)
+            user:="xmesh-u101"
+            grant,node,cdn:=uint64(60),uint64(60),uint64(15)
+            read:=liveMeterAt(t,manager)
+            switch kind {
+            case "bad-witness": head=strings.Repeat("f",64)
+            case "stale-birth": head=strings.Repeat("0",64)
+            case "missing-inventory":
+                if err:=os.Remove(dir+"/"+inventoryName);err!=nil{t.Fatal(err)}
+            case "missing-wal":
+                if err:=os.Remove(meterTestFile(t,dir,capMain,"uplink"));err!=nil{t.Fatal(err)}
+            case "wrong-runtime":
+                if id[0]=='a'{id="b"+id[1:]}else{id="a"+id[1:]}
+            case "wrong-alias":
+                aliases=map[string]bool{capCDN:true}
+            case "low-shared":grant=34
+            case "low-node":node=34
+            case "low-cdn":cdn=9
+            case "wrong-live-counter":
+                read=func(email,direction string)(uint64,error) {
+                    if email==capMain && direction=="uplink" {return 24,nil}
+                    return liveMeterAt(t,manager)(email,direction)
+                }
+            case "missing-current":
+                read=func(email,direction string)(uint64,error) {
+                    if email==capCDN {return 0,errors.New("not readable")}
+                    return liveMeterAt(t,manager)(email,direction)
+                }
+            case "different-billing-user":user="xmesh-u102"
+            case "corrupted-wal-tail":
+                path:=meterTestFile(t,dir,capMain,"uplink")
+                raw,err:=os.ReadFile(path)
+                if err!=nil{t.Fatal(err)}
+                if err:=os.WriteFile(path,raw[:len(raw)-1],0600);err!=nil{t.Fatal(err)}
+            }
+            if err:=restoreExperimentalCapFromWitness(
+                 user,id,head,aliases,grant,node,cdn,futureCapExpiryMs(),read);err==nil{
+                t.Fatalf("%s: unproved or unsafe WAL was accepted",kind)
+            }
+            gate.Lock()
+            installed:=experimentalByteCaps.users[user]
+            gate.Unlock()
+            if installed!=nil {t.Fatal("failed recovery created a positive cap")}
+        })
+    }
+}
+
+func TestV2ExperimentalQuotaRecoveryRefusesOldProcessEvenWithIntactInventory(t *testing.T) {
+    dir,manager:=setupUnfencedMeter(t)
+    aliases:=map[string]bool{capMain:false}
+    installTestQuota(t,60,60,0,aliases)
+    main:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,main,capMain,"uplink",20){t.Fatal("missing WAL")}
+    oldHead:=witnessHead(t,dir)
+    gate.Lock()
+    oldRuntime:=gate.runtimeID
+    if oldRuntime[0]=='a'{gate.runtimeID="b"+oldRuntime[1:]}else{
+        gate.runtimeID="a"+oldRuntime[1:]
+    }
+    newRuntime:=gate.runtimeID
+    experimentalByteCaps.users=nil
+    gate.Unlock()
+    if err:=restoreExperimentalCapFromWitness("xmesh-u101",newRuntime,
+        oldHead,aliases,60,60,0,futureCapExpiryMs(),liveMeterAt(t,manager));err==nil {
+        t.Fatal("old process precharge was silently erased on new PID")
+    }
+}
+
+func TestV2ExperimentalQuotaUntrustedRawCounterCannotBypassFsyncedCap(t *testing.T) {
+    for _,kind:=range []string{"direct-add","direct-set","different-inbound"}{
+        t.Run(kind,func(t *testing.T){
+            dir,manager:=setupUnfencedMeter(t)
+            installTestQuota(t,50,50,10,map[string]bool{
+                capMain:false,capCDN:true,
+            })
+            main:=newCapCounter(t,manager,capMain,"uplink")
+            target:=main
+            if kind=="different-inbound"{
+                target=newCapCounter(t,manager,capCDN,"uplink")
+            }
+            // Even if a legitimate writer is currently in flight for
+            // ANOTHER alias, a StatsService Add without the trusted origin
+            // bit must be fenced before the raw count can change.
+            if err:=BeginMeterWrite(capMain,"uplink");err!=nil{t.Fatal(err)}
+            var panicked interface{}
+            func(){
+                defer func(){panicked=recover()}()
+                if kind=="direct-set"{target.Set(6)}else{target.Add(6)}
+            }()
+            EndMeterWrite(capMain,"uplink")
+            if !strings.Contains(fmt.Sprint(panicked),
+                    "experimental quota: untrusted or revoked") {
+                t.Fatalf("raw metering bypass was not denied: %v",panicked)
+            }
+            if target.Value()!=0 || main.Value()!=0 {
+                t.Fatal("untrusted raw mutation changed billable StatsService bytes")
+            }
+            all,cdn:=capValues(t)
+            if all!=0 || cdn!=0 {t.Fatal("untrusted raw Add spent or refilled cap")}
+            marker:=durableCounterTaintPath(dir,canonicalMeterUser(capMain))
+            if _,err:=readDurableCounterTaint(marker);err!=nil {
+                t.Fatalf("raw bypass failed to persist forensic taint: %v",err)
+            }
+            // Neither a valid new metered Add nor an identical policy
+            // re-install can clear this sticky, root-owned continuity loss.
+            panicked=nil
+            func(){
+                defer func(){panicked=recover()}()
+                capAttempt(t,main,capMain,"uplink",1)
+            }()
+            if !strings.Contains(fmt.Sprint(panicked),"previously tainted meter") {
+                t.Fatalf("tainted meter failure was suppressed or misclassified: %v",panicked)
+            }
+            if main.Value()!=0 {t.Fatal("tainted meter still advanced")}
+        })
+    }
+}
+
+func TestV2ExperimentalQuotaExpiryAndClockRollbackAreSticky(t *testing.T) {
+    for _,kind:=range []string{"expire-at-exact-boundary","clock-backward"} {
+        t.Run(kind,func(t *testing.T) {
+            var now atomic.Int64
+            now.Store(100_000)
+            priorClock:=experimentalCapClockMs
+            experimentalCapClockMs=func()int64{return now.Load()}
+            t.Cleanup(func(){experimentalCapClockMs=priorClock})
+            dir,manager:=setupUnfencedMeter(t)
+            installTestQuota(t,100,100,100,map[string]bool{
+                capMain:false,capCDN:true,
+            })
+            _=dir
+            c:=newCapCounter(t,manager,capMain,"downlink")
+            if !capAttempt(t,c,capMain,"downlink",1){
+                t.Fatal("initial unexpired signed byte allowance rejected")
+            }
+            if kind=="expire-at-exact-boundary"{
+                now.Store(100_000+3600_000)
+            }else{
+                now.Store(99_999)
+            }
+            if capAttempt(t,c,capMain,"downlink",1){
+                t.Fatal("expired or time-rollback quota admitted a billable byte")
+            }
+            // Even if wall-clock later returns to the old valid window,
+            // the lifetime incident remains latched for this admission.
+            now.Store(100_002)
+            if capAttempt(t,c,capMain,"downlink",1){
+                t.Fatal("old signed admission resurrected after clock correction")
+            }
+            if c.Value()!=1{
+                t.Fatal("expired/rollback quota mutated the raw StatsService counter")
+            }
+            all,cdn:=capValues(t)
+            if all!=1 || cdn!=0 {t.Fatal("expired/rollback quota was replenished")}
+        })
+    }
+}
+
+func TestV2ExperimentalQuotaExpiredWitnessCannotRestoreResidualBytes(t *testing.T) {
+    var now atomic.Int64
+    now.Store(100_000)
+    priorClock:=experimentalCapClockMs
+    experimentalCapClockMs=func()int64{return now.Load()}
+    t.Cleanup(func(){experimentalCapClockMs=priorClock})
+    dir,manager:=setupUnfencedMeter(t)
+    aliases:=map[string]bool{capMain:false}
+    installTestQuota(t,30,30,0,aliases)
+    c:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,c,capMain,"uplink",8){t.Fatal("missing original WAL precharge")}
+    head:=witnessHead(t,dir)
+    gate.Lock()
+    id:=gate.runtimeID
+    experimentalByteCaps.users=nil
+    gate.Unlock()
+    expiredAt:=int64(100_000+3600_000)
+    now.Store(expiredAt)
+    if err:=restoreExperimentalCapFromWitness(
+        "xmesh-u101",id,head,aliases,30,30,0,expiredAt,
+        liveMeterAt(t,manager));err==nil {
+        t.Fatal("expired signed grant recovered as positive balance")
+    }
+    gate.Lock()
+    installed:=experimentalByteCaps.users["xmesh-u101"]
+    gate.Unlock()
+    if installed!=nil{t.Fatal("expired recovery mutated active quota grants")}
+}

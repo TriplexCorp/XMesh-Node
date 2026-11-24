@@ -7,6 +7,8 @@ export LC_ALL=C
 
 [[ "${EUID}" -eq 0 ]] || { echo "Run as root" >&2; exit 1; }
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "$ROOT/deploy/xmesh-pq-install-guard.sh"
+xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
 VERSION_FILE="$ROOT/VERSION"
 [[ -f "$VERSION_FILE" && ! -L "$VERSION_FILE" ]] || { echo "VERSION file missing" >&2; exit 1; }
 NODE_VERSION="$(tr -d '\r\n' < "$VERSION_FILE")"
@@ -45,6 +47,14 @@ BINARY="$BUILD_DIR/xmesh-agent-xspv2-product"
 chmod 0755 "$BINARY"
 DIGEST="$(sha256sum "$BINARY" | awk '{print $1}')"
 [[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid strict-PQ product client digest" >&2; exit 1; }
+# An enrolled product is bound to the exact running executable. A fresh
+# installer cannot perform the signed XSP/2 identity transition. An exact
+# retry is a no-op rather than rewriting an active executable or receipt.
+if xmesh_product_binding_exists /var/lib/xmesh-agent/product; then
+  xmesh_require_unchanged_binary /usr/local/bin/xmesh-agent-xspv2-product "$DIGEST"
+  echo "Existing enrolled strict-PQ product artifact unchanged."
+  exit 0
+fi
 install -d -o root -g root -m 0755 /usr/local/bin
 install -o root -g root -m 0755 "$BINARY" "$PRODUCT_STAGE"
 [[ "$(sha256sum "$PRODUCT_STAGE" | awk '{print $1}')" == "$DIGEST" ]] || { echo "Staged strict-PQ product client digest mismatch" >&2; exit 1; }

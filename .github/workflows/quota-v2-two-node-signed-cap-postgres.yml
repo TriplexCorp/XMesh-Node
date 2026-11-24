@@ -1,0 +1,116 @@
+name: Quota V2 two-process Xray + real Nexus PostgreSQL signed cap (disposable)
+on:
+  pull_request:
+    paths:
+      - 'tests/quota_v2_two_node_pg_signer.py'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_admission_test.go.txt'
+      - 'experiments/xray-dataplane-fence/experimental_signed_cap_pg_integration_test.go.txt'
+      - 'experiments/xray-dataplane-fence/apply-experiment.py'
+      - '.github/workflows/quota-v2-two-node-signed-cap-postgres.yml'
+permissions:
+  contents: read
+jobs:
+  two-node-signed-cap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: quota_test
+          POSTGRES_PASSWORD: quota_test_disposable
+          POSTGRES_DB: quota_test
+        ports: ['127.0.0.1:5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      XMESH_AUDIT_DISPOSABLE: '1'
+      XMESH_EXPERIMENTAL_DRAIN: '0'
+      GOTOOLCHAIN: go1.27.4
+      QUOTA_TEST_DSN: postgresql://quota_test:quota_test_disposable@127.0.0.1:5432/quota_test
+      XMESH_PINNED_NEXUS_SHA: 68f44f942b78d766180cdc056692d3b26da74c62
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: TriplexCorp/XMesh-Nexus
+          ref: 68f44f942b78d766180cdc056692d3b26da74c62
+          path: nexus
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Verify immutable Nexus SQL and create disposable PostgreSQL 17 account
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C nexus rev-parse HEAD)" = "$XMESH_PINNED_NEXUS_SHA"
+          python3 -m py_compile tests/quota_v2_two_node_pg_signer.py
+          python3 -m pip install 'psycopg[binary]==3.2.3' --break-system-packages
+          python3 tests/quota_v2_two_node_pg_signer.py init --nexus-source nexus
+      - name: Build real Nexus PolicySigner and independently pin its public key
+        run: |
+          set -Eeuo pipefail
+          cargo build --manifest-path nexus/backend/Cargo.toml --features quota-v2-disposable-cap-issuer --bin quota-v2-ci-signed-cap
+          export XMESH_CI_CAP_POLICY_KEY="$RUNNER_TEMP/quota-v2-ci-policy-key"
+          test -x "$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap"
+          "$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap" --public > "$RUNNER_TEMP/nexus-policy-pinned.hex"
+          chmod 0600 "$RUNNER_TEMP/nexus-policy-pinned.hex"
+          grep -Eq '^[0-9a-f]{64}$' "$RUNNER_TEMP/nexus-policy-pinned.hex"
+          echo "XMESH_CI_NEXUS_SIGNER=$GITHUB_WORKSPACE/nexus/backend/target/debug/quota-v2-ci-signed-cap" >> "$GITHUB_ENV"
+          echo "XMESH_CI_CAP_POLICY_KEY=$XMESH_CI_CAP_POLICY_KEY" >> "$GITHUB_ENV"
+          echo "XMESH_CI_NEXUS_PINNED_PUBLIC=$RUNNER_TEMP/nexus-policy-pinned.hex" >> "$GITHUB_ENV"
+      - name: Compile exact pinned instrumented Xray Go binary with race detector
+        run: |
+          set -Eeuo pipefail
+          source="$RUNNER_TEMP/xray-source"
+          git init "$source"
+          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+          python3 experiments/xray-dataplane-fence/apply-experiment.py "$source"
+          cd "$source"
+          go test -race -c -o "$RUNNER_TEMP/xmeshdrain.test" ./app/xmeshdrain
+          echo "XMESH_CI_QUOTA_SQL_SIGNER=$GITHUB_WORKSPACE/tests/quota_v2_two_node_pg_signer.py" >> "$GITHUB_ENV"
+          echo "XMESH_CI_QUOTA_RESULTS=$RUNNER_TEMP/quota-v2-signed-cap-results" >> "$GITHUB_ENV"
+          echo "XMESH_CI_QUOTA_PERSIST_DIR=$RUNNER_TEMP/quota-v2-fsynced-wal" >> "$GITHUB_ENV"
+      - name: Two independent Xray processes spend 700 plus 300 from a global 1000
+        run: |
+          set -Eeuo pipefail
+          mkdir -m 0700 -p "$XMESH_CI_QUOTA_RESULTS" "$XMESH_CI_QUOTA_PERSIST_DIR"
+          XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+          XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" -test.v -test.run '^TestV2SignedRealPostgreSQLTwoNodeProcess$' -test.timeout 2m
+      - name: Restart isolated PostgreSQL and verify original signed outbox is durable
+        run: |
+          set -Eeuo pipefail
+          container_id="$(docker ps --filter 'ancestor=postgres:17' --format '{{.ID}}')"
+          test "$(echo "$container_id" | wc -w)" -eq 1
+          docker restart "$container_id"
+          python3 - <<'PY'
+          import os,time,psycopg
+          for attempt in range(30):
+              try:
+                  with psycopg.connect(os.environ["QUOTA_TEST_DSN"],connect_timeout=2) as conn:
+                      assert conn.execute("SELECT 1").fetchone()[0]==1
+                  break
+              except (psycopg.Error,AssertionError):
+                  time.sleep(1)
+          else:
+              raise RuntimeError("disposable PostgreSQL failed to recover")
+          PY
+          python3 tests/quota_v2_two_node_pg_signer.py replay --persist "$XMESH_CI_QUOTA_PERSIST_DIR"
+      - name: Two fresh Xray processes reject old signed grants and WAL reset
+        run: |
+          set -Eeuo pipefail
+          XMESH_CI_QUOTA_NODE=47 "$RUNNER_TEMP/xmeshdrain.test" -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant$' -test.timeout 2m
+          XMESH_CI_QUOTA_NODE=48 "$RUNNER_TEMP/xmeshdrain.test" -test.v -test.run '^TestV2SignedOldXrayRuntimeCannotReuseOldGrant$' -test.timeout 2m
+      - name: Assert original Node grants and outbox are conserved after both restarts
+        run: |
+          set -Eeuo pipefail
+          python3 tests/quota_v2_two_node_pg_signer.py assert --reports "$XMESH_CI_QUOTA_RESULTS"

@@ -1,0 +1,205 @@
+package xmeshdrain
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "os"
+    "path/filepath"
+    "reflect"
+    "strings"
+    "testing"
+)
+
+func pristineFixture(t *testing.T) (zeroMeterRequest,string) {
+    t.Helper()
+    dir,_,signed,_,pub,_:=signedCapTestFixture(t)
+    previous:=capControl
+    capControl=&localCapControl{
+        binding:localCapBinding{NodeID:signed.NodeID,
+            ActivationReceiptSHA256:signed.ActivationReceiptSHA256,
+            PolicyPublicKey:strings.Repeat("a",64)},
+        signer:pub,
+    }
+    t.Cleanup(func(){capControl=previous})
+    before:=enabled
+    enabled=true
+    t.Cleanup(func(){enabled=before})
+    oldTags:=trackedInboundTags
+    trackedInboundTags=map[string]struct{}{"vless-main":{}, "vless-cdn":{}}
+    t.Cleanup(func(){trackedInboundTags=oldTags})
+    return zeroMeterRequest{
+        SchemaVersion:1,NodeID:signed.NodeID,UserID:signed.UserID,
+        Nonce:strings.Repeat("f",64),
+        MeterEpoch:"55555555-5555-4555-8555-555555555555",
+        ReservationID:"66666666-6666-4666-8666-666666666666",
+        Aliases:append([]signedCapAlias(nil),signed.AliasScopes...),
+    },dir
+}
+
+func TestQuotaV2SuccessorNewUserKeepsSignedPeerWAL(t *testing.T) {
+    dir,manager,peer,expected,pub,private:=signedCapTestFixture(t)
+    previous:=capControl
+    capControl=&localCapControl{binding:localCapBinding{NodeID:peer.NodeID},signer:pub}
+    t.Cleanup(func(){capControl=previous})
+    oldTags:=trackedInboundTags
+    trackedInboundTags=map[string]struct{}{"vless-main":{}, "vless-cdn":{}}
+    t.Cleanup(func(){trackedInboundTags=oldTags})
+    if err:=installSignedFirstGenesisCap(signedCapTestEnvelope(t,peer,private),pub,expected);err!=nil {
+        t.Fatal(err)
+    }
+    counter:=newCapCounter(t,manager,capMain,"uplink")
+    if !capAttempt(t,counter,capMain,"uplink",17){t.Fatal("peer failed to meter")}
+    req:=zeroMeterRequest{
+        SchemaVersion:1,NodeID:peer.NodeID,UserID:102,Nonce:strings.Repeat("f",64),
+        MeterEpoch:"55555555-5555-4555-8555-555555555555",
+        ReservationID:"66666666-6666-4666-8666-666666666666",
+        Aliases:[]signedCapAlias{{Email:"xmesh-u102--vless-main",Class:"main"}},
+    }
+    if _,err:=verifyPristineSuccessorMeter(req);err!=nil{t.Fatal(err)}
+    inventory,err:=readInventory(dir)
+    if err!=nil{t.Fatal(err)}
+    peer.Kind=signedCapRenewalKind
+    peer.ReservationRevision++
+    peer.Nonce=strings.Repeat("d",64)
+    peer.InventoryTailDigest=inventory.tail.Digest
+    peer.WitnessedWalBytes=17
+    expected.ReservationRevision=peer.ReservationRevision
+    expected.FirstGenesisIndependentlyProved=false
+    renewal:=signedCapTestEnvelope(t,peer,private)
+    if err:=renewSignedCap(renewal,pub,expected);err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err!=nil{t.Fatal(err)}
+    path:=filepath.Join(dir,"positive-cap-u101-r4.json")
+    if err:=os.WriteFile(path,[]byte("altered"),0600);err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil{t.Fatal("accepted altered peer grant")}
+    if err:=os.Remove(path);err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil{t.Fatal("accepted missing peer grant")}
+    if err:=os.WriteFile(path,renewal,0600);err!=nil{t.Fatal(err)}
+    if counter.Value()!=17 {t.Fatal("peer counter changed during successor proof")}
+    if err:=os.Remove(meterLedgerPath(dir,peer.RuntimeID,capMain,"uplink"));err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil{t.Fatal("missing peer WAL was accepted")}
+}
+
+func TestQuotaV2FreshMeterReturnsOnlyNonAuthorizingEmptyObservation(t *testing.T) {
+    req,_:=pristineFixture(t)
+    result,err:=verifyPristineSuccessorMeter(req)
+    if err!=nil{t.Fatalf("fresh Xray should have an empty meter: %v",err)}
+    if result.Kind!=zeroMeterKind || result.SchemaVersion!=1 ||
+        result.NodeID!=req.NodeID || result.UserID!=req.UserID ||
+        result.Nonce!=req.Nonce || result.MeterEpoch!=req.MeterEpoch ||
+        result.ReservationID!=req.ReservationID ||
+        result.InventorySHA256!=emptySha256 ||
+        result.RuntimeID!=gate.runtimeID ||
+        len(result.Aliases)!=len(req.Aliases) ||
+        !reflect.DeepEqual(result.Aliases,req.Aliases) ||
+        !result.ZeroInitialRawCounters || !result.IsolatedNewWalRoot ||
+        result.AuthorizedBytes!=0 || result.CanSpend || result.CanStart ||
+        result.CanResume || result.FinalMeterVerified || result.RefundableBytes!=0 {
+        t.Fatalf("empty successor incorrectly acquired authority: %+v",result)
+    }
+    repeat,err:=verifyPristineSuccessorMeter(req)
+    if err!=nil || !reflect.DeepEqual(repeat,result) {
+        t.Fatalf("read-only zero meter preflight not stable: %v",err)
+    }
+    gate.Lock()
+    if len(gate.meterTails)!=0 || len(experimentalByteCaps.users)!=0 || len(gate.users)!=0 {
+        t.Fatal("zero-meter observation changed active or durable byte accounting")
+    }
+    gate.Unlock()
+}
+
+func TestQuotaV2FreshMeterFailsClosedForAliasMismatchAndHistoricState(t *testing.T) {
+    req,dir:=pristineFixture(t)
+    cases:=[]func(*zeroMeterRequest){
+        func(p *zeroMeterRequest){p.UserID++},
+        func(p *zeroMeterRequest){p.Nonce="0"},
+        func(p *zeroMeterRequest){p.NodeID++},
+        func(p *zeroMeterRequest){p.Aliases=nil},
+        func(p *zeroMeterRequest){p.Aliases[0].Class="unmetered"},
+        func(p *zeroMeterRequest){p.Aliases[0].Email="xmesh-u102--cdn"},
+        func(p *zeroMeterRequest){p.MeterEpoch=p.ReservationID},
+    }
+    for i,change:=range cases{
+        scope:=req
+        scope.Aliases=append([]signedCapAlias(nil),req.Aliases...)
+        change(&scope)
+        if _,err:=verifyPristineSuccessorMeter(scope);err==nil{
+            t.Fatalf("untrusted successor identity accepted in case %d",i)
+        }
+    }
+    if err:=os.WriteFile(filepath.Join(dir,"meter-stale.jsonl"),
+        []byte("old-private-meter\n"),0600);err!=nil{t.Fatal(err)}
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil {
+        t.Fatal("stale or unindexed WAL passed fresh meter proof")
+    }
+}
+
+func TestQuotaV2FreshMeterRejectsCountersAndExistingSignedCaps(t *testing.T) {
+    req,_:=pristineFixture(t)
+    // A registered but zero-valued alias may be legitimate at Xray
+    // startup. A nonzero byte or any installed user cap is NOT.
+    observed.Lock()
+    manager:=observed.manager
+    observed.Unlock()
+    name:=rawMeterName(req.Aliases[0].Email,"uplink")
+    counter:=manager.GetCounter(name)
+    if counter==nil {
+        var err error
+        counter,err=manager.RegisterCounter(name)
+        if err!=nil{t.Fatal(err)}
+    }
+    if _,err:=verifyPristineSuccessorMeter(req);err!=nil{
+        t.Fatalf("a genuinely registered but zero-valued user counter is safe: %v",err)
+    }
+    // Synthesize an already-tainted foreign byte *without* using the
+    // source-pinned trusted WAL writer. A strict production raw Add would
+    // intentionally panic and cannot be used to seed a negative fixture.
+    enabled=false
+    counter.Add(1)
+    enabled=true
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil {
+        t.Fatal("nonzero user counter passed pristine successor check")
+    }
+    gate.Lock()
+    experimentalByteCaps.users=map[string]*experimentalByteCap{
+        canonicalMeterUser(req.Aliases[0].Email): {},
+    }
+    gate.Unlock()
+    if _,err:=verifyPristineSuccessorMeter(req);err==nil{
+        t.Fatal("already installed user cap gained a second first-meter proof")
+    }
+}
+
+func TestQuotaV2ZeroMeterIPCRejectsForeignPeerAndNonCanonicalPayload(t *testing.T) {
+    scope,_:=pristineFixture(t)
+    raw,err:=json.Marshal(scope)
+    if err!=nil{t.Fatal(err)}
+    var canonical map[string]any
+    if err:=json.Unmarshal(raw,&canonical);err!=nil{t.Fatal(err)}
+    raw,err=json.Marshal(canonical)
+    if err!=nil{t.Fatal(err)}
+    invoke:=func(payload []byte, trusted bool) *httptest.ResponseRecorder {
+        req:=httptest.NewRequest(http.MethodPost,zeroMeterPath,bytes.NewReader(payload))
+        if trusted {req=req.WithContext(context.WithValue(req.Context(),capPeerKey{},true))}
+        result:=httptest.NewRecorder()
+        serveHTTP(result,req)
+        return result
+    }
+    if result:=invoke(raw,false);result.Code!=http.StatusForbidden{
+        t.Fatalf("missing Unix peer credential accepted: HTTP %d",result.Code)
+    }
+    if result:=invoke(append(raw,'\n'),true);result.Code!=http.StatusBadRequest{
+        t.Fatalf("noncanonical JSON accepted: HTTP %d",result.Code)
+    }
+    result:=invoke(raw,true)
+    if result.Code!=http.StatusOK {t.Fatalf("no zero-meter response: %d %s",
+        result.Code,result.Body.String())}
+    var received zeroMeterResult
+    if err:=json.Unmarshal(result.Body.Bytes(),&received);err!=nil{t.Fatal(err)}
+    if received.CanSpend || received.CanStart || received.CanResume ||
+        received.AuthorizedBytes!=0 || !received.ZeroInitialRawCounters {
+        t.Fatal("read-only Unix response acquired spend or resume authority")
+    }
+}

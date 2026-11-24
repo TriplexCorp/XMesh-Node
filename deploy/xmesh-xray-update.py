@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-AGENT_VERSION = "control-v6.0.11"
+AGENT_VERSION = "control-v6.0.27"
 VERSION = re.compile(r"v?([0-9]+\.[0-9]+\.[0-9]+(?:[._+-][A-Za-z0-9._+-]+)?)\Z")
 IDENTITY = re.compile(r"sha256:[0-9a-f]{64}\Z")
 OFFICIAL = "ghcr.io/xtls/xray-core:"
@@ -262,6 +262,30 @@ class Updater:
                 except BlockingIOError:
                     if time.monotonic()>=deadline: raise Failure('prepare_failed')
                     time.sleep(.2)
+            # The official-image updater cannot install a signed permit for a
+            # replacement runtime. Even recovery of an interrupted update
+            # must stay away from a quarantined or funded generation.
+            quota_evidence = (
+                "quota-revocation-deny-pending",
+                # A confirmed Genesis lease already holds funded bytes even
+                # before its first spending cap has been installed. Refuse
+                # runtime replacement throughout preparation/confirmation.
+                "genesis-quarantine-envelope.json",
+                "genesis-reservation-prepared-u*.json",
+                "genesis-reservation-confirmed-u*.json",
+                "genesis-positive-cap-u*.json",
+                # Likewise do not recover an unrelated image transaction in
+                # the middle of a fenced calendar transition, before the new
+                # signed positive receipt has reached the local journal.
+                "calendar-successor-u*.json", "calendar-fence-u*.json",
+                "calendar-meter-u*.json", "calendar-delivery-u*.json",
+                "calendar-positive-u*.json", "wal-cap-u*.json",
+            )
+            if any(next(self.state.glob(pattern), None) is not None for pattern in quota_evidence):
+                result = self.error_result(Failure("prepare_failed"), "unchanged")
+                result["detail"] = "Quota V2 runtime state present. Official-image update and rollback are blocked."
+                self.emit(result)
+                return result
             self.recover_pending()
             self.prune_private_logs()
             if self.journal.exists():

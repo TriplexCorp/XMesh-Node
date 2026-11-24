@@ -357,6 +357,52 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     if u.lateCounterMutation {
         return empty,errors.New("unsafe Xray StatsService counter mutation or reset")
     }
+    // The signed, already-installed cap contains the independent complete
+    // MAIN/CDN roster, even if one or every alias has never carried traffic.
+    // Under the SAME gate lock as byte WAL, require this exact roster for
+    // the observational old-epoch fence; a user-scoped transport session
+    // list alone is incomplete. A missing raw counter is zero ONLY if the
+    // signed alias exists and its durable WAL has no nonzero intent.
+    signedCoverage:=false
+    identity:=canonicalMeterUser(email)
+    cap:=experimentalByteCaps.users[identity]
+    if experimentalByteCaps.strict && cap!=nil {
+        if cap.runtimeID!=gate.runtimeID ||
+            (cap.signedGrant.Kind!=signedCapKind &&
+                cap.signedGrant.Kind!=signedCapRenewalKind) ||
+            cap.signedGrant.NodeID!=scope.NodeID ||
+            cap.signedGrant.UserID!=scope.UserID ||
+            cap.signedGrant.AccountEpoch!=scope.Epoch ||
+            cap.signedGrant.MeterEpoch!=scope.MeterEpoch ||
+            cap.signedGrant.ReservationID!=scope.ReservationID ||
+            cap.signedGrant.ReservationRevision!=scope.Revision ||
+            len(cap.aliases)==0 || len(cap.aliases)>16 ||
+            len(cap.aliases)!=len(cap.signedGrant.AliasScopes) {
+            return empty,errors.New("calendar checkpoint signed cap scope or installed alias count changed")
+        }
+        for registered:=range u.emails {
+            if _,present:=cap.aliases[registered];!present {
+                return empty,errors.New("calendar checkpoint saw unassigned transport alias")
+            }
+        }
+        signedCoverage=true
+        seenEmails=nil
+        for _,alias:=range cap.signedGrant.AliasScopes {
+            isCDN,present:=cap.aliases[alias.Email]
+            if canonicalMeterUser(alias.Email)!=identity ||
+                !present || isCDN!=(alias.Class=="cdn") ||
+                (alias.Class!="main" && alias.Class!="cdn") {
+                return empty,errors.New("calendar checkpoint saw foreign or uninstalled signed alias")
+            }
+            seenEmails=append(seenEmails,alias.Email)
+        }
+        // For never-used aliases, the registry may never allocate a
+        // StatsService counter. Inventory must still independently prove
+        // that there is no vanished or orphaned historical WAL stream.
+        if err:=verifyMeterJournalDirectory(gate.journalDir);err!=nil{return empty,err}
+    } else if experimentalByteCaps.strict && capControl!=nil {
+        return empty,errors.New("calendar checkpoint requires an actually installed signed cap")
+    }
     if len(seenEmails)==0 || len(seenEmails)>16 {
         return empty,errors.New("missing or unbounded observed inbound identities")
     }
@@ -366,12 +412,15 @@ func persistObservedCheckpoint(scope checkpointScope) (observedCheckpoint,error)
     }
     // Every observed account-bearing inbound must contribute to the sample.
     // A single request-email read would undercount actual main+CDN traffic.
-    // Still NONFINAL: observed sessions are NOT an authenticated enumeration
-    // of every provisioned signed inbound, and unrelated background writers
-    // have not been proven quiescent.
+    // Still NONFINAL: even an exact signed roster plus a durable WAL
+    // snapshot cannot prove all future/background writers are quiescent
+    // or justify a refund or a fresh spending authorization.
     read := func(alias,direction string)(uint64,error) {
         counter:=observed.manager.GetCounter("user>>>"+alias+">>>traffic>>>"+direction)
-        if counter==nil { return 0,fmt.Errorf("missing %s counter for %s",direction,alias) }
+        if counter==nil {
+            if signedCoverage {return 0,nil}
+            return 0,fmt.Errorf("missing %s counter for %s",direction,alias)
+        }
         n:=counter.Value()
         if n<0 { return 0,fmt.Errorf("negative %s counter for %s",direction,alias) }
         return uint64(n),nil

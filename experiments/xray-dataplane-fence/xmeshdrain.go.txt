@@ -22,6 +22,7 @@ import (
 
     c "github.com/xtls/xray-core/common/ctx"
     "github.com/xtls/xray-core/common/session"
+    "github.com/xtls/xray-core/common/xmeshquota"
 )
 
 var errFenced = errors.New("experimental xmesh drain: user is fenced")
@@ -29,8 +30,29 @@ var errHistoricMeterDebt = errors.New("experimental xmesh drain: unresolved prio
 var errNoSessionID = errors.New("experimental xmesh drain: missing session ID")
 var errNoUserID = errors.New("experimental xmesh drain: missing authenticated user email")
 var errDuplicateSession = errors.New("experimental xmesh drain: duplicate live session ID")
-var enabled = os.Getenv("GITHUB_ACTIONS") == "true" &&
-    os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1"
+// This is an unreleased, source-pinned experimental dataplane. A private
+// root-only machine marker is an EXPLICIT staging opt-in, never a lease or
+// spending authorization. Actual spending still requires an independently
+// verified Nexus Ed25519 cap and a private durable WAL journal. The checked
+// CI runner path remains available for disposable live tests.
+const stagingMarker = "/etc/xmesh-quota-v2-staging"
+
+func stagingMarkerApproved(flag string) bool {
+    if os.Geteuid() != 0 || os.Getenv(flag) != "1" {
+        return false
+    }
+    info, err := os.Lstat(stagingMarker)
+    if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+        return false
+    }
+    stat, ok := info.Sys().(*syscall.Stat_t)
+    return ok && stat.Uid == 0 && stat.Nlink == 1
+}
+
+var enabled = os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1" &&
+    (os.Getenv("GITHUB_ACTIONS") == "true" ||
+        (os.Getenv("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING") != "" &&
+            stagingMarkerApproved("XMESH_QUOTA_V2_STAGING_RUNTIME")))
 
 // Every user-bearing inbound must be enumerated. A single-inbound fence
 // cannot protect a second CDN/secondary listener carrying the same identity.
@@ -93,7 +115,12 @@ func RequireInboundCoverage(ctx context.Context) error {
     subject := session.InboundFromContext(ctx)
     if subject == nil { return nil }
     // A private StatsService call does not need user authentication.
-    if subject.Tag == "xmesh_stats_in" { return nil }
+    if subject.Tag == "xmesh_stats_in" {
+        if capControl != nil && subject.User != nil {
+            return errors.New("signed Xray cap: authenticated user on reserved StatsService inbound")
+        }
+        return nil
+    }
     // Never let a tagged dataplane route proceed without user attribution,
     // even if upstream Xray omitted the authenticated User context. Checking
     // only for User != nil permits silent unmetered traffic on that route.
@@ -143,6 +170,7 @@ type userState struct {
     // worker/route is NOT enough to claim drained if its close callback has
     // not yet returned (for example, a blocked network/socket Close).
     stopping int
+    cancellationScheduled bool
     // Any direct user-byte Counter.Add/Set after fencing poisons the meter.
     lateCounterMutation bool
     done chan struct{}
@@ -180,6 +208,13 @@ func Register(ctx context.Context, email string, stop func()) error {
     if email == "" {
         return errNoUserID
     }
+    if capControl != nil {
+        inbound := session.InboundFromContext(ctx)
+        match := signedUserEmail.FindStringSubmatch(email)
+        if inbound == nil || match == nil || match[2] != inbound.Tag {
+            return errors.New("signed Xray cap: authenticated alias does not match its inbound")
+        }
+    }
     id := uint64(c.IDFromContext(ctx))
     if id == 0 {
         return errNoSessionID
@@ -189,6 +224,7 @@ func Register(ctx context.Context, email string, stop func()) error {
     }
     gate.Lock()
     defer gate.Unlock()
+    if err:=checkSignedCapBeforeRegisterLocked(email);err!=nil{return err}
     u := ensureUser(canonicalMeterUser(email))
     if u.fenced {
         return errFenced
@@ -282,6 +318,16 @@ func auditRawCounter(name string, preFenceUnsafe bool, trustedMeterOrigin bool, 
         if err:=commitDurableCounterTaint(gate.journalDir,canonicalMeterUser(email));err!=nil {
             panic(fmt.Sprintf("experimental Xray counter taint cannot be persisted; deny: %v",err))
         }
+        // In the bounded experimental dataplane, an unauthorized raw Add,
+        // Set or stale writer must NEVER advance a billable counter or pass
+        // a byte. Retaining old observed-only mutation for unconstrained
+        // drain tests is deliberate; it never becomes quota authority.
+        if experimentalByteCaps.strict {
+            panic("experimental quota: untrusted or revoked Xray counter mutation denied")
+        }
+    }
+    if experimentalByteCaps.strict && u.lateCounterMutation {
+        panic("experimental quota: previously tainted meter cannot continue spending")
     }
     if trustedMeterOrigin && !u.fenced && !u.lateCounterMutation && !preFenceUnsafe && !exceeds {
         // This is the only allowed data-plane path. Commit the conservative
@@ -292,6 +338,9 @@ func auditRawCounter(name string, preFenceUnsafe bool, trustedMeterOrigin bool, 
             panic("experimental Xray trusted counter intent callback absent")
         }
         if err:=meterIntent(email,direction);err!=nil {
+            if denial,ok:=err.(xmeshquota.Denied);ok {
+                panic(denial)
+            }
             panic(fmt.Sprintf("experimental Xray byte WAL cannot be persisted: %v",err))
         }
     }
@@ -488,24 +537,13 @@ func state(email string, u *userState) result {
     }
 }
 
-func fence(ctx context.Context, email string) (result, error) {
-    gate.Lock()
-    u := ensureUser(canonicalMeterUser(email))
-    var cancels []func()
-    if !u.fenced {
-        u.fenced = true
-        for _, closeConn := range u.active {
-            cancels = append(cancels, closeConn)
-        }
-        // Register all cancellation tasks BEFORE checking completion or
-        // releasing the gate. Otherwise the last Finish/RouteFinish can close
-        // done while a transport close is still outstanding.
-        u.stopping += len(cancels)
-        completeUserIfIdleLocked(u)
-    }
-    done := u.done
-    gate.Unlock()
-    for _, closeConn := range cancels {
+// Caller holds gate.Mutex. Expiry and a later explicit fence share the
+// transport cancellation tasks and their completion accounting.
+func scheduleUserCancellationLocked(u *userState) {
+    if u.cancellationScheduled {return}
+    u.cancellationScheduled=true
+    u.stopping += len(u.active)
+    for _, closeConn := range u.active {
         go func(stop func()) {
             defer func() {
                 gate.Lock()
@@ -520,6 +558,18 @@ func fence(ctx context.Context, email string) (result, error) {
             stop()
         }(closeConn)
     }
+}
+
+func fence(ctx context.Context, email string) (result, error) {
+    gate.Lock()
+    u := ensureUser(canonicalMeterUser(email))
+    if !u.fenced {
+        u.fenced = true
+        scheduleUserCancellationLocked(u)
+        completeUserIfIdleLocked(u)
+    }
+    done := u.done
+    gate.Unlock()
     select {
     case <-ctx.Done():
         return result{}, ctx.Err()
@@ -575,6 +625,16 @@ func decodeScopedFenceRequest(body io.Reader) (checkpointScope,error) {
 
 func serveHTTP(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
+    if capControl != nil && r.URL.Path == localCapPath {
+        capControl.serve(w,r)
+        return
+    }
+    if r.URL.Path == zeroMeterPath {
+        // No caller, including a same-UID peer, can turn this endpoint
+        // into a cap installation: it only reports an empty measured meter.
+        serveZeroMeter(w,r)
+        return
+    }
     if r.Method != http.MethodPost || r.URL.Path != "/v1/fence" {
         http.Error(w, "not found", http.StatusNotFound)
         return
@@ -615,6 +675,10 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func init() {
+    capBinding:=os.Getenv("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING")
+    if !enabled && capBinding!="" {
+        panic("signed-cap binding requires the disposable Xray gate")
+    }
     if !enabled {
         return
     }
@@ -629,12 +693,20 @@ func init() {
     if err := configureObservedCheckpoint(dir); err != nil {
         panic(err)
     }
+    if capBinding!="" {
+        capControl,err=loadLocalCapControl(capBinding)
+        if err!=nil {panic(err)}
+        // Startup is closed to every user before the control socket or
+        // any VLESS listener can be opened.
+        experimentalByteCaps.strict=true
+    }
     socket := os.Getenv("XMESH_EXPERIMENTAL_DRAIN_SOCKET")
     if socket == "" {
         panic("experimental xmesh drain socket required")
     }
-    parent, err := os.Stat(filepath.Dir(socket))
-    if err != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 {
+    parent, err := os.Lstat(filepath.Dir(socket))
+    if err != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 ||
+        (capControl!=nil && parent.Sys().(*syscall.Stat_t).Uid!=uint32(os.Geteuid())) {
         panic("experimental xmesh drain parent must exist with private permissions")
     }
     if err:=recoverStaleUnixSocket(socket);err!=nil{panic(err)}
@@ -648,6 +720,7 @@ func init() {
     }
     go func() {
         _ = (&http.Server{Handler: http.HandlerFunc(serveHTTP),
-            ReadHeaderTimeout: 2*time.Second}).Serve(listener)
+            ConnContext: controlPeer, ReadHeaderTimeout: 2*time.Second,
+            ReadTimeout: 8*time.Second, WriteTimeout: 12*time.Second}).Serve(listener)
     }()
 }

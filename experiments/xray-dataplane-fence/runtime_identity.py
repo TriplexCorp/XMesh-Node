@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import select
+import stat
 import subprocess
 
 DOMAIN = b"XMESH_XRAY_RUNTIME_PROC_V1\x00"
@@ -102,24 +103,58 @@ def verify_live_runtime(checkpoint, trusted_host_pid):
     return True
 
 
-def inspect_managed_xray():
+def verify_quarantined_files(host_pid, executable_sha256, config_sha256):
+    """Check the pinned executable and the actual isolated process's config."""
+    proc = Path("/proc") / str(host_pid)
+    config = "/etc/xray/config.json"
+    cmdline = (proc / "cmdline").read_bytes().split(b"\0")
+    if len(cmdline) != 5 or cmdline[1:] != [b"run", b"-config", config.encode(), b""]:
+        raise ValueError("unexpected managed Xray command line")
+    for path, expected, limit in (
+        (proc / "exe", executable_sha256, 256 << 20),
+        (proc / "root" / config[1:], config_sha256, 2 << 20),
+    ):
+        # /proc/<pid>/exe is intentionally resolved by the kernel; the
+        # configuration must be a regular, non-symlink file in that root.
+        nofollow = 0 if path.name == "exe" else os.O_NOFOLLOW
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | nofollow)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink < 1 or not 0 < before.st_size <= limit:
+                raise ValueError("managed Xray file is not a bounded regular file")
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+            after = os.fstat(source.fileno())
+            if ((before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                    (after.st_size, after.st_mtime_ns, after.st_ctime_ns) or
+                    not hmac.compare_digest(digest, expected)):
+                raise ValueError("managed Xray executable or configuration pin mismatch")
+
+
+def managed_container_name(name):
+    return (name in ("xmesh-managed-xray", "xmesh-successor-quarantine")
+            or re.fullmatch(r"xmesh-quota-u[1-9][0-9]{0,18}-[0-9a-f]{32}", name) is not None)
+
+
+def inspect_managed_xray(container_name="xmesh-managed-xray"):
     """Independently obtain the currently RUNNING container's host PID.
 
     Never accept a PID, start time, container ID or image name from the
     checkpoint. Docker is authoritative only for process discovery here; it
     is NOT a kernel byte-drain/physical-stop attestation.
     """
+    if not managed_container_name(container_name):
+        raise ValueError("untrusted Xray runtime container selection")
     try:
         result = subprocess.run(
             ["docker", "inspect", "--format", "{{json .}}",
-             "xmesh-managed-xray"],
+             container_name],
             capture_output=True, text=True, timeout=5, check=True)
         if not isinstance(result.stdout, str) or not 0 < len(result.stdout) < 1_000_000:
             raise ValueError("invalid Docker inspect output size")
         data = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise ValueError("trusted Docker managed Xray inspect unavailable") from exc
-    if not isinstance(data, dict) or data.get("Name") != "/xmesh-managed-xray":
+    if not isinstance(data, dict) or data.get("Name") != "/" + container_name:
         raise ValueError("unexpected managed Xray container name")
     cid = data.get("Id")
     state = data.get("State")

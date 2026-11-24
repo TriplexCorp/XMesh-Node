@@ -6,6 +6,8 @@ umask 077
 cd "$(dirname "$(readlink -f "$0")")"
 
 [[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+source deploy/xmesh-pq-install-guard.sh
+xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required. Install Docker Engine with Compose plugin first." >&2
   exit 1
@@ -25,6 +27,21 @@ chmod 0644 config.json
 revision="$(git rev-parse HEAD)"
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid Node source revision' >&2; exit 1; }
 
+PRODUCT_PREINSTALLED=0
+PRODUCT_ACTIVATION_STATE=fresh
+if xmesh_product_binding_exists /var/lib/xmesh-agent/product; then
+  # Refuse a differing enrolled artifact without stopping existing traffic.
+  bash deploy/install-xsp-v2-production-agent.sh "$revision"
+  PRODUCT_PREINSTALLED=1
+  PANEL="${XMESH_API_URL:-}"
+  NODE="${XMESH_NODE_ID:-}"
+  [[ "$PANEL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ && "$NODE" =~ ^[1-9][0-9]*$ ]] || {
+    echo 'Valid enrolled PQ panel and node required before changing services.' >&2
+    exit 2
+  }
+  PRODUCT_ACTIVATION_STATE="$(xmesh_verify_or_resume_enrolled_product /var/lib/xmesh-agent/product /usr/local/bin/xmesh-agent-xspv2-product "$PANEL" "$NODE")"
+fi
+
 # A retry/upgrade must not leave an older router serving while the v6 identity
 # has not yet proven strict-PQ activation. Only the managed container is touched.
 if docker inspect xmesh-node >/dev/null 2>&1; then
@@ -37,7 +54,9 @@ if docker inspect xmesh-managed-xray >/dev/null 2>&1; then
 fi
 
 # Install both reviewed v6 PQ runtimes before any operational startup.
-bash deploy/install-xsp-v2-production-agent.sh "$revision"
+if [[ "$PRODUCT_PREINSTALLED" == 0 ]]; then
+  bash deploy/install-xsp-v2-production-agent.sh "$revision"
+fi
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo 'strict-PQ product client missing after installation' >&2; exit 1; }
 
@@ -50,7 +69,7 @@ TOKEN_FILE="${XMESH_ENROLLMENT_TOKEN_FILE:-}"
 }
 [[ "$NODE" =~ ^[1-9][0-9]*$ ]] || { echo 'XMESH_NODE_ID is required for XMesh Node v6.' >&2; exit 2; }
 
-if ! "$PRODUCT" verify-active --panel "$PANEL" --node-id "$NODE" >/dev/null 2>&1; then
+if [[ "$PRODUCT_ACTIVATION_STATE" == fresh ]]; then
   [[ -n "$TOKEN_FILE" && -f "$TOKEN_FILE" && ! -L "$TOKEN_FILE" ]] || {
     echo 'No verified strict-PQ activation. Set XMESH_ENROLLMENT_TOKEN_FILE to the root-owned one-time token file.' >&2
     exit 1

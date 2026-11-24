@@ -631,3 +631,138 @@ func TestObservedPublicationFailureNeverLosesNonfinalJournal(t *testing.T) {
         })
     }
 }
+
+
+func TestDormantSignedCapCalendarFenceIsNonfinalAndKeepsBothAliases(t *testing.T) {
+    _,_,p,expected,pub,priv:=signedCapTestFixture(t)
+    grant:=signedCapTestEnvelope(t,p,priv)
+    if err:=installSignedFirstGenesisCap(grant,pub,expected);err!=nil{
+        t.Fatalf("signed but idle user was not installed: %v",err)
+    }
+    scope:=checkpointScope{
+        Email:capMain,NodeID:p.NodeID,UserID:p.UserID,
+        Epoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,Revision:p.ReservationRevision,
+        RevocationID:testRevocation,
+    }
+    if _,err:=fenceScoped(context.Background(),scope);err!=nil {
+        t.Fatalf("could not durably close old user: %v",err)
+    }
+    first,err:=persistObservedCheckpoint(scope)
+    if err!=nil{t.Fatalf("signed dormant alias roster could not be observed: %v",err)}
+    if !first.Drained || first.FinalMeterVerified || first.RefundableBytes!=0 ||
+        first.UplinkBytes!=0 || first.DownlinkBytes!=0 ||
+        len(first.InboundMeters)!=2 ||
+        first.InboundMeters[0].Email!=capCDN ||
+        first.InboundMeters[1].Email!=capMain {
+        t.Fatalf("dormant calendar checkpoint acquired authority or lost an alias: %+v",first)
+    }
+    for _,meter:=range first.InboundMeters {
+        if meter.UplinkBytes!=0 || meter.DownlinkBytes!=0 {
+            t.Fatal("dormant user fabricated a nonzero signed-counter snapshot")
+        }
+    }
+    replay,err:=persistObservedCheckpoint(scope)
+    if err!=nil || !reflect.DeepEqual(replay,first) {
+        t.Fatalf("nonfinal dormant checkpoint is not exact-idempotent: %v",err)
+    }
+    gate.Lock()
+    denied:=gate.users["xmesh-u101"]==nil || !gate.users["xmesh-u101"].fenced
+    gate.Unlock()
+    if denied {t.Fatal("calendar checkpoint reopened a fenced old user")}
+}
+
+func TestDormantCalendarFenceWithoutRealSignedCapRefusesObservation(t *testing.T) {
+    _,_,p,_,_,_:=signedCapTestFixture(t)
+    scope:=checkpointScope{
+        Email:capMain,NodeID:p.NodeID,UserID:p.UserID,
+        Epoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,Revision:p.ReservationRevision,
+        RevocationID:testRevocation,
+    }
+    if _,err:=fenceScoped(context.Background(),scope);err!=nil {
+        t.Fatalf("fence must fail closed as a deny even without cap: %v",err)
+    }
+    if _,err:=persistObservedCheckpoint(scope);err==nil {
+        t.Fatal("unsigned dormant user gained a calendar checkpoint")
+    }
+}
+
+
+func TestSignedMainOnlyCalendarFenceIncludesUnusedCDNInNonfinalSnapshot(t *testing.T) {
+    _,manager,p,expected,pub,priv:=signedCapTestFixture(t)
+    grant:=signedCapTestEnvelope(t,p,priv)
+    if err:=installSignedFirstGenesisCap(grant,pub,expected);err!=nil {
+        t.Fatalf("failed to install signed first permit: %v",err)
+    }
+    register:=func(direction string) stats.Counter {
+        name:=rawMeterName(capMain,direction)
+        if counter:=manager.GetCounter(name);counter!=nil {return counter}
+        counter,err:=manager.RegisterCounter(name)
+        if err!=nil{t.Fatal(err)}
+        return counter
+    }
+    up,down:=register("uplink"),register("downlink")
+    userContext:=ctx(94419)
+    if err:=Register(userContext,capMain,func(){});err!=nil{t.Fatal(err)}
+    addFixtureBytes(t,up,capMain,"uplink",7)
+    addFixtureBytes(t,down,capMain,"downlink",9)
+    Finish(userContext)
+    RouteFinish(userContext)
+    scope:=checkpointScope{
+        Email:capMain,NodeID:p.NodeID,UserID:p.UserID,
+        Epoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,Revision:p.ReservationRevision,
+        RevocationID:testRevocation,
+    }
+    if _,err:=fenceScoped(context.Background(),scope);err!=nil{
+        t.Fatalf("could not fence MAIN-only transport: %v",err)
+    }
+    record,err:=persistObservedCheckpoint(scope)
+    if err!=nil{t.Fatalf("signed full-roster WAL observation failed: %v",err)}
+    if record.UplinkBytes!=7 || record.DownlinkBytes!=9 ||
+        len(record.InboundMeters)!=2 ||
+        record.InboundMeters[0].Email!=capCDN ||
+        record.InboundMeters[0].UplinkBytes!=0 ||
+        record.InboundMeters[0].DownlinkBytes!=0 ||
+        record.InboundMeters[1].Email!=capMain ||
+        record.InboundMeters[1].UplinkBytes!=7 ||
+        record.InboundMeters[1].DownlinkBytes!=9 ||
+        record.FinalMeterVerified || record.RefundableBytes!=0 {
+        t.Fatalf("signed dormant CDN alias lost or old usage regranted: %+v",record)
+    }
+    if err:=Register(ctx(94420),capMain,func(){});err==nil{
+        t.Fatal("old MAIN stream reopened after immutable calendar fence")
+    }
+}
+
+func TestSignedCalendarFenceRejectsUnlistedRawAlias(t *testing.T) {
+    _,manager,p,expected,pub,priv:=signedCapTestFixture(t)
+    if err:=installSignedFirstGenesisCap(
+        signedCapTestEnvelope(t,p,priv),pub,expected);err!=nil {
+        t.Fatalf("failed to install exact signed alias roster: %v",err)
+    }
+    // A StatsService counter may exist for a same-account alias that was
+    // never part of the signed MAIN/CDN policy or any active session. A
+    // nonfinal checkpoint must not omit it and claim complete coverage.
+    if _,err:=manager.RegisterCounter(
+        "user>>>xmesh-u101--unassigned>>>traffic>>>uplink");err!=nil {
+        t.Fatal(err)
+    }
+    scope:=checkpointScope{
+        Email:capMain,NodeID:p.NodeID,UserID:p.UserID,
+        Epoch:p.AccountEpoch,MeterEpoch:p.MeterEpoch,
+        ReservationID:p.ReservationID,Revision:p.ReservationRevision,
+        RevocationID:testRevocation,
+    }
+    if _,err:=fenceScoped(context.Background(),scope);err!=nil {
+        t.Fatalf("irreversible deny must remain possible: %v",err)
+    }
+    if _,err:=persistObservedCheckpoint(scope);err==nil {
+        t.Fatal("unlisted StatsService user alias disappeared from signed calendar checkpoint")
+    }
+    gate.Lock()
+    rejected:=gate.users["xmesh-u101"]!=nil && gate.users["xmesh-u101"].fenced
+    gate.Unlock()
+    if !rejected {t.Fatal("refused checkpoint reopened old Xray user")}
+}

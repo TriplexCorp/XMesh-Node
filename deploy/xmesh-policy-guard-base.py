@@ -945,6 +945,46 @@ def enforce_quota_reservation(user, record, total, now_ms):
     return None
 
 
+def preserve_unreserved_offline_budget(user, record, total, policy, offline, now_ms):
+    """Retain the original local grant; aggregate usage is never a Node ACK."""
+    budget = user["offlineBudgetBytes"]
+    if "anchor" not in record:
+        record["anchor"] = total
+        record["budget"] = budget
+        record["panelUsedBytes"] = user["panelUsedBytes"]
+        record["revoked"] = False
+        record.pop("revokedReason", None)
+    else:
+        prior = record.get("budget")
+        if prior is None and budget is not None:
+            # No signed Node-local baseline for a formerly unlimited grant.
+            record["budget"] = 0
+        elif prior is not None and budget is not None:
+            record["budget"] = min(max(0, int(prior)), budget)
+        # Neither a larger plan, a later expiry, nor switching to unlimited
+        # can replenish a finite local grant. Only a signed V2 reservation
+        # can establish a new Node-bound byte ceiling.
+        record["panelUsedBytes"] = max(
+            int(record.get("panelUsedBytes", 0)), user["panelUsedBytes"])
+        newly_signed = (
+            not offline and
+            policy["issuedAtMs"] > int(record.get("authorizedAtMs", -1)))
+        only_expiry = record.get("revokedReason") in ("policy-expired", "expired")
+        allowance = record.get("budget")
+        remaining = allowance is None or (
+            total - int(record["anchor"]) < int(allowance))
+        valid = (now_ms < policy["validUntilMs"] and (
+            user["expireAtMs"] == 0 or now_ms < user["expireAtMs"]))
+        if newly_signed and only_expiry and remaining and valid:
+            record["revoked"] = False
+            record.pop("revokedReason", None)
+    if not offline:
+        record["authorizedAtMs"] = max(
+            int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
+        record["limitBytes"] = user.get("limitBytes", 0)
+        record["expireAtMs"] = user["expireAtMs"]
+
+
 def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbound_counters=None):
     """Pure admission decision; caller persists the ledger before applying JSON."""
     if not isinstance(ledger, dict):
@@ -959,22 +999,14 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
         key = str(user["userId"])
         record = history.setdefault(key, {})
         total = max(0, int(record.get("total", 0)))
-        previous = int(record.get("panelUsedBytes", -1))
-        budget = user["offlineBudgetBytes"]
         limit = user.get("limitBytes", 0)
-        expires = user["expireAtMs"]
-        fresh = not offline and policy["issuedAtMs"] > int(record.get("authorizedAtMs", -1))
-        # A genuine, newer signed panel revision may acknowledge usage, renew
-        # expiry, increase the plan, or reset metering. An identical policy
-        # poll never refills a depleted local allowance.
-        newly_authorized = (
-            fresh and (
-                (user["panelUsedBytes"] != previous and (policy.get("version") != 2 or limit > 0)) or
-                limit > int(record.get("limitBytes", 0)) or
-                expires > int(record.get("expireAtMs", 0)) or
-                record.get("revokedReason") == "policy-expired"
-            )
-        )
+        # An absent reservation is not proof of settlement. Preserve the
+        # committed lease and its debt even when a new signed policy says
+        # unlimited, or tries to fall back to legacy accounting.
+        if "quotaReservation" in record and (
+                policy.get("version") != 2 or limit <= 0):
+            raise ValueError(
+                "Existing V2 reservation needs verified explicit close before downgrade")
         reservation_reason = None
         if policy.get("version") == 2 and limit > 0:
             reservation_reason = enforce_quota_reservation(user, record, total, now_ms)
@@ -982,21 +1014,8 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
                 record["revoked"] = False
                 record.pop("revokedReason", None)
         else:
-            if "anchor" not in record or newly_authorized:
-                record["anchor"] = total
-                record["budget"] = budget
-                record["panelUsedBytes"] = user["panelUsedBytes"]
-                record["revoked"] = False
-                record.pop("revokedReason", None)
-            else:
-                if budget is None:
-                    record["budget"] = None
-                elif record.get("budget") is not None:
-                    record["budget"] = min(int(record["budget"]), budget)
-            if not offline:
-                record["authorizedAtMs"] = max(int(record.get("authorizedAtMs", 0)), policy["issuedAtMs"])
-                record["limitBytes"] = limit
-                record["expireAtMs"] = expires
+            preserve_unreserved_offline_budget(
+                user, record, total, policy, offline, now_ms)
         reason = reservation_reason
         if user["expireAtMs"] and now_ms >= user["expireAtMs"]:
             reason = "expired"
@@ -1007,7 +1026,7 @@ def enforce(policy, config, ledger, counters, runtime_id, offline, now_ms, inbou
             reason = "subscription-awaiting-first-connection"
         elif offline and policy.get("version") == 2 and limit > 0 and counters is None:
             reason = "unverified-traffic-counter"
-        elif offline and budget is not None and not (policy.get("version") == 2 and limit > 0):
+        elif offline and record.get("budget") is not None and not (policy.get("version") == 2 and limit > 0):
             if counters is None:
                 reason = "unverified-traffic-counter"
             elif total - int(record.get("anchor", 0)) >= int(record.get("budget") or 0):

@@ -1,0 +1,181 @@
+// Read-only successor Xray inventory/counter proof. CI/staging ONLY.
+// It never signs, installs, renews, resets, refunds or admits a byte cap.
+// A trusted Agent must independently verify the kernel PID, Docker WAL bind
+// and the Nexus-signed zero-spend successor BEFORE trusting this observation.
+package xmeshdrain
+
+import (
+    "crypto/sha256"
+    "encoding/json"
+    "errors"
+    "io"
+    "net/http"
+    "os"
+    "path/filepath"
+    "strconv"
+    "syscall"
+    "strings"
+
+    "github.com/xtls/xray-core/features/stats"
+)
+
+const zeroMeterPath = "/v1/zero-meter"
+const zeroMeterKind = "xmesh.quota-v2.fresh-meter-observed"
+const emptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+type zeroMeterRequest struct {
+    SchemaVersion int `json:"schemaVersion"`
+    NodeID int64 `json:"nodeId"`
+    UserID int64 `json:"userId"`
+    Nonce string `json:"nonce"`
+    MeterEpoch string `json:"meterEpoch"`
+    ReservationID string `json:"reservationId"`
+    Aliases []signedCapAlias `json:"aliases"`
+}
+
+type zeroMeterResult struct {
+    SchemaVersion int `json:"schemaVersion"`
+    Kind string `json:"kind"`
+    NodeID int64 `json:"nodeId"`
+    UserID int64 `json:"userId"`
+    Nonce string `json:"nonce"`
+    MeterEpoch string `json:"meterEpoch"`
+    ReservationID string `json:"reservationId"`
+    Aliases []signedCapAlias `json:"aliases"`
+    RuntimeID string `json:"runtimeId"`
+    InventorySHA256 string `json:"inventorySha256"`
+    ZeroInitialRawCounters bool `json:"zeroInitialRawCounters"`
+    IsolatedNewWalRoot bool `json:"isolatedNewWalRoot"`
+    AuthorizedBytes uint64 `json:"authorizedBytes"`
+    CanSpend bool `json:"canSpend"`
+    CanStart bool `json:"canStart"`
+    CanResume bool `json:"canResume"`
+    FinalMeterVerified bool `json:"finalMeterVerified"`
+    RefundableBytes uint64 `json:"refundableBytes"`
+}
+
+func verifyPristineSuccessorMeter(req zeroMeterRequest) (zeroMeterResult,error) {
+    var empty zeroMeterResult
+    if !enabled || capControl==nil || req.SchemaVersion!=1 ||
+        req.NodeID!=capControl.binding.NodeID || req.UserID<=0 ||
+        !signedCapHex64.MatchString(req.Nonce) ||
+        !signedCapUUID.MatchString(req.MeterEpoch) ||
+        !signedCapUUID.MatchString(req.ReservationID) ||
+        req.MeterEpoch==req.ReservationID ||
+        len(req.Aliases)==0 || len(req.Aliases)>16 {
+        return empty,errors.New("unbound zero-meter successor request")
+    }
+    previous:=""
+    for _,alias:=range req.Aliases {
+        parts:=signedUserEmail.FindStringSubmatch(alias.Email)
+        if parts==nil || parts[1]!=strconv.FormatInt(req.UserID,10) ||
+           (alias.Class!="main" && alias.Class!="cdn") ||
+           alias.Email<=previous {
+            return empty,errors.New("invalid or unsorted successor alias roster")
+        }
+        if _,ok:=trackedInboundTags[parts[2]];!ok {
+            return empty,errors.New("successor alias not covered by tracked inbound")
+        }
+        previous=alias.Email
+    }
+    runtime,err:=currentRuntimeIdentity()
+    if err!=nil {return empty,err}
+    // Consistent lock order: observed checkpoint uses observed then gate.
+    // Keep both while reading every StatsService counter and WAL file.
+    observed.Lock()
+    defer observed.Unlock()
+    gate.Lock()
+    defer gate.Unlock()
+    identity:="xmesh-u"+strconv.FormatInt(req.UserID,10)
+    if observed.manager==nil || observed.directory=="" ||
+        observed.runtimeID!=runtime || gate.runtimeID!=runtime ||
+        gate.journalDir!=observed.directory || !experimentalByteCaps.strict ||
+        experimentalByteCaps.users[identity]!=nil || gate.users[identity]!=nil {
+        return empty,errors.New("successor meter contains prior or unverified state")
+    }
+    if err:=verifyFirstCapHistory(identity);err!=nil{return empty,err}
+    // Peers already admitted to this exact process keep their balances.
+    // This candidate and every other unsigned account must remain at zero.
+    var dirty bool
+    observed.manager.VisitCounters(func(name string, counter stats.Counter) bool {
+        if !strings.HasPrefix(name,"user>>>") {return true}
+        if counter!=nil && counter.Value()==0 {return true}
+        alias,direction,valid:=strings.Cut(strings.TrimPrefix(name,"user>>>"),">>>traffic>>>")
+        peer:=experimentalByteCaps.users[canonicalMeterUser(alias)]
+        if valid && (direction=="uplink" || direction=="downlink") &&
+            peer!=nil && peer.runtimeID==runtime && peer.signedGrant.ReservationID!="" &&
+            counter!=nil && counter.Value()>0 {
+            if _,allowed:=peer.aliases[alias];allowed {return true}
+        }
+        dirty=true
+        return false
+    })
+    if dirty {
+        return empty,errors.New("fresh successor has nonzero or invalid StatsService counters")
+    }
+    // Every extra file belongs to a verified peer or the live WAL index.
+    inventory,err:=readInventory(observed.directory)
+    if err!=nil{return empty,err}
+    allowed:=map[string]bool{"xray-instance.lock":true}
+    if inventory.exists {allowed[inventoryName]=true}
+    for name:=range inventory.steps {allowed[name]=true}
+    for _,peer:=range experimentalByteCaps.users {
+        if peer.runtimeID==runtime && peer.signedGrant.ReservationID!="" {
+            for name,digest:=range peer.installedGrantFiles {
+                file,st,err:=openMeterFile(filepath.Join(observed.directory,name),syscall.O_RDONLY|syscall.O_NONBLOCK)
+                if err!=nil{return empty,err}
+                raw,readErr:=io.ReadAll(io.LimitReader(file,8193))
+                closeErr:=file.Close()
+                if readErr!=nil || closeErr!=nil || st.Size!=int64(len(raw)) ||
+                    len(raw)>8192 || sha256.Sum256(raw)!=digest {
+                    return empty,errors.New("successor peer signed grant file changed")
+                }
+                allowed[name]=true
+            }
+        }
+    }
+    entries,err:=os.ReadDir(observed.directory)
+    if err!=nil{return empty,err}
+    for _,entry:=range entries {
+        if !allowed[entry.Name()] {
+            return empty,errors.New("successor WAL root contains preexisting state")
+        }
+        if entry.IsDir() || !entry.Type().IsRegular() {
+            return empty,errors.New("successor process lock identity changed")
+        }
+    }
+    if runtime2,err:=currentRuntimeIdentity();err!=nil || runtime2!=runtime {
+        return empty,errors.New("successor Xray runtime changed during zero-meter observation")
+    }
+    return zeroMeterResult{
+        SchemaVersion:1,Kind:zeroMeterKind,NodeID:req.NodeID,
+        UserID:req.UserID,Nonce:req.Nonce,
+        MeterEpoch:req.MeterEpoch,ReservationID:req.ReservationID,
+        Aliases:append([]signedCapAlias(nil),req.Aliases...),
+        RuntimeID:runtime,InventorySHA256:emptySha256,
+        ZeroInitialRawCounters:true,IsolatedNewWalRoot:true,
+        AuthorizedBytes:0,CanSpend:false,CanStart:false,CanResume:false,
+        FinalMeterVerified:false,RefundableBytes:0,
+    },nil
+}
+
+func serveZeroMeter(w http.ResponseWriter,r *http.Request) {
+    if r.Method!=http.MethodPost || r.URL.RawQuery!="" ||
+        r.Context().Value(capPeerKey{})!=true || capControl==nil {
+        http.Error(w,"unauthorized zero-meter preflight",http.StatusForbidden)
+        return
+    }
+    raw,err:=io.ReadAll(http.MaxBytesReader(w,r.Body,4096))
+    var req zeroMeterRequest
+    if err!=nil || localCapJSON(raw,&req)!=nil {
+        http.Error(w,"invalid canonical zero-meter preflight",http.StatusBadRequest)
+        return
+    }
+    result,err:=verifyPristineSuccessorMeter(req)
+    if err!=nil {
+        http.Error(w,"fresh Xray meter NOT proved",http.StatusConflict)
+        return
+    }
+    w.Header().Set("Content-Type","application/json")
+    _=json.NewEncoder(w).Encode(result)
+}

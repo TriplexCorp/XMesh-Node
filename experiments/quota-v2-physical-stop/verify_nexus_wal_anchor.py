@@ -92,21 +92,7 @@ def verify_nexus_offhost_anchor(
         raise ValueError("Nexus offhost receipt binds another old Xray file set")
     if p["inventorySequence"]!=seq or p["inventorySha256"]!=sha:
         raise ValueError("stale Nexus anchor replay behind independently fetched latest head")
-    with tempfile.TemporaryDirectory(prefix="xmesh-node-verify-nexus-birth-") as tmp:
-        message=Path(tmp)/"msg"
-        signature=Path(tmp)/"sig"
-        message.write_bytes(DOMAIN+observed.canonical(p))
-        signature.write_bytes(bytes.fromhex(doc["signature"]))
-        try:
-            verified=subprocess.run(
-                ["openssl","pkeyutl","-verify","-rawin","-in",str(message),
-                 "-pubin","-inkey",str(independently_enrolled_nexus_pubkey),
-                 "-sigfile",str(signature)],
-                check=False,capture_output=True,timeout=10)
-        except (OSError,subprocess.TimeoutExpired) as exc:
-            raise ValueError("trusted Nexus public-key verifier unavailable") from exc
-        if verified.returncode:
-            raise ValueError("Nexus external WAL witness signed by foreign key")
+    verify_nexus_signature(DOMAIN,p,doc["signature"],independently_enrolled_nexus_pubkey)
     # Only an independent Nexus-signed and separately head-checked prefix
     # is acceptable at Node restart. An entirely wiped local index, even
     # with no surviving meter-*.jsonl files, must fail here.
@@ -128,3 +114,21 @@ def verify_nexus_offhost_anchor(
         "finalMeterVerified":False,
         "refundableBytes":0,
     }
+
+
+def verify_nexus_signature(domain,payload,signature_hex,public_key):
+    with tempfile.TemporaryDirectory(prefix="xmesh-node-verify-nexus-birth-") as tmp:
+        message=Path(tmp)/"msg"
+        signature=Path(tmp)/"sig"
+        message.write_bytes(domain+observed.canonical(payload))
+        signature.write_bytes(bytes.fromhex(signature_hex))
+        try:
+            verified=subprocess.run(
+                ["openssl","pkeyutl","-verify","-rawin","-in",str(message),
+                 "-pubin","-inkey",str(public_key),
+                 "-sigfile",str(signature)],
+                check=False,capture_output=True,timeout=10)
+        except (OSError,subprocess.TimeoutExpired) as exc:
+            raise ValueError("trusted Nexus public-key verifier unavailable") from exc
+        if verified.returncode:
+            raise ValueError("Nexus external WAL witness signed by foreign key")
