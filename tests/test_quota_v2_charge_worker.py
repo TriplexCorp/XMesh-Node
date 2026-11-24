@@ -25,6 +25,65 @@ def signed(doc):
 
 
 class ChargeWorkerTests(unittest.TestCase):
+    def test_wal_charge_refuses_replaced_docker_kernel_or_private_journal(self):
+        before = {"Id": "a" * 64,
+                  "State": {"Pid": 23456,
+                            "StartedAt": "2026-11-24T07:00:00Z"}}
+        wal = "/var/lib/xmesh-private-wal"
+        name = "xmesh-quota-u42-" + "b" * 32
+        runtime = "c" * 64
+        with (
+            mock.patch.object(wal_transport, "_bound_journal",
+                              return_value=(before, wal)) as inspect,
+            mock.patch.object(wal_transport.runtime_identity,
+                              "trusted_runtime_identity", return_value=runtime) as measure,
+        ):
+            worker._verify_charging_runtime_unchanged(name, before, wal, runtime)
+            inspect.assert_called_once_with(name)
+            measure.assert_called_once_with(23456)
+
+        for current, mount in (
+            (dict(before, Id="d" * 64), wal),
+            (dict(before, State=dict(before["State"], Pid=23457)), wal),
+            (dict(before, State=dict(before["State"],
+                                    StartedAt="2026-11-24T07:00:01Z")), wal),
+            (before, "/var/lib/different-wal"),
+            (dict(before, State={"Pid": 23456}), wal),
+            (dict(before, State={"Pid": 0,
+                                 "StartedAt": before["State"]["StartedAt"]}), wal),
+        ):
+            with (
+                self.subTest(current=current, mount=mount),
+                mock.patch.object(wal_transport, "_bound_journal",
+                                  return_value=(current, mount)),
+                mock.patch.object(wal_transport.runtime_identity,
+                                  "trusted_runtime_identity", return_value=runtime),
+            ):
+                with self.assertRaisesRegex(ValueError, "changed during authenticated WAL charging"):
+                    worker._verify_charging_runtime_unchanged(name, before, wal, runtime)
+
+        with (
+            mock.patch.object(wal_transport, "_bound_journal",
+                              return_value=(before, wal)),
+            mock.patch.object(wal_transport.runtime_identity,
+                              "trusted_runtime_identity", return_value="e" * 64),
+        ):
+            with self.assertRaisesRegex(ValueError, "kernel identity changed"):
+                worker._verify_charging_runtime_unchanged(name, before, wal, runtime)
+
+        # A shared multiuser Genesis has no per-successor runtime pin,
+        # but must still refuse container restart or journal replacement.
+        with (
+            mock.patch.object(wal_transport, "_bound_journal",
+                              return_value=(before, wal)) as inspect,
+            mock.patch.object(wal_transport.runtime_identity,
+                              "trusted_runtime_identity") as measure,
+        ):
+            worker._verify_charging_runtime_unchanged(
+                "xmesh-managed-xray", before, wal, None)
+            inspect.assert_called_once_with()
+            measure.assert_not_called()
+
     def test_isolated_successor_wal_cannot_charge_a_foreign_user(self):
         candidate = "xmesh-quota-u42-" + "a" * 32
         good = {
@@ -198,7 +257,9 @@ class ChargeWorkerTests(unittest.TestCase):
                 }),
                 mock.patch.object(wal_transport, "run"),
                 mock.patch.object(wal_transport, "_bound_journal",
-                                  return_value=({}, str(root))),
+                                  return_value=({"Id": "a" * 64,
+                                      "State": {"Pid": os.getpid(),
+                                                "StartedAt": "2026-11-24T07:00:00Z"}}, str(root))),
                 mock.patch.object(worker.journal, "_verify_mount"),
                 mock.patch.object(worker.registry, "verify_meter_inventory",
                                   return_value=(entries, verified)),
