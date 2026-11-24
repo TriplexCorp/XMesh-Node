@@ -201,7 +201,19 @@ def _verified_old_wal_charge_heads(state_fd, node, user, old, checkpoint, pinned
         indexed, verified = registry.verify_meter_inventory(
             dfd, names, journal_integrity._read_meter_wal,
             journal_integrity._canonical_go)
-        signed_aliases = {alias["email"] for alias in old["aliasScopes"]}
+        aliases = old.get("aliasScopes") if isinstance(old, dict) else None
+        if not isinstance(aliases, list) or not 1 <= len(aliases) <= 2:
+            raise ValueError("missing signed predecessor inbound aliases")
+        signed_aliases = set()
+        last = ""
+        for alias in aliases:
+            if (not isinstance(alias, dict) or set(alias) != {"email", "class"}
+                    or alias.get("class") not in ("main", "cdn")
+                    or alias.get("email") != f"xmesh-u{user}--vless-{alias['class']}"
+                    or alias["email"] in signed_aliases or alias["email"] <= last):
+                raise ValueError("duplicate, foreign or unordered signed predecessor inbound alias")
+            signed_aliases.add(alias["email"])
+            last = alias["email"]
         expected = {}
         rows = checkpoint.get("inboundMeters")
         if not isinstance(rows, list) or len(rows) != len(signed_aliases):
