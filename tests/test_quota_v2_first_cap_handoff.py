@@ -787,6 +787,22 @@ class FirstCapHandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "differs from signed inbound"):
                 calendar_fence._verified_old_wal_charge_heads(
                     fd, self.node, 100, self.claims, forged, self.pub, runtime)
+            for malicious in (
+                [valid_checkpoint["inboundMeters"][0]] * 2,
+                valid_checkpoint["inboundMeters"][:1],
+                [
+                    valid_checkpoint["inboundMeters"][0],
+                    {"email": "xmesh-u999--vless-main",
+                     "uplinkBytes": 0, "downlinkBytes": 0},
+                ],
+            ):
+                # The set of signed aliases alone is NOT sufficient:
+                # repeated or replaced rows must not overwrite WAL totals.
+                with self.subTest(rows=malicious), self.assertRaisesRegex(
+                        ValueError, "ambiguous|duplicate or foreign"):
+                    calendar_fence._verified_old_wal_charge_heads(
+                        fd, self.node, 100, self.claims,
+                        {"inboundMeters": malicious}, self.pub, runtime)
 
     def test_calendar_requires_every_main_and_cdn_stream_ack_independently(self):
         import charge_worker
