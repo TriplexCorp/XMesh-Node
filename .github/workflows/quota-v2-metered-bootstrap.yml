@@ -36,7 +36,12 @@ jobs:
           fi
           printf '%s  %s\n' 2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244 "$target" | sha256sum --check
           qualification=/var/lib/xmesh-metered-xray/identity
-          [[ "$(stat -c '%u:%a:%h' "$qualification")" == 0:600:1 ]]
+          [[ "$(sudo stat -c '%u:%a:%h' "$qualification")" == 0:600:1 ]]
+          [[ "$(sudo stat -c '%u:%a' "$(dirname "$qualification")")" == 0:700 ]]
+          if test -r "$qualification"; then
+            echo 'Unprivileged runner can read the private qualification record.' >&2
+            exit 1
+          fi
           sudo grep -Fxq "artifactSha256=2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244" "$qualification"
           sudo mv "$target" "$target.saved"
           if sudo bash install.sh; then
