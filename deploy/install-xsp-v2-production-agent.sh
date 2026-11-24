@@ -7,6 +7,8 @@ export LC_ALL=C
 
 [[ "${EUID}" -eq 0 ]] || { echo "Run as root" >&2; exit 1; }
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "$ROOT/deploy/xmesh-pq-install-guard.sh"
+xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
 VERSION_FILE="$ROOT/VERSION"
 [[ -f "$VERSION_FILE" && ! -L "$VERSION_FILE" ]] || { echo "VERSION file missing" >&2; exit 1; }
 NODE_VERSION="$(tr -d '\r\n' < "$VERSION_FILE")"
@@ -58,6 +60,15 @@ done
 ACTIVATION_DIGEST="$(sha256sum "$ACTIVATION_BINARY" | awk '{print $1}')"
 PRODUCT_DIGEST="$(sha256sum "$PRODUCT_BINARY" | awk '{print $1}')"
 [[ "$ACTIVATION_DIGEST" =~ ^[0-9a-f]{64}$ && "$PRODUCT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid PQ Agent digest" >&2; exit 1; }
+
+# The full cold installer is not a coordinated Agent upgrade. Existing
+# activation/receipt files require byte-identical artifacts and no writes.
+if xmesh_product_binding_exists /var/lib/xmesh-agent/product; then
+  xmesh_require_unchanged_binary /usr/local/bin/xmesh-agent-xspv2-product "$PRODUCT_DIGEST"
+  xmesh_require_unchanged_binary /usr/local/bin/xmesh-agent-xspv2-activate "$ACTIVATION_DIGEST"
+  echo "Existing enrolled strict-PQ artifacts unchanged."
+  exit 0
+fi
 
 # The private build temp root may be mounted noexec by the host. Never weaken
 # that mount: copy exact bytes into root-owned executable staging first, verify

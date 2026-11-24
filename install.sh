@@ -6,6 +6,8 @@ umask 077
 cd "$(dirname "$(readlink -f "$0")")"
 
 [[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+source deploy/xmesh-pq-install-guard.sh
+xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required. Install Docker Engine with Compose plugin first." >&2
   exit 1
@@ -25,6 +27,13 @@ chmod 0644 config.json
 revision="$(git rev-parse HEAD)"
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid Node source revision' >&2; exit 1; }
 
+PRODUCT_PREINSTALLED=0
+if xmesh_product_binding_exists /var/lib/xmesh-agent/product; then
+  # Refuse a differing enrolled artifact without stopping existing traffic.
+  bash deploy/install-xsp-v2-production-agent.sh "$revision"
+  PRODUCT_PREINSTALLED=1
+fi
+
 # A retry/upgrade must not leave an older router serving while the v6 identity
 # has not yet proven strict-PQ activation. Only the managed container is touched.
 if docker inspect xmesh-node >/dev/null 2>&1; then
@@ -37,7 +46,9 @@ if docker inspect xmesh-managed-xray >/dev/null 2>&1; then
 fi
 
 # Install both reviewed v6 PQ runtimes before any operational startup.
-bash deploy/install-xsp-v2-production-agent.sh "$revision"
+if [[ "$PRODUCT_PREINSTALLED" == 0 ]]; then
+  bash deploy/install-xsp-v2-production-agent.sh "$revision"
+fi
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo 'strict-PQ product client missing after installation' >&2; exit 1; }
 

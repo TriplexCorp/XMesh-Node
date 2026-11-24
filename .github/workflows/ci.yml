@@ -117,6 +117,7 @@ jobs:
       - run: python3 tests/test_bootstrap_meter.py
       - run: python3 tests/test_pending_enrollment.py
       - run: python3 tests/test_strict_pq_release_pin.py
+      - run: sudo python3 tests/test_pq_install_guard.py
       - run: python3 tests/test_mixed_alpn_router.py
       - run: python3 tests/test_xray_router_reconcile.py
       - run: go test -race ./...
@@ -127,51 +128,90 @@ jobs:
 
   postquantum-v6:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      EXPECTED_RELEASE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27.3'
           cache: false
-      - name: Build and verify v6 strict-PQ production Agents
+      - name: Test strict-PQ product and activation runtimes
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_RELEASE_REVISION"
           test "$(cat VERSION)" = "6.0.0"
-          agent_version="$(tr -d '\r\n' < AGENT_VERSION)"
-          [[ "$agent_version" =~ ^control-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          revision="$(git rev-parse HEAD)"
           cd agent/xspv2
           go test ./... -count=1
+      - name: Build exact reviewed Linux Agent candidate using production builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          revision="$(git rev-parse HEAD)"
+          test "$revision" = "$EXPECTED_RELEASE_REVISION"
+          agent_version="$(tr -d '\r\n' < AGENT_VERSION)"
+          [[ "$agent_version" =~ ^control-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          reviewed="$RUNNER_TEMP/xmesh-pq-reviewed-source"
+          output="$RUNNER_TEMP/xmesh-pq-candidate"
+          mkdir -m 0755 "$output"
+          git clone --no-hardlinks --no-checkout "$GITHUB_WORKSPACE" "$reviewed"
+          git -C "$reviewed" checkout --detach "$revision"
+          test "$(git -C "$reviewed" rev-parse HEAD)" = "$revision"
+          test -z "$(git -C "$reviewed" status --porcelain)"
+          # Same root-owned checkout and Go builder as the normal installer
+          # and independent installed two-Node identity reference.
+          sudo chown -R 0:0 "$reviewed"
+          docker run --rm -v "$reviewed:/src:ro" -v "$output:/out" \
+            -w /src/agent/xspv2 golang:1.27.3-trixie \
+            sh -ec "CGO_ENABLED=0 go build -trimpath -ldflags '-X main.version=$agent_version -X main.sourceRevision=$revision' -o /out/xmesh-agent-xspv2-activate ./cmd/xmesh-agent-xspv2-activate && CGO_ENABLED=0 go build -trimpath -ldflags '-X main.version=$agent_version -X main.sourceRevision=$revision' -o /out/xmesh-agent-xspv2-product ./cmd/xmesh-agent-xspv2-product"
+          python3 - "$output" "$agent_version" "$revision" <<'PY'
+          import hashlib
+          import json
+          import platform
+          import subprocess
+          import sys
+          from pathlib import Path
 
-          go build -trimpath -ldflags "-X main.version=$agent_version -X main.sourceRevision=$revision" \
-            -o /tmp/xmesh-agent-xspv2-activate ./cmd/xmesh-agent-xspv2-activate
-          activation_identity="$(/tmp/xmesh-agent-xspv2-activate --identity)"
-          activation_digest="$(sha256sum /tmp/xmesh-agent-xspv2-activate | awk '{print $1}')"
-          python3 - "$activation_identity" "$revision" "$activation_digest" "$agent_version" <<'PY'
-          import json,sys
-          value=json.loads(sys.argv[1])
-          assert value == {
-              'version':sys.argv[4],
-              'sourceRevision':sys.argv[2],
-              'artifactSha256':sys.argv[3],
-          }, value
-          print(json.dumps(value,separators=(',',':')))
+          output, version, revision = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+          assert platform.machine() == "x86_64", "unexpected release candidate architecture"
+          artifacts = {}
+          for name in ("xmesh-agent-xspv2-activate", "xmesh-agent-xspv2-product"):
+              binary = output / name
+              digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+              identity = json.loads(subprocess.check_output([binary, "--identity"], timeout=10))
+              expected = {"version": version, "sourceRevision": revision, "artifactSha256": digest}
+              assert identity == expected, (name, identity, expected)
+              artifacts[name] = {"identity": identity, "sizeBytes": binary.stat().st_size}
+          # Unsigned CI evidence is NOT a production release authorization.
+          # A future promotion must bind these exact bytes in signed Nexus
+          # enrollment/update authority and pass installed release tests.
+          manifest = {
+              "schema": "xmesh-agent-release-candidate-v1",
+              "candidateOnly": True,
+              "productionActivationAuthorized": False,
+              "version": version,
+              "sourceRevision": revision,
+              "platform": "linux/amd64",
+              "builder": "golang:1.27.3-trixie",
+              "artifacts": artifacts,
+          }
+          (output / "candidate-manifest.json").write_text(
+              json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(manifest, sort_keys=True))
           PY
-
-          go build -trimpath -ldflags "-X main.version=$agent_version -X main.sourceRevision=$revision" \
-            -o /tmp/xmesh-agent-xspv2-product ./cmd/xmesh-agent-xspv2-product
-          product_identity="$(/tmp/xmesh-agent-xspv2-product --identity)"
-          product_digest="$(sha256sum /tmp/xmesh-agent-xspv2-product | awk '{print $1}')"
-          python3 - "$product_identity" "$revision" "$product_digest" "$agent_version" <<'PY'
-          import json,sys
-          value=json.loads(sys.argv[1])
-          assert value == {
-              'version':sys.argv[4],
-              'sourceRevision':sys.argv[2],
-              'artifactSha256':sys.argv[3],
-          }, value
-          print(json.dumps(value,separators=(',',':')))
-          PY
+          cd "$output"
+          sha256sum xmesh-agent-xspv2-activate xmesh-agent-xspv2-product candidate-manifest.json > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Retain exact reviewed candidate artifacts (not a production release)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: xmesh-pq-linux-amd64-candidate-${{ env.EXPECTED_RELEASE_REVISION }}
+          path: ${{ runner.temp }}/xmesh-pq-candidate/
+          if-no-files-found: error
+          retention-days: 30

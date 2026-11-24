@@ -42,7 +42,7 @@ NODE_PORT="$((10#$NODE_PORT))"
 
 # A cold install replaces systemd units and re-enrolls the Node. With a
 # signed spending ledger that operation needs an explicit migration path.
-for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-quarantine-envelope,genesis-reservation-prepared-u*,genesis-reservation-confirmed-u*,genesis-positive-cap-u*,calendar-successor-u*,calendar-fence-u*,calendar-meter-u*,calendar-delivery-u*,calendar-positive-u*,wal-cap-u*}.json; do
+for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-quarantine-envelope.json,genesis-reservation-prepared-u*.json,genesis-reservation-confirmed-u*.json,genesis-positive-cap-u*.json,genesis-renewal-u*.json,genesis-renewal-request-u*.json,calendar-*-u*.json,wal-cap-u*.json,wal-charge-*.json,ingress-u*,xmesh-quota-u*}; do
   if [[ -e "$quota_evidence" || -L "$quota_evidence" ]]; then
     echo "Quota V2 spending state exists; cold bootstrap is blocked before changing the installed Agent." >&2
     exit 2
@@ -119,6 +119,16 @@ if [[ "$AGENT_VERSION" == control-v6.0.25 || "$AGENT_VERSION" == control-v6.0.27
   done
 fi
 
+# A bound product must prove the candidate is byte-identical BEFORE we
+# disable any working services. The direct installer is an exact no-op on
+# an enrolled artifact; it refuses an uncoordinated identity replacement.
+source "$INSTALL_DIR/deploy/xmesh-pq-install-guard.sh"
+xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync
+PRODUCT_PREINSTALLED=0
+if xmesh_product_binding_exists /var/lib/xmesh-agent/product; then
+  bash "$INSTALL_DIR/deploy/install-xsp-v2-product-client.sh" "$NODE_RELEASE_SHA"
+  PRODUCT_PREINSTALLED=1
+fi
 echo "XMesh Node reviewed revision: $NODE_RELEASE_SHA"
 echo "Enforcing pre-activation fail-closed state..."
 # An upgrade/retry must never leave an older managed runtime serving while the
@@ -141,7 +151,9 @@ for container in xmesh-node xmesh-managed-xray; do
 done
 
 # Install the product client before consuming the short-lived owner token.
-bash "$INSTALL_DIR/deploy/install-xsp-v2-product-client.sh" "$NODE_RELEASE_SHA"
+if [[ "$PRODUCT_PREINSTALLED" == 0 ]]; then
+  bash "$INSTALL_DIR/deploy/install-xsp-v2-product-client.sh" "$NODE_RELEASE_SHA"
+fi
 PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
 [[ -x "$PRODUCT" ]] || { echo "strict-PQ product client installation failed." >&2; exit 1; }
 

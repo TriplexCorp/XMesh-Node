@@ -31,7 +31,7 @@ if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" !=
   echo "Automatic quota renewal requires the exact opt-in WAL staging Agent." >&2; exit 2
 fi
 if [[ "$WAL_AUTO_RENEW" == 0 ]]; then
-  for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-quarantine-envelope,genesis-reservation-prepared-u*,genesis-reservation-confirmed-u*,genesis-positive-cap-u*,calendar-successor-u*,calendar-fence-u*,calendar-meter-u*,calendar-delivery-u*,calendar-positive-u*,wal-cap-u*}.json; do
+  for quota_evidence in /var/lib/xmesh-xray-sync/{genesis-quarantine-envelope.json,genesis-reservation-prepared-u*.json,genesis-reservation-confirmed-u*.json,genesis-positive-cap-u*.json,genesis-renewal-u*.json,genesis-renewal-request-u*.json,calendar-*-u*.json,wal-cap-u*.json,wal-charge-*.json,ingress-u*,xmesh-quota-u*}; do
     if [[ -e "$quota_evidence" || -L "$quota_evidence" ]]; then
       echo "Quota V2 spending state exists; refusing to replace installed renewal services." >&2
       exit 2
