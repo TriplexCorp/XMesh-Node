@@ -68,6 +68,21 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             "refundableBytes": 0,
         })
 
+    def test_installed_predecessor_requires_original_signed_pins(self):
+        executable, config, pinned = "c" * 64, "d" * 64, "e" * 64
+        with (mock.patch.object(successor_meter, "installed_worker", return_value=True),
+              mock.patch.object(successor_meter.calendar_fence, "_original_signed_scope",
+                                return_value=config) as signed_scope):
+            self.assertEqual(successor_meter._predecessor_measurement_pins(
+                7, self.old, 47, pinned, executable, config), (executable, config))
+            signed_scope.assert_called_once_with(7, self.old, 47, pinned)
+            with self.assertRaisesRegex(ValueError, "signed predecessor"):
+                successor_meter._predecessor_measurement_pins(
+                    7, self.old, 47, pinned, executable, "f" * 64)
+        with mock.patch.object(successor_meter, "installed_worker", return_value=False):
+            self.assertIsNone(successor_meter._predecessor_measurement_pins(
+                7, self.old, 47, pinned, executable, config))
+
     def test_only_nonspending_preflight_is_accepted(self):
         self.assertEqual(
             successor_meter._checked_marker(

@@ -12,6 +12,8 @@ on:
       - 'experiments/quota-v2-physical-stop/qualified_runtime_image.py'
       - 'experiments/quota-v2-physical-stop/qualified_first_meter.py'
       - 'experiments/quota-v2-physical-stop/wal_transport.py'
+      - 'experiments/quota-v2-physical-stop/successor_meter.py'
+      - 'tests/test_quota_v2_successor_meter.py'
       - 'tests/test_quota_v2_qualified_runtime_image.py'
 permissions:
   contents: read
@@ -80,6 +82,7 @@ jobs:
           sudo python3 - "$GITHUB_WORKSPACE" "$report" <<'PYTHON'
           import hashlib
           import json
+          import os
           from pathlib import Path
           import sys
           sys.path.insert(0, str(Path(sys.argv[1]) / "experiments/quota-v2-physical-stop"))
@@ -93,9 +96,21 @@ jobs:
                      "outbounds": [{"protocol": "blackhole"}]}
           meter.launch_meter(image["imageId"], profile, 1, "a" * 64, "b" * 64)
           config = hashlib.sha256(meter.wal.observed.canonical(profile)).hexdigest()
-          live = meter.wal._measure_quarantined_runtime((image["artifactSha256"], config))
-          assert len(live[3]) == 64
-          meter.release.docker("rm", "--force", "xmesh-managed-xray")
+          os.environ["XMESH_QUOTA_V2_AGENT_MODE"] = "installed"
+          try:
+              pins = (image["artifactSha256"], config)
+              live = meter.wal._measure_quarantined_runtime(pins)
+              assert len(live[3]) == 64
+              for bad in (None, ("0" * 64, config), (pins[0], "0" * 64)):
+                  try:
+                      meter.wal._measure_quarantined_runtime(bad)
+                  except (ValueError, OSError):
+                      pass
+                  else:
+                      raise AssertionError("installed meter accepted absent or wrong runtime pins")
+              assert meter.wal._measure_quarantined_runtime(pins) == live
+          finally:
+              meter.release.docker("rm", "--force", "xmesh-managed-xray")
           PYTHON
           inode="$(stat -c '%i' "$target")"
           sudo bash deploy/install-metered-xray.sh "$nexus"

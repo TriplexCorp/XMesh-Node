@@ -179,6 +179,16 @@ def _checked_marker(record, old, digest, measured, prep):
     return record
 
 
+def _predecessor_measurement_pins(fd, old, node, pinned, executable_pin, config_pin):
+    """Installed successor observation must measure the signed predecessor too."""
+    if not installed_worker():
+        return None
+    original_config = calendar_fence._original_signed_scope(fd, old, node, pinned)
+    if original_config != config_pin:
+        raise ValueError("successor configuration differs from signed predecessor")
+    return executable_pin, original_config
+
+
 def observe_successor_meter(node, user, state, socket_path, executable_pin, config_pin,
                             *, predecessor=None, old_container=None, candidate_container=SUCCESSOR):
     """Capture the original signed scope and verify a separately pristine PID."""
@@ -226,12 +236,8 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
         # The installed runtime requires independently pinned executable and
         # config on BOTH sides of the generation transition. Derive the old
         # config from the original signed policy, not Docker or the candidate.
-        old_pins = None
-        if installed_worker():
-            original_config = calendar_fence._original_signed_scope(fd, old, node, pinned)
-            if original_config != config_pin:
-                raise ValueError("successor configuration differs from signed predecessor")
-            old_pins = (executable_pin, original_config)
+        old_pins = _predecessor_measurement_pins(
+            fd, old, node, pinned, executable_pin, config_pin)
         original = wal_transport._measure_quarantined_runtime(old_pins, *old_args)
         if (measured[0] == original[0] or measured[2] == original[2]
                 or measured[3] == original[3] or measured[3] == old["runtimeId"]
