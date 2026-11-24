@@ -140,7 +140,9 @@ func lockReleaseDirectory(dir string) (*os.File, error) {
 			// canonically named candidate or immutable preflight in THIS directory.
 			matched := false
 			for _, sibling := range entries {
-				if sibling.Name() != "prepared-release.json" && !releaseCandidatePattern.MatchString(sibling.Name()) {
+				if sibling.Name() != "prepared-release.json" &&
+					!preparedReleasePattern.MatchString(sibling.Name()) &&
+					!releaseCandidatePattern.MatchString(sibling.Name()) {
 					continue
 				}
 				peer, err := sibling.Info()

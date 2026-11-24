@@ -10,9 +10,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"time"
 )
+
+const releaseCandidateDir = stateRoot + "/release-candidates"
+
+var preparedReleasePattern = regexp.MustCompile(`^prepared-release-[1-9][0-9]{0,18}\.json$`)
+
+func preparedReleaseName(command int64) string {
+	return "prepared-release-" + strconv.FormatInt(command, 10) + ".json"
+}
 
 // A durable evidence checkpoint, NOT an authority to execute or promote
 // the downloaded binary. Its current identity is deliberately immutable.
@@ -24,6 +33,7 @@ type preparedRelease struct {
 	Target                         releaseIdentity `json:"target"`
 	ActivationSHA256               string          `json:"activationSha256"`
 	SignedPlanSHA256               string          `json:"signedPlanSha256"`
+	SignedPlan                     []byte          `json:"signedPlan"`
 	ArtifactFile                   string          `json:"artifactFile"`
 	PreflightOnly                  bool            `json:"preflightOnly"`
 	RuntimeSwitched                bool            `json:"runtimeSwitched"`
@@ -37,13 +47,13 @@ func candidateFileName(plan releasePlan) string {
 func preflightRecord(plan releasePlan, signed []byte) preparedRelease {
 	planDigest := sha256.Sum256(signed)
 	return preparedRelease{
-		Schema: "xmesh-product-release-preflight-v1",
+		Schema: "xmesh-product-release-preflight-v2",
 		NodeID: plan.NodeID, CommandID: plan.CommandID,
 		Current: plan.Current, Target: plan.Target,
 		ActivationSHA256: plan.ActivationSHA256,
-		SignedPlanSHA256: hex.EncodeToString(planDigest[:]),
-		ArtifactFile:     candidateFileName(plan),
-		PreflightOnly:    true, RuntimeSwitched: false,
+		SignedPlanSHA256: hex.EncodeToString(planDigest[:]), SignedPlan: signed,
+		ArtifactFile:  candidateFileName(plan),
+		PreflightOnly: true, RuntimeSwitched: false,
 		ProductionActivationAuthorized: false,
 	}
 }
@@ -76,8 +86,7 @@ func persistReleasePreflight(dir string, plan releasePlan, signed []byte) error 
 		return err
 	}
 	data = append(data, '\n')
-	const recordFile = "prepared-release.json"
-	destination := filepath.Join(dir, recordFile)
+	destination := filepath.Join(dir, preparedReleaseName(plan.CommandID))
 	if old, err := strictFile(destination, 0600); err == nil {
 		if !bytes.Equal(old, data) {
 			return errors.New("another immutable release preflight exists")
@@ -138,12 +147,43 @@ func revalidateReleasePlan(cfg productConfig, command int64, activation string, 
 	return nil
 }
 
+func preparedReleasePlan(dir string, command int64) ([]byte, error) {
+	if err := privateReleaseDirectory(dir); err != nil {
+		return nil, err
+	}
+	lock, err := lockReleaseDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	data, err := strictFile(filepath.Join(dir, preparedReleaseName(command)), 0600)
+	if err != nil {
+		return nil, err
+	}
+	var record preparedRelease
+	if len(data) > 32768 || checkUniqueJSONKeys(data) != nil || json.Unmarshal(data, &record) != nil ||
+		record.CommandID != command || len(record.SignedPlan) == 0 || len(record.SignedPlan) > 16384 {
+		return nil, errors.New("invalid recovered release evidence")
+	}
+	// The caller verifies the signature and obtains the exact currently
+	// authorized response. Replay then compares the entire original record.
+	return record.SignedPlan, nil
+}
+
 func prepareReleaseCutover(command int64, planPath string) error {
+	if command <= 0 {
+		return errors.New("invalid release command")
+	}
 	cfg, activation, err := installedReleaseEnrollment()
 	if err != nil {
 		return err
 	}
-	raw, err := strictFile(planPath, 0600)
+	var raw []byte
+	if planPath == "" {
+		raw, err = preparedReleasePlan(releaseCandidateDir, command)
+	} else {
+		raw, err = strictFile(planPath, 0600)
+	}
 	if err != nil {
 		return err
 	}
@@ -159,7 +199,7 @@ func prepareReleaseCutover(command int64, planPath string) error {
 		}); err != nil {
 		return err
 	}
-	return persistReleasePreflight(stateRoot+"/release-candidates", plan, raw)
+	return persistReleasePreflight(releaseCandidateDir, plan, raw)
 }
 
 type releasePlanRequestForPreflight struct {

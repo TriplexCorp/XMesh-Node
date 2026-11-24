@@ -1217,7 +1217,7 @@ func main() {
 	case "prepare-release":
 		flags := flag.NewFlagSet("prepare-release", flag.ExitOnError)
 		command := flags.Int64("command-id", 0, "claimed release command ID")
-		plan := flags.String("plan-file", "", "private signed release plan")
+		plan := flags.String("plan-file", "", "private signed release plan; omit to recover this command's durable record")
 		_ = flags.Parse(os.Args[2:])
 		if flags.NArg() != 0 {
 			flags.Usage()

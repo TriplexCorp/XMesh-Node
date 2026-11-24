@@ -35,7 +35,7 @@ func TestImmutableReleasePreflightRejectsMutationAndSurvivesRetry(t *testing.T) 
 	if err := persistReleasePreflight(dir, plan, signed); err != nil {
 		t.Fatal(err)
 	}
-	record := filepath.Join(dir, "prepared-release.json")
+	record := filepath.Join(dir, preparedReleaseName(plan.CommandID))
 	first, err := os.Lstat(record)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func TestImmutableReleasePreflightRejectsMutationAndSurvivesRetry(t *testing.T) 
 	}
 	planHash := sha256.Sum256(signed)
 	if proof.RuntimeSwitched || proof.ProductionActivationAuthorized || !proof.PreflightOnly ||
-		proof.SignedPlanSHA256 != hex.EncodeToString(planHash[:]) ||
+		proof.SignedPlanSHA256 != hex.EncodeToString(planHash[:]) || !bytes.Equal(proof.SignedPlan, signed) ||
 		proof.ArtifactFile != candidateFileName(plan) || proof.CommandID != plan.CommandID {
 		t.Fatal("preflight record is not bound to the signed candidate")
 	}
@@ -60,6 +60,23 @@ func TestImmutableReleasePreflightRejectsMutationAndSurvivesRetry(t *testing.T) 
 	second, err := os.Lstat(record)
 	if err != nil || !os.SameFile(first, second) {
 		t.Fatal("idempotent preflight replaced durable proof")
+	}
+	if restored, err := preparedReleasePlan(dir, plan.CommandID); err != nil || !bytes.Equal(restored, signed) {
+		t.Fatalf("could not recover the exact signed plan: %v", err)
+	}
+	// A later owner command with a different authorization can proceed
+	// without overwriting evidence for this command.
+	later := plan
+	later.CommandID++
+	nextSigned := []byte("signed replacement command")
+	if err := os.WriteFile(filepath.Join(dir, candidateFileName(later)), payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistReleasePreflight(dir, later, nextSigned); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := preparedReleasePlan(dir, later.CommandID); err != nil || !bytes.Equal(restored, nextSigned) {
+		t.Fatalf("later command did not retain its own evidence: %v", err)
 	}
 	if err := persistReleasePreflight(dir, plan, []byte("different signed response")); err == nil {
 		t.Fatal("conflicting signed plan replaced preflight")
@@ -94,7 +111,7 @@ func TestReleasePreflightPreservesExistingSymlinkAndExpiredRecord(t *testing.T) 
 	if err := os.WriteFile(external, []byte("preserve"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(dir, "prepared-release.json")
+	link := filepath.Join(dir, preparedReleaseName(plan.CommandID))
 	if err := os.Symlink(external, link); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +138,7 @@ func TestPreparedReleaseCrashRecoveryAfterPublish(t *testing.T) {
 	if err := privateReleaseDirectory(dir); err != nil {
 		t.Fatal(err)
 	}
-	record := filepath.Join(dir, "prepared-release.json")
+	record := filepath.Join(dir, preparedReleaseName(42))
 	tmp, err := os.CreateTemp(dir, ".partial-")
 	if err != nil {
 		t.Fatal(err)
