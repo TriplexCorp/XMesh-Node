@@ -383,14 +383,19 @@ def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
     # existing independently verified signed XSP/2 checkpoint mechanism.
     if not wal_transport.runtime_identity.managed_container_name(container_name):
         raise ValueError("untrusted Xray charge journal selection")
+    # Anchor the actual Docker process BEFORE the network round trip, not
+    # after: otherwise Xray could be replaced between the off-host signed
+    # WAL head and our first local inspection. A second and a final
+    # measurement require the SAME PID, birth time and source-pinned ledger.
     runtime_id = None
     if container_name == "xmesh-managed-xray":
-        wal_transport.run("charge-sync", panel, node)
         docker, local = wal_transport._bound_journal()
+        wal_transport.run("charge-sync", panel, node)
     else:
-        wal_transport.run("charge-sync", panel, node, container_name)
         docker, local = wal_transport._bound_journal(container_name)
         runtime_id = wal_transport.runtime_identity.trusted_runtime_identity(docker["State"]["Pid"])
+        wal_transport.run("charge-sync", panel, node, container_name)
+    _verify_charging_runtime_unchanged(container_name, docker, local, runtime_id)
     journal._verify_mount(docker, local)
     fd = journal._validate_directory(local)
     try:
