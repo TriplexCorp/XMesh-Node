@@ -39,3 +39,16 @@ assert 'systemctl enable --now xmesh-xray-sync.timer' not in ops, (
 )
 
 print('strict-PQ v6 bootstrap release pin and operational timer durability: OK')
+
+# Fresh update recovery must be established before enabling any control
+# timer, and must never download from a moving branch or run bridge1.
+recovery_install = 'fetch_install xmesh-product-upgrade-coordinator.py'
+recovery_init = '/usr/bin/python3 -I /usr/local/libexec/xmesh-product-upgrade-coordinator.py --fresh initialize'
+recovery_timer = 'OPERATIONAL_TIMERS+=(xmesh-product-release-update.timer)'
+assert ops.index(recovery_install) < ops.index(recovery_init) < ops.index(enable)
+assert ops.index(recovery_timer) < ops.index(enable)
+assert 'fetch_install xmesh-product-release-update.service' in ops
+assert 'fetch_install xmesh-product-release-update.timer' in ops
+assert 'Pending signed Agent update; recover it before repairing the installation.' in ops
+assert '/usr/local/libexec/xmesh-agent-release-bridge' not in ops
+print('first-release update supervisor installation contract: OK')

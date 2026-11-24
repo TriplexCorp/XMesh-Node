@@ -65,6 +65,13 @@ PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
   exit 1
 }
 
+# Cold repair is not a coordinated release switch. Never overwrite its
+# supervisor while a durable transaction is pending.
+if [[ -e /var/lib/xmesh-node-control/product-upgrade/command.json || -L /var/lib/xmesh-node-control/product-upgrade/command.json ]]; then
+  echo "Pending signed Agent update; recover it before repairing the installation." >&2
+  exit 2
+fi
+
 for command in curl openssl python3 systemctl docker install; do
   command -v "$command" >/dev/null 2>&1 || { echo "$command is required" >&2; exit 1; }
 done
@@ -135,10 +142,20 @@ if [[ "$WAL_STAGE_AGENT" == 0 ]];then
   grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
   if [[ "$AGENT_VERSION" == control-v6.0.27 ]];then
     grep -Fxq "AGENT_VERSION = \"$AGENT_VERSION\"" /usr/local/libexec/xmesh-xray-update.py || { echo "Xray update worker version does not match canonical Agent release" >&2; exit 1; }
+    # All three files come from the exact running Nexus revision, never
+    # from a moving main branch or an untrusted update command.
+    fetch_install xmesh-product-upgrade-coordinator.py /usr/local/libexec/xmesh-product-upgrade-coordinator.py 0700
+    fetch_install xmesh-product-release-update.service /etc/systemd/system/xmesh-product-release-update.service 0644
+    fetch_install xmesh-product-release-update.timer /etc/systemd/system/xmesh-product-release-update.timer 0644
   fi
 fi
 
 install -d -o root -g root -m 0700 /etc/xmesh-node-metrics /var/lib/xmesh-node-metrics /var/lib/xmesh-node-control /var/lib/xmesh-xray-sync
+if [[ "$WAL_STAGE_AGENT" == 0 && "$AGENT_VERSION" == control-v6.0.27 ]]; then
+  # The recovery image is the original verified product binary itself.
+  # This initializes an immutable local trust anchor without bridge1.
+  /usr/bin/python3 -I /usr/local/libexec/xmesh-product-upgrade-coordinator.py --fresh initialize
+fi
 cat > /etc/xmesh-node-metrics.env <<EOF
 XMESH_API_URL=$PANEL
 XMESH_NODE_ID=$NODE
@@ -473,6 +490,9 @@ OPERATIONAL_TIMERS=(
 )
 if [[ "$WAL_STAGE_AGENT" == 0 ]];then
   OPERATIONAL_TIMERS+=(xmesh-node-control.timer)
+  if [[ "$AGENT_VERSION" == control-v6.0.27 ]]; then
+    OPERATIONAL_TIMERS+=(xmesh-product-release-update.timer)
+  fi
 fi
 if [[ "$WAL_AUTO_RENEW" == 1 ]];then
   OPERATIONAL_TIMERS+=(xmesh-quota-v2-renewal.timer)
