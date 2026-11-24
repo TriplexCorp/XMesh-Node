@@ -26,6 +26,12 @@ jobs:
           test ! -e "$target"
           sudo bash deploy/install-metered-xray.sh "$nexus"
           [[ "$(stat -c '%u:%a:%h' "$target")" == '0:755:1' ]]
+          if sudo bash install.sh; then
+            echo 'Legacy standalone installer accepted a metered artifact.' >&2
+            exit 1
+          else
+            [[ "$?" == 2 ]]
+          fi
           printf '%s  %s\n' 2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244 "$target" | sha256sum --check
           inode="$(stat -c '%i' "$target")"
           sudo bash deploy/install-metered-xray.sh "$nexus"

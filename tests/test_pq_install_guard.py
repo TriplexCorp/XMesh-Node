@@ -239,9 +239,27 @@ exit 77
         self.assertLess(package, gate)
         self.assertLess(gate, refusal)
         self.assertLess(refusal, router)
-        self.assertIn("refusing legacy startup", bootstrap[package:gate])
-        self.assertLess(installer.index("refusing legacy service installation"),
+        self.assertIn("xmesh_refuse_metered_legacy_install", bootstrap[package:gate])
+        self.assertLess(installer.index("xmesh_refuse_metered_legacy_install"),
                         installer.index("cat > /etc/systemd/system/xmesh-xray-sync.service"))
+
+
+    def test_all_stock_install_paths_refuse_prepared_metered_artifact(self):
+        root = Path(__file__).resolve().parents[1]
+        standalone = (root / "install.sh").read_text()
+        self.assertLess(standalone.index("xmesh_refuse_metered_legacy_install"),
+                        standalone.index("docker compose"))
+        guard = root / "deploy/xmesh-pq-install-guard.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "xray"
+            command = ("bash", "-c", 'source "$1"; xmesh_refuse_metered_legacy_install "$2"',
+                       "bash", str(guard), str(artifact))
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            artifact.write_bytes(b"metered")
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+            artifact.unlink()
+            artifact.symlink_to("missing")
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
 
 
 if __name__ == '__main__':

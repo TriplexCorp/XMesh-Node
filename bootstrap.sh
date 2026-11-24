@@ -141,9 +141,8 @@ if [[ "$METERED_INSTALL" == 1 ]]; then
     exit 2
   fi
   bash "$INSTALL_DIR/deploy/install-metered-xray.sh" "${XMESH_NEXUS_RELEASE_REF:?}"
-elif [[ -e /usr/local/libexec/xmesh-metered-xray || -L /usr/local/libexec/xmesh-metered-xray ]]; then
-  echo "A metered Xray installation exists; refusing legacy startup." >&2
-  exit 2
+else
+  xmesh_refuse_metered_legacy_install
 fi
 
 xmesh_refuse_quota_cold_install /var/lib/xmesh-xray-sync

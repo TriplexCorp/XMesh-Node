@@ -65,11 +65,7 @@ PRODUCT=/usr/local/bin/xmesh-agent-xspv2-product
   exit 1
 }
 
-# A prepared metered installation must never start standard Xray services.
-if [[ -e /usr/local/libexec/xmesh-metered-xray || -L /usr/local/libexec/xmesh-metered-xray ]]; then
-  echo "A metered Xray installation exists; refusing legacy service installation." >&2
-  exit 2
-fi
+xmesh_refuse_metered_legacy_install
 
 # Cold repair is not a coordinated release switch. Never overwrite its
 # supervisor while a durable transaction is pending.
