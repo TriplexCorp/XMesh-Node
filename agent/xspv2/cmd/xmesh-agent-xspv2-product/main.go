@@ -955,11 +955,23 @@ func verifyActive(panel string, nodeID int64) error {
 	if cfg.PanelURL != panel || cfg.NodeID != nodeID {
 		return errors.New("strict-PQ active state belongs to another panel or node")
 	}
+	_, err = operationalRelease(cfg)
+	return err
+}
+
+func operationalRelease(cfg productConfig) (productConfig, error) {
 	running, err := identity()
-	if err != nil || running != cfg.ReleaseIdentity {
-		return errors.New("running strict-PQ Agent differs from enrolled release identity")
+	if err != nil {
+		return cfg, err
 	}
-	return verifyEnrolledRelease(cfg, running)
+	if err := verifyEnrolledRelease(cfg, cfg.ReleaseIdentity); err != nil {
+		return cfg, err
+	}
+	if err := checkOperationalRelease(cfg, running); err != nil {
+		return cfg, err
+	}
+	cfg.ReleaseIdentity = running
+	return cfg, nil
 }
 
 func verifyEnrolledRelease(cfg productConfig, running releaseIdentity) error {
@@ -1068,7 +1080,8 @@ func request(path, bodyPath, outputPath, statusPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := verifyActive(cfg.PanelURL, cfg.NodeID); err != nil {
+	cfg, err = operationalRelease(cfg)
+	if err != nil {
 		return err
 	}
 
@@ -1152,7 +1165,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release|resume-activation}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release|switch-release|confirm-release|resume-activation}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1228,6 +1241,30 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(`{"status":"candidate-prepared","runtimeSwitched":false,"productionActivationAuthorized":false}`)
+	case "switch-release":
+		flags := flag.NewFlagSet("switch-release", flag.ExitOnError)
+		command := flags.Int64("command-id", 0, "claimed release command ID")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := switchPreparedRelease(*command); err != nil {
+			fmt.Fprintln(os.Stderr, "release switch failed:", err)
+			os.Exit(1)
+		}
+	case "confirm-release":
+		flags := flag.NewFlagSet("confirm-release", flag.ExitOnError)
+		command := flags.Int64("command-id", 0, "claimed release command ID")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := confirmInstalledRelease(*command); err != nil {
+			fmt.Fprintln(os.Stderr, "release confirmation failed:", err)
+			os.Exit(1)
+		}
 	case "verify-release-plan":
 		flags := flag.NewFlagSet("verify-release-plan", flag.ExitOnError)
 		command := flags.Int64("command-id", 0, "claimed release command ID")

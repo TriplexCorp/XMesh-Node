@@ -28,6 +28,10 @@ type releasePlan struct {
 }
 
 func verifyReleasePlan(raw []byte, cfg productConfig, command int64, activation string) (releasePlan, error) {
+	return decodeReleasePlan(raw, cfg, command, activation, true)
+}
+
+func decodeReleasePlan(raw []byte, cfg productConfig, command int64, activation string, requireLive bool) (releasePlan, error) {
 	var plan releasePlan
 	if command <= 0 {
 		return plan, errors.New("invalid release command")
@@ -56,33 +60,43 @@ func verifyReleasePlan(raw []byte, cfg productConfig, command int64, activation 
 		digestErr != nil || len(digest) != sha256.Size ||
 		revisionErr != nil || len(revision) != 20 ||
 		parsed.Env.Revision != plan.Target.SourceRevision ||
-		parsed.Env.IssuedAtMS > now || plan.ExpiresAtMS <= now ||
+		parsed.Env.IssuedAtMS > now || plan.ExpiresAtMS <= parsed.Env.IssuedAtMS ||
+		(requireLive && plan.ExpiresAtMS <= now) ||
 		plan.ExpiresAtMS-parsed.Env.IssuedAtMS > 15*60*1000 {
 		return releasePlan{}, errors.New("release plan does not match the enrolled transition")
 	}
 	return plan, nil
 }
 
-func verifyCandidateBytes(path, expected string, mode os.FileMode) error {
-	const maxBytes = 64 << 20
+func openPrivateReleaseImage(path string, mode os.FileMode) (*os.File, int64, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	source := os.NewFile(uintptr(fd), path)
-	defer source.Close()
 	info, err := source.Stat()
 	if err != nil {
-		return err
+		source.Close()
+		return nil, 0, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != 0 || stat.Nlink != 1 || !info.Mode().IsRegular() ||
-		info.Mode().Perm() != mode || info.Size() <= 0 || info.Size() > maxBytes {
-		return errors.New("unsafe staged Agent artifact")
+		info.Mode().Perm() != mode || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || info.Size() <= 0 || info.Size() > maxReleaseArtifactBytes {
+		source.Close()
+		return nil, 0, errors.New("unsafe staged Agent artifact")
 	}
+	return source, info.Size(), nil
+}
+
+func verifyCandidateBytes(path, expected string, mode os.FileMode) error {
+	source, expectedSize, err := openPrivateReleaseImage(path, mode)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
 	hash := sha256.New()
-	size, err := io.Copy(hash, io.LimitReader(source, maxBytes+1))
-	if err != nil || size != info.Size() || hex.EncodeToString(hash.Sum(nil)) != expected {
+	size, err := io.Copy(hash, io.LimitReader(source, maxReleaseArtifactBytes+1))
+	if err != nil || size != expectedSize || hex.EncodeToString(hash.Sum(nil)) != expected {
 		return errors.New("staged Agent bytes do not match the signed target")
 	}
 	return nil
@@ -99,7 +113,7 @@ func installedReleaseEnrollment() (productConfig, string, error) {
 	if err := verifyEnrolledRelease(cfg, cfg.ReleaseIdentity); err != nil {
 		return cfg, "", err
 	}
-	if err := verifyCandidateBytes("/usr/local/bin/xmesh-agent-xspv2-product",
+	if err := verifyCandidateBytes(installedProduct,
 		cfg.ReleaseIdentity.ArtifactSHA256, 0755); err != nil {
 		return cfg, "", err
 	}
