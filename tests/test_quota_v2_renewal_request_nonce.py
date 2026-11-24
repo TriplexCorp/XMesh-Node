@@ -246,7 +246,8 @@ class DurableRenewalNonce(unittest.TestCase):
         second = {"reservationId": "22222222-2222-4222-8222-222222222222",
                   "runtimeId": "b" * 64}
         third = {"reservationId": "33333333-3333-4333-8333-333333333333",
-                 "runtimeId": "c" * 64}
+                 "runtimeId": "c" * 64,
+                 "validUntilMs": time.time_ns() // 1_000_000 + 60000}
         measured = ("e" * 64, "2026-11-24T00:00:00Z", os.getpid(), third["runtimeId"])
         chain = [(genesis, None), (second, None), (third, measured)]
         intent = {"nodeId": node, "executableSha256": "d" * 64,
@@ -312,6 +313,53 @@ class DurableRenewalNonce(unittest.TestCase):
             self.assertEqual(charge_tip.call_args.kwargs["container_name"],
                              successor_meter.container_for(user, second["reservationId"]))
             install.assert_not_called()
+
+    def test_expired_successor_missing_route_advances_calendar_not_stale_repair(self):
+        import charge_worker
+        import successor_meter
+        import successor_positive
+
+        user, node = 123, 7
+        old = {"reservationId": "11111111-1111-4111-8111-111111111111",
+               "runtimeId": "a" * 64}
+        middle = {"reservationId": "22222222-2222-4222-8222-222222222222",
+                  "runtimeId": "b" * 64}
+        expired = {"reservationId": "33333333-3333-4333-8333-333333333333",
+                   "runtimeId": "c" * 64,
+                   "validUntilMs": time.time_ns() // 1_000_000 - 60000}
+        measured = ("e" * 64, "2026-11-24T00:00:00Z", os.getpid(), expired["runtimeId"])
+        chain = [(old, None), (middle, None), (expired, measured)]
+        intent = {"nodeId": node, "executableSha256": "d" * 64,
+                  "configSha256": "f" * 64}
+        predecessor_container = successor_meter.container_for(user, middle["reservationId"])
+
+        # The previous route disappeared at the same time as the current
+        # calendar window expired. An old route cannot be restored (the
+        # ingress publisher rejects the expired signed grant). We must
+        # instead settle/fence the expired generation and start the next.
+        with (
+            mock.patch.object(successor_positive, "verified_chain", return_value=chain),
+            mock.patch.object(renewal_worker.wal_transport, "_panel_pin", return_value="e" * 64),
+            mock.patch.object(renewal_worker.lease, "_identity_file", return_value=intent),
+            mock.patch.object(calendar_fence, "_original_signed_scope", return_value="f" * 64),
+            mock.patch.object(renewal_worker.wal_transport, "_measure_quarantined_runtime",
+                              return_value=measured),
+            mock.patch.object(charge_worker, "run") as charge,
+            mock.patch.object(renewal_worker, "_prepare_successor") as prepare,
+            mock.patch.object(calendar_fence, "fence_successor") as fence,
+            mock.patch.object(successor_positive, "install_successor") as stale_install,
+        ):
+            result = renewal_worker._run_generation(
+                "https://staging.example.invalid", node, user, self.state,
+                "/private/old.sock", set(), True)
+            self.assertFalse(result)
+            self.assertEqual(charge.call_args.kwargs["container_name"], predecessor_container)
+            prepare.assert_called_once()
+            self.assertEqual(prepare.call_args.kwargs["predecessor"], expired)
+            fence.assert_called_once()
+            self.assertEqual(fence.call_args.kwargs["predecessor"], expired)
+            self.assertEqual(fence.call_args.kwargs["container"], predecessor_container)
+            stale_install.assert_not_called()
 
     def test_commit_retry_reuses_exact_nonce_and_refuses_competing_nonce(self):
         fd, lock = self.locked()
