@@ -167,6 +167,15 @@ func recoverLostActivation() error {
 	if err != nil {
 		return err
 	}
+	// If Nexus's signed receipt reached the disk but SIGKILL occurred before
+	// active.json was fsynced, finish locally. The old receipt is sufficient
+	// cryptographic evidence even when Nexus is offline. A corrupt or foreign
+	// receipt must fail closed; never silently replace it over the network.
+	if cached, err := strictFile(activationReceipt, 0600); err == nil {
+		return recoverActivationResponse(cfg, requestRaw, saved, cached)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	client, err := hybridClient(cfg)
 	if err != nil {
 		return err
