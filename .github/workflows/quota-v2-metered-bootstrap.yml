@@ -26,6 +26,23 @@ jobs:
           target=/usr/local/libexec/xmesh-metered-xray
           nexus=1c8f2f7b23bae34857b77f43e0b794815adcbb28
           test ! -e "$target"
+          approved_tree=d9ef27c488cdd79b6eaff339d766e05869d80a7b
+          if [[ "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" != "$approved_tree" ]]; then
+            # A new patch has no existing release approval. Prove the
+            # current installer refuses it before exercising the approved
+            # release's positive reconstruction in a separate checkout.
+            if sudo bash deploy/install-metered-xray.sh "$nexus"; then
+              echo 'Unqualified new patch unexpectedly installed.' >&2
+              exit 1
+            fi
+            test ! -e "$target"
+            sudo test ! -e /var/lib/xmesh-metered-xray
+            approved_node=f9b2f3416c7488b6e4e7e901904b8f2dfd3745ca
+            git fetch --no-tags --depth=1 origin "$approved_node"
+            git worktree add --detach "$RUNNER_TEMP/approved-metered-node" "$approved_node"
+            cd "$RUNNER_TEMP/approved-metered-node"
+            test "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" = "$approved_tree"
+          fi
           sudo bash deploy/install-metered-xray.sh "$nexus"
           [[ "$(stat -c '%u:%a:%h' "$target")" == '0:755:1' ]]
           if sudo bash install.sh; then
