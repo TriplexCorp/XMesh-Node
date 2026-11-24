@@ -82,7 +82,9 @@ func persistReleasePreflight(dir string, plan releasePlan, signed []byte) error 
 		if !bytes.Equal(old, data) {
 			return errors.New("another immutable release preflight exists")
 		}
-		return nil
+		// Recover the directory fsync boundary after a SIGKILL between
+		// publishing the immutable preflight and syncing its parent.
+		return syncParent(destination)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("unsafe or unreadable prior release preflight")
 	}
