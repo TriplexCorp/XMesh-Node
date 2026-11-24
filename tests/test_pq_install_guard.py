@@ -191,6 +191,25 @@ exit 77
             self.assertIn('[[ "$PRODUCT_ACTIVATION_STATE" == fresh ]]', source)
             self.assertIn('xmesh_product_binding_exists /var/lib/xmesh-agent/product', source)
 
+    def test_v627_reboot_services_require_original_pq_activation(self):
+        source = (ROOT / 'deploy/install-v6-strict-operational-agents.sh').read_text()
+        for snippet in (
+                'ExecStart=/usr/local/bin/xmesh-agent-xspv2-product resume-activation',
+                'Requires=xmesh-pq-activation-recovery.service',
+                'After=xmesh-pq-activation-recovery.service',
+                'ReadWritePaths=/var/lib/xmesh-agent/product',
+                'RECOVERY_WORKERS=(xmesh-xray-sync xmesh-node-metrics xmesh-node-user-meter)',
+                'RECOVERY_WORKERS+=(xmesh-node-control)',
+                'RECOVERY_WORKERS+=(xmesh-quota-v2-ingress xmesh-quota-v2-renewal)'):
+            self.assertIn(snippet, source)
+        self.assertLess(source.index('Requires=xmesh-pq-activation-recovery.service'),
+                        source.index('systemctl daemon-reload'))
+        self.assertLess(source.index('systemctl enable xmesh-pq-activation-recovery.service'),
+                        source.index('systemctl start xmesh-node-metrics.service'))
+        # All dependencies are opt-in to reviewed 6.0.27, not 6.0.24.
+        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.27 ]]; then', source)
+        self.assertIn('WAL staging requires a fresh test node', source)
+
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
         bootstrap = (ROOT / 'bootstrap.sh').read_text()
         standalone = (ROOT / 'install.sh').read_text()

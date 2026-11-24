@@ -399,6 +399,54 @@ else
   rm -f /etc/systemd/system/xmesh-quota-v2-renewal.service /etc/systemd/system/xmesh-quota-v2-renewal.timer
 fi
 
+# The reviewed 6.0.27 product can recover the ORIGINAL signed activation
+# after reboot without re-enrollment. Existing production Agent binaries do
+# not implement resume-activation; leave their unit topology unchanged.
+if [[ "$AGENT_VERSION" == control-v6.0.27 ]]; then
+cat > /etc/systemd/system/xmesh-pq-activation-recovery.service <<'EOF'
+[Unit]
+Description=XMesh strict-PQ recover original signed Agent activation before operations
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/bin/xmesh-agent-xspv2-product resume-activation
+TimeoutStartSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/xmesh-agent/product
+[Install]
+WantedBy=multi-user.target
+EOF
+  RECOVERY_WORKERS=(xmesh-xray-sync xmesh-node-metrics xmesh-node-user-meter)
+  if [[ "$WAL_STAGE_AGENT" == 0 ]]; then
+    RECOVERY_WORKERS+=(xmesh-node-control)
+  fi
+  if [[ "$WAL_AUTO_RENEW" == 1 ]]; then
+    RECOVERY_WORKERS+=(xmesh-quota-v2-ingress xmesh-quota-v2-renewal)
+  fi
+  for worker in "${RECOVERY_WORKERS[@]}"; do
+    install -d -o root -g root -m 0755 "/etc/systemd/system/${worker}.service.d"
+    cat > "/etc/systemd/system/${worker}.service.d/10-pq-activation-recovery.conf" <<'EOF'
+[Unit]
+Requires=xmesh-pq-activation-recovery.service
+After=xmesh-pq-activation-recovery.service
+EOF
+  done
+fi
+
 systemctl daemon-reload
 
 # Re-check the exact durable receipt immediately before first operational I/O.
@@ -417,6 +465,10 @@ if [[ "$WAL_STAGE_AGENT" == 0 ]];then
 fi
 if [[ "$WAL_AUTO_RENEW" == 1 ]];then
   OPERATIONAL_TIMERS+=(xmesh-quota-v2-renewal.timer)
+fi
+# Ensure reboot recovery is attempted before operational traffic.
+if [[ "$AGENT_VERSION" == control-v6.0.27 ]]; then
+  systemctl enable xmesh-pq-activation-recovery.service >/dev/null
 fi
 systemctl enable "${OPERATIONAL_TIMERS[@]}" >/dev/null
 
