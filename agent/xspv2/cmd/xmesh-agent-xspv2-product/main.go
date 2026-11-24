@@ -1151,7 +1151,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1189,6 +1189,20 @@ func main() {
 			fmt.Fprintln(os.Stderr, "release plan fetch failed:", err)
 			os.Exit(1)
 		}
+	case "download-release-artifact":
+		flags := flag.NewFlagSet("download-release-artifact", flag.ExitOnError)
+		command := flags.Int64("command-id", 0, "claimed release command ID")
+		plan := flags.String("plan-file", "", "private signed release plan file")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := downloadStagedRelease(*command, *plan); err != nil {
+			fmt.Fprintln(os.Stderr, "release artifact download failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println(`{"status":"candidate-verified","runtimeSwitched":false}`)
 	case "verify-release-plan":
 		flags := flag.NewFlagSet("verify-release-plan", flag.ExitOnError)
 		command := flags.Int64("command-id", 0, "claimed release command ID")
