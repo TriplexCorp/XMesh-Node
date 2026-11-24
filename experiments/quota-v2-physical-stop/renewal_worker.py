@@ -557,8 +557,13 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
         config = calendar_fence._original_signed_scope(fd, old, node, pinned)
         if intent["nodeId"] != node or intent["configSha256"] != config:
             raise ValueError("calendar generation policy pins changed")
+        now = time.time_ns() // 1_000_000
         repair = False
-        if allow_admission and measured is not None:
+        # A saved successor receipt is historical evidence, NOT permission
+        # to republish an expired signed cap. On calendar rollover a missing
+        # route must advance to the next generation instead of retrying the
+        # expired ingress forever (publish() correctly rejects it).
+        if allow_admission and measured is not None and now < old["validUntilMs"]:
             try:
                 route = os.readlink(f"ingress-u{user}", dir_fd=fd)
             except FileNotFoundError:
@@ -570,7 +575,6 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
         container = ("xmesh-managed-xray" if position == 0 else
                      successor_meter.container_for(user, chain[position - 1][0]["reservationId"]))
         candidate = successor_meter.container_for(user, old["reservationId"])
-        now = time.time_ns() // 1_000_000
         ready = calendar_fence._fence_name(user, old["reservationId"]) in names
         proved = successor_meter._name(user, old["reservationId"]) in names
     finally:
