@@ -230,6 +230,27 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             with self.subTest(user=user), self.assertRaises(ValueError):
                 successor_meter._signed_inbound_tags(good, user)
 
+    def test_pinned_config_mount_rejects_unbounded_docker_shape(self):
+        mount = {"Destination": "/etc/xray/config.json",
+                 "Type": "bind", "RW": False,
+                 "Source": "/etc/xray/source-pinned.json"}
+        original = {"Mounts": [dict(mount)]}
+        self.assertEqual(
+            successor_meter._pinned_config_source(original), mount["Source"])
+        for malformed in (
+            None, {}, {"Mounts": None}, {"Mounts": []},
+            {"Mounts": [dict(mount), dict(mount)]},
+            {"Mounts": [dict(mount, RW=True)]},
+            {"Mounts": [dict(mount, Type="volume")]},
+            {"Mounts": [dict(mount, Source="../../relative.json")]},
+            {"Mounts": [dict(mount, Source="/")]},
+            {"Mounts": [dict(mount, Source="/dev/null")]},
+            {"Mounts": [dict(mount, Source=None)]},
+            {"Mounts": [dict(mount, Destination="/etc/xray/other.json")]},
+        ):
+            with self.subTest(mount=malformed), self.assertRaises(ValueError):
+                successor_meter._pinned_config_source(malformed)
+
     def test_existing_generation_is_measured_not_trusted_by_docker_name(self):
         # An interrupted calendar launch can leave the deterministic Docker
         # name behind. Never mistake that name for a clean live successor.
