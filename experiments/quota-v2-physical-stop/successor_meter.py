@@ -282,7 +282,7 @@ def control_socket(container):
     return os.path.join(os.path.dirname(ledger), "drain.sock")
 
 
-def verify_reusable_generation(name, state, old, old_container, executable, config):
+def verify_reusable_generation(name, state, old, old_container, executable, config, pinned):
     """Accept an existing candidate ONLY as its actual, isolated live Xray.
 
     Docker name existence is not proof of a running process. Never restart a
@@ -316,6 +316,25 @@ def verify_reusable_generation(name, state, old, old_container, executable, conf
             or source_for(mounts, "/etc/xray/config.json")
             != source_for(old_mounts, "/etc/xray/config.json")):
         raise ValueError("existing generation differs from signed predecessor mounts")
+    # The deterministic Docker name is not the binding. Read the exact
+    # root-private persisted Node/activation/Ed25519 policy identity that the
+    # original launcher fsynced BEFORE starting any candidate Xray.
+    expected = wal_transport.observed.canonical({
+        "nodeId": old["nodeId"],
+        "activationReceiptSha256": old["activationReceiptSha256"],
+        "policyPublicKey": pinned,
+    })
+    binding = os.open(
+        str(Path(root) / "cap-binding.json"),
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(binding, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                or stream.read(len(expected) + 1) != expected):
+            raise ValueError("existing generation has a foreign signed-cap binding")
+    if wal_transport._panel_pin() != pinned:
+        raise ValueError("panel policy key changed while revalidating existing generation")
     measured = wal_transport._measure_quarantined_runtime(
         (executable, config), name)
     if measured[3] == before[3]:
@@ -365,7 +384,7 @@ def start_generation(state, node, user, old, old_container, executable, config):
             if existing != [name]:
                 raise ValueError("ambiguous managed generation container")
             return verify_reusable_generation(
-                name, state, old, old_container, executable, config)
+                name, state, old, old_container, executable, config, pin)
         before = wal_transport._measure_quarantined_runtime((executable, config), old_container)
         if before[3] != old["runtimeId"]:
             raise ValueError("generation launch requires live fenced predecessor")
