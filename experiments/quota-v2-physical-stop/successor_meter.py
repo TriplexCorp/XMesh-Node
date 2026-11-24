@@ -282,6 +282,33 @@ def control_socket(container):
     return os.path.join(os.path.dirname(ledger), "drain.sock")
 
 
+def _signed_inbound_tags(old, user):
+    """Validate the exact signed user/class roster before ANY Docker launch.
+
+    A suffix alone is insufficient: a foreign user's email or a MAIN/CDN
+    class mismatch must not become an allowed private socket. The same
+    immutable policy check applies when reusing an interrupted generation.
+    """
+    aliases = old.get("aliasScopes") if isinstance(old, dict) else None
+    if type(user) is not int or user <= 0 or not isinstance(aliases, list) or not 1 <= len(aliases) <= 2:
+        raise ValueError("missing signed predecessor ingress scopes")
+    seen = set()
+    previous_email = ""
+    for alias in aliases:
+        if not isinstance(alias, dict) or set(alias) != {"email", "class"}:
+            raise ValueError("malformed signed predecessor ingress scope")
+        cls, email = alias["class"], alias["email"]
+        if (cls not in ("main", "cdn") or type(email) is not str or
+                email != f"xmesh-u{user}--vless-{cls}" or email <= previous_email):
+            raise ValueError("foreign, unordered or mismatched signed inbound scope")
+        tag = "vless-" + cls
+        if tag in seen:
+            raise ValueError("duplicate signed predecessor ingress scope")
+        seen.add(tag)
+        previous_email = email
+    return sorted(seen)
+
+
 def verify_reusable_generation(name, state, old, old_container, executable, config, pinned):
     """Accept an existing candidate ONLY as its actual, isolated live Xray.
 
@@ -307,20 +334,7 @@ def verify_reusable_generation(name, state, old, old_container, executable, conf
     # A candidate with the right Docker name, image and WAL, but started
     # without the private-VLESS byte gate must never be reused. The fresh
     # launcher supplies these exact settings from the signed alias roster.
-    aliases = old.get("aliasScopes")
-    if not isinstance(aliases, list) or not aliases:
-        raise ValueError("missing signed predecessor ingress scopes")
-    allowed = []
-    for alias in aliases:
-        if not isinstance(alias, dict) or not isinstance(alias.get("email"), str):
-            raise ValueError("invalid signed predecessor ingress scope")
-        _, sep, tag = alias["email"].partition("--")
-        if not sep or tag not in ("vless-main", "vless-cdn"):
-            raise ValueError("unsupported signed predecessor ingress scope")
-        allowed.append(tag)
-    allowed.sort()
-    if len(allowed) != len(set(allowed)):
-        raise ValueError("duplicate signed predecessor ingress scope")
+    allowed = _signed_inbound_tags(old, old["userId"])
     config_env = current.get("Config")
     env = config_env.get("Env") if isinstance(config_env, dict) else None
     if not isinstance(env, list) or not all(isinstance(v, str) for v in env):
@@ -405,6 +419,8 @@ def start_generation(state, node, user, old, old_container, executable, config):
         calendar_fence._checked_saved(closed, old, digest, old["runtimeId"])
         if not closed["oldWalChargeConfirmation"]["allOldStreamTailsNexusAcknowledged"]:
             raise ValueError("generation cannot start before old WAL settlement")
+        # Fail before creating or modifying the candidate WAL directory.
+        allowed = _signed_inbound_tags(old, user)
         existing = subprocess.check_output([
             "docker", "ps", "-a", "--filter", f"name=^/{name}$", "--format", "{{.Names}}",
         ], timeout=10).decode().splitlines()
@@ -459,9 +475,6 @@ def start_generation(state, node, user, old, old_container, executable, config):
         finally:
             os.close(root_fd)
         dest = wal_transport.journal.RUNTIME_DEST
-        allowed = sorted(alias["email"].split("--", 1)[1] for alias in old["aliasScopes"])
-        if not allowed or any(tag not in ("vless-main", "vless-cdn") for tag in allowed):
-            raise ValueError("generation has unsupported signed inbound scope")
         args = ["docker", "run", "-d", "--name", name, "--network", "none",
                 "--restart=no", "--read-only", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges", "--user", "0:0",
