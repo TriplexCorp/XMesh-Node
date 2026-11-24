@@ -139,7 +139,7 @@ func validateRecoveredActivationReceipt(cfg productConfig, requestRaw []byte, pa
 		Schema: "xmesh-v6-strict-pq-active-1", NodeID: cfg.NodeID,
 		KeyEpoch: 1, RequestID: parsed.Env.RequestID,
 		RequestBindingSHA256: hex.EncodeToString(requestHash[:]),
-		ReceiptSHA256: hex.EncodeToString(receiptHash[:]),
+		ReceiptSHA256:        hex.EncodeToString(receiptHash[:]),
 		ProductionActivation: true, StrictPQEnabled: true,
 		AutomaticClassicalFallback: false, ReleaseIdentity: cfg.ReleaseIdentity,
 		ActivatedAt: receipt.ActivatedAt,
@@ -197,9 +197,9 @@ func recoverLostActivation() error {
 	}
 	binding := sha256.Sum256(requestRaw)
 	query, err := json.Marshal(activationRecoveryRequest{
-		Schema: "xmesh-product-activation-recovery-v1",
+		Schema:            "xmesh-product-activation-recovery-v1",
 		OriginalRequestID: saved.Env.RequestID,
-		OriginalSHA256: hex.EncodeToString(binding[:]),
+		OriginalSHA256:    hex.EncodeToString(binding[:]),
 	})
 	if err != nil {
 		return err
