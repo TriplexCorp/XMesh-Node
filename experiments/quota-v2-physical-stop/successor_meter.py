@@ -282,6 +282,18 @@ def control_socket(container):
     return os.path.join(os.path.dirname(ledger), "drain.sock")
 
 
+def _verify_unlaunched_runtime_root(root):
+    """Never repurpose a vanished Xray's runtime directory.
+
+    A stale drain socket, positive cap or any unexpected state could mean
+    a previously funded process existed even though Docker lost its name.
+    Keep every byte for explicit forensic recovery instead of restarting.
+    """
+    names = set(os.listdir(root))
+    if names - {"ledger", "cap-binding.json"}:
+        raise ValueError("unowned prior generation runtime requires recovery")
+
+
 def _pinned_config_source(docker):
     """Extract exactly one read-only Xray config bind, never StopIteration.
 
@@ -460,6 +472,7 @@ def start_generation(state, node, user, old, old_container, executable, config):
         root = Path(state) / name
         root.mkdir(mode=0o700, exist_ok=True)
         os.close(wal_transport.journal._validate_directory(root))
+        _verify_unlaunched_runtime_root(root)
         ledger = root / "ledger"
         ledger.mkdir(mode=0o700, exist_ok=True)
         os.close(wal_transport.journal._validate_directory(ledger))
