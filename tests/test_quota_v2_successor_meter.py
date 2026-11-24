@@ -199,6 +199,91 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
                         "XMESH_QUOTA_V2_STAGING_RUNTIME=0"]},
                 })
 
+    def test_existing_generation_is_measured_not_trusted_by_docker_name(self):
+        # An interrupted calendar launch can leave the deterministic Docker
+        # name behind. Never mistake that name for a clean live successor.
+        with tempfile.TemporaryDirectory() as state:
+            name = successor_meter.container_for(
+                self.old["userId"], self.old["reservationId"])
+            ledger = Path(state) / name / "ledger"
+            ledger.mkdir(parents=True, mode=0o700)
+            source = "/etc/xray/source-pinned.json"
+            old_runtime = ("1" * 64, self.runtime[1], 11111, "2" * 64)
+            fresh = self.runtime
+            predecessor = dict(self.old, runtimeId=old_runtime[3])
+            old_inspect = {
+                "Image": "sha256:" + "3" * 64,
+                "Mounts": [{"Type": "bind", "Destination": "/etc/xray/config.json",
+                            "Source": source, "RW": False}],
+            }
+            current = {
+                "Name": "/" + name, "Image": old_inspect["Image"],
+                "Mounts": [
+                    {"Type": "bind", "Destination": "/etc/xray/config.json",
+                     "Source": source, "RW": False},
+                    {"Type": "bind", "Destination":
+                     successor_meter.wal_transport.journal.RUNTIME_DEST,
+                     "Source": str(ledger.parent), "RW": True},
+                ],
+            }
+            def inspect(candidate):
+                if candidate == "xmesh-managed-xray":
+                    return old_inspect, "/tmp/old-verified-wal"
+                if candidate == name:
+                    return current, str(ledger)
+                raise ValueError("foreign container")
+
+            def measure(pins, candidate):
+                if candidate == "xmesh-managed-xray":
+                    return old_runtime
+                if candidate == name:
+                    return fresh
+                raise ValueError("foreign process")
+
+            with mock.patch.object(successor_meter.wal_transport,
+                                   "_bound_journal", side_effect=inspect), \\
+                 mock.patch.object(successor_meter.wal_transport,
+                                   "_measure_quarantined_runtime", side_effect=measure) as measuring, \\
+                 mock.patch.object(successor_meter, "_verify_fresh_container_env"), \\
+                 mock.patch.object(successor_meter, "_clean_mount") as clean:
+                def check():
+                    return successor_meter.verify_reusable_generation(
+                        name, state, predecessor, "xmesh-managed-xray",
+                        "c" * 64, "d" * 64)
+                self.assertEqual(check(), name)
+                self.assertEqual(measuring.call_count, 3)
+                clean.assert_called_with("/tmp/old-verified-wal",
+                                         str(ledger), fresh[3])
+                measuring.reset_mock()
+                current["Image"] = "sha256:" + "e" * 64
+                with self.assertRaisesRegex(ValueError, "foreign Docker identity"):
+                    check()
+                current["Image"] = old_inspect["Image"]
+                current["Mounts"][1]["Source"] = "/tmp/another-wal"
+                with self.assertRaisesRegex(ValueError, "predecessor mounts"):
+                    check()
+                current["Mounts"][1]["Source"] = str(ledger.parent)
+                current["Mounts"][0]["Source"] = "/tmp/other-config"
+                with self.assertRaisesRegex(ValueError, "predecessor mounts"):
+                    check()
+                current["Mounts"][0]["Source"] = source
+                (ledger / "positive-cap-u101.json").write_text("foreign")
+                with self.assertRaisesRegex(ValueError, "signed spend or WAL"):
+                    check()
+                (ledger / "positive-cap-u101.json").unlink()
+                (ledger / "meter-old-runtime.jsonl").write_text("not settled")
+                with self.assertRaisesRegex(ValueError, "signed spend or WAL"):
+                    check()
+                (ledger / "meter-old-runtime.jsonl").unlink()
+                with mock.patch.object(successor_meter.wal_transport,
+                                       "_measure_quarantined_runtime",
+                                       side_effect=ValueError("stopped Xray has no live PID")):
+                    with self.assertRaisesRegex(ValueError, "no live PID"):
+                        check()
+                # No code path is allowed to run Docker start/rm on a
+                # potentially funded but incompletely recorded successor.
+                self.assertEqual(check(), name)
+
     def test_runtime_bind_keeps_ipc_out_of_wal_and_cannot_hide_old_debt(self):
         import journal_integrity as journal
         with tempfile.TemporaryDirectory() as source:
