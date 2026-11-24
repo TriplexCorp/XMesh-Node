@@ -111,8 +111,16 @@ func lockReleaseDirectory(dir string) (*os.File, error) {
 		if !ok {
 			continue
 		}
-		if _, err := strconv.ParseUint(suffix, 10, 64); err != nil {
+		// os.CreateTemp generates a random lowercase-alphanumeric suffix,
+		// not a decimal integer. Reject unexpected names rather than
+		// silently making genuine SIGKILL debris unrecoverable.
+		if len(suffix) < 6 || len(suffix) > 16 {
 			return fail(errors.New("unexpected partial release filename"))
+		}
+		for _, char := range suffix {
+			if (char < '0' || char > '9') && (char < 'a' || char > 'z') {
+				return fail(errors.New("unexpected partial release filename"))
+			}
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -148,6 +156,15 @@ func collectReleaseArtifact(dir string, plan releasePlan, rawPlan []byte, fetch 
 	defer lock.Close()
 	planHash := sha256.Sum256(rawPlan)
 	planSHA := hex.EncodeToString(planHash[:])
+	final := filepath.Join(dir, strconv.FormatInt(plan.CommandID, 10)+"-"+plan.Target.ArtifactSHA256+".bin")
+	// A retry of an already verified candidate is idempotent. In
+	// particular do not touch the existing inode or replace its contents:
+	// another process may have independently authenticated those bytes.
+	if _, err := os.Lstat(final); err == nil {
+		return verifyCandidateBytes(final, plan.Target.ArtifactSHA256, 0600)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".partial-")
 	if err != nil {
 		return err
@@ -199,7 +216,13 @@ func collectReleaseArtifact(dir string, plan releasePlan, rawPlan []byte, fetch 
 	if err := verifyCandidateBytes(tmp.Name(), plan.Target.ArtifactSHA256, 0600); err != nil {
 		return err
 	}
-	final := filepath.Join(dir, strconv.FormatInt(plan.CommandID, 10)+"-"+plan.Target.ArtifactSHA256+".bin")
+	// The lock protects cooperating downloaders. If a privileged external
+	// writer introduced the destination meanwhile, never overwrite it.
+	if _, err := os.Lstat(final); err == nil {
+		return errors.New("release candidate destination appeared during transfer")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if err := os.Rename(tmp.Name(), final); err != nil {
 		return err
 	}

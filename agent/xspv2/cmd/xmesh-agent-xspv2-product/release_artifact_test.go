@@ -90,12 +90,17 @@ func TestReleaseTransferLockAndCrashCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	partial := filepath.Join(dir, ".partial-123")
+	tmp, err := os.CreateTemp(dir, ".partial-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
 	verified := filepath.Join(dir, "42-verified.bin")
-	for _, path := range []string{partial, verified} {
-		if err := os.WriteFile(path, []byte("preserve until safe"), 0600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(verified, []byte("preserve until safe"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	if second, err := lockReleaseDirectory(dir); err == nil {
 		second.Close()
@@ -127,5 +132,67 @@ func TestReleaseTransferLockAndCrashCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(verified); err != nil {
 		t.Fatal("unsafe cleanup removed verified target")
+	}
+}
+
+func TestReleaseVerifiedCandidateRetryDoesNotOverwriteOrRefetch(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root-owned staging directory")
+	}
+	dir := filepath.Join(t.TempDir(), "stage")
+	data := bytes.Repeat([]byte("v"), releaseChunkBytes+7)
+	digest := sha256.Sum256(data)
+	plan := releasePlan{
+		CommandID: 99, ExpiresAtMS: time.Now().Add(time.Minute).UnixMilli(),
+		Target: releaseIdentity{ArtifactSHA256: hex.EncodeToString(digest[:])},
+	}
+	rawPlan := []byte("identical signed release plan")
+	planHash := sha256.Sum256(rawPlan)
+	count := 0
+	download := func(raw []byte) ([]byte, int, error) {
+		count++
+		var req releaseArtifactRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatal(err)
+		}
+		end := min(req.Offset+releaseChunkBytes, int64(len(data)))
+		chunk := releaseArtifactChunk{
+			PlanSHA256: hex.EncodeToString(planHash[:]),
+			ArtifactSHA256: plan.Target.ArtifactSHA256,
+			Offset: req.Offset, TotalBytes: int64(len(data)),
+			DataB64: b64.EncodeToString(data[req.Offset:end]),
+		}
+		reply, err := json.Marshal(chunk)
+		return reply, http.StatusOK, err
+	}
+	if err := collectReleaseArtifact(dir, plan, rawPlan, download); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("unexpected transfer count: %d", count)
+	}
+	final := filepath.Join(dir, "99-"+plan.Target.ArtifactSHA256+".bin")
+	before, err := os.Lstat(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := collectReleaseArtifact(dir, plan, rawPlan, func([]byte) ([]byte, int, error) {
+		t.Fatal("verified retry contacted gateway")
+		return nil, http.StatusConflict, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Lstat(final)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("verified candidate was replaced: %v", err)
+	}
+	if err := os.WriteFile(final, []byte("corrupted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := collectReleaseArtifact(dir, plan, rawPlan, func([]byte) ([]byte, int, error) {
+		t.Fatal("corrupted existing candidate should fail before network")
+		return nil, http.StatusConflict, nil
+	}); err == nil {
+		t.Fatal("corrupted candidate accepted as idempotent retry")
 	}
 }
