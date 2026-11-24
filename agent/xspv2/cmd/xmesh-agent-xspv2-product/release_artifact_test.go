@@ -211,7 +211,7 @@ func TestPublishReleaseCandidateDoesNotReplaceExistingInode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publishReleaseCandidate(temp, final); err == nil {
+	if err := publishImmutableReleaseFile(temp, final); err == nil {
 		t.Fatal("atomically replaced an existing verified candidate")
 	}
 	after, err := os.Lstat(final)
