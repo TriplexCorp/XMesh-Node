@@ -199,6 +199,37 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
                         "XMESH_QUOTA_V2_STAGING_RUNTIME=0"]},
                 })
 
+    def test_signed_inbound_tags_are_exact_owner_and_canonical_classes(self):
+        good = {"aliasScopes": [
+            {"email": "xmesh-u101--vless-cdn", "class": "cdn"},
+            {"email": "xmesh-u101--vless-main", "class": "main"},
+        ]}
+        self.assertEqual(successor_meter._signed_inbound_tags(good, 101),
+                         ["vless-cdn", "vless-main"])
+        self.assertEqual(successor_meter._signed_inbound_tags({
+            "aliasScopes": [good["aliasScopes"][1]]}, 101), ["vless-main"])
+        variants = [
+            {"aliasScopes": []},
+            {"aliasScopes": good["aliasScopes"][::-1]},
+            {"aliasScopes": [good["aliasScopes"][0]] * 2},
+            {"aliasScopes": [
+                {"email": "xmesh-u102--vless-cdn", "class": "cdn"}]},
+            {"aliasScopes": [
+                {"email": "xmesh-u101--vless-main", "class": "cdn"}]},
+            {"aliasScopes": [
+                {"email": "xmesh-u101--vless-fake", "class": "fake"}]},
+            {"aliasScopes": [
+                {"email": "xmesh-u101--vless-main", "class": "main", "admin": True}]},
+            {"aliasScopes": ["xmesh-u101--vless-main"]},
+        ]
+        for candidate in variants:
+            with self.subTest(aliases=candidate["aliasScopes"]):
+                with self.assertRaises(ValueError):
+                    successor_meter._signed_inbound_tags(candidate, 101)
+        for user in (0, True, "101", -1):
+            with self.subTest(user=user), self.assertRaises(ValueError):
+                successor_meter._signed_inbound_tags(good, user)
+
     def test_existing_generation_is_measured_not_trusted_by_docker_name(self):
         # An interrupted calendar launch can leave the deterministic Docker
         # name behind. Never mistake that name for a clean live successor.
@@ -213,8 +244,8 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             predecessor = dict(self.old, runtimeId=old_runtime[3],
                                activationReceiptSha256="5" * 64,
                                aliasScopes=[
-                                   {"email": "xmesh-u101--vless-main"},
-                                   {"email": "xmesh-u101--vless-cdn"},
+                                   {"email": "xmesh-u101--vless-cdn", "class": "cdn"},
+                                   {"email": "xmesh-u101--vless-main", "class": "main"},
                                ])
             pinned = "6" * 64
             binding = ledger.parent / "cap-binding.json"
