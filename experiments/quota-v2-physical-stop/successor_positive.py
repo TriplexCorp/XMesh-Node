@@ -7,6 +7,7 @@ path requires explicit opt-in, a fully closed old epoch, Nexus-signed
 zero-spend preparation and a SEPARATE source-pinned fresh Xray zero proof.
 """
 import hashlib
+from qualified_runtime_image import installed_worker
 import os
 import tempfile
 import time
@@ -256,7 +257,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
         if name in os.listdir(fd):
             saved = lease._identity_file(fd, name, 32768)
             _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned)
-            if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
+            if (installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"):
                 active = quarantine._enrolled_activation(panel, node)
                 if active["activationReceiptSha256"] != old["activationReceiptSha256"]:
                     raise ValueError("enrolled Node changed before recovering successor ingress")
@@ -284,7 +285,7 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
         # config hash must be independently pinned for this exact PID.
         if original_config_sha != config_pin:
             raise ValueError("successor Xray does not use signed original config")
-        original = wal_transport._measure_quarantined_runtime(None, *old_args)
+        original = wal_transport._measure_quarantined_runtime((executable_pin, config_pin), *old_args)
         candidate = wal_transport._measure_quarantined_runtime(
             (executable_pin, config_pin), container_name=candidate_container)
         if candidate != measured or original[3] != old["runtimeId"]:
@@ -351,8 +352,8 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             _verified_saved_receipt(saved, old, prepared, fresh, node, user, pinned)
             if saved["response"] != response:
                 raise ValueError("concurrent successor delivery differs from committed grant")
-            if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
-                original_now = wal_transport._measure_quarantined_runtime(None, *old_args)
+            if (installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"):
+                original_now = wal_transport._measure_quarantined_runtime((executable_pin, config_pin), *old_args)
                 if original_now[3] != old["runtimeId"]:
                     raise ValueError("predecessor changed before replaying ingress route")
                 verified_grant = wal_transport.observed.strict_json(
@@ -381,8 +382,8 @@ def install_successor(panel, node, user, state, socket_path, executable_pin, con
             "xrayReceipt": receipt, "response": response,
         }
         quarantine._durable_store(fd, record, _filename(user,old["reservationId"]))
-        if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
-            original_now = wal_transport._measure_quarantined_runtime(None, *old_args)
+        if (installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"):
+            original_now = wal_transport._measure_quarantined_runtime((executable_pin, config_pin), *old_args)
             if original_now[3] != old["runtimeId"]:
                 raise ValueError("predecessor changed before publishing ingress route")
             vless_ingress.publish(fd, wal_transport.observed.strict_json(grant)["payload"],

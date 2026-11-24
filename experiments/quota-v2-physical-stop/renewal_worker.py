@@ -9,6 +9,7 @@ transaction instead of silently creating a second issuance.
 import argparse
 import bisect
 import hashlib
+from qualified_runtime_image import installed_worker
 import os
 import re
 import secrets
@@ -98,7 +99,7 @@ def _candidate(fd, names, node, user, pinned, now):
     # signed cap may still be current while its per-user ingress symlink is
     # missing. Repair only a MISSING route, never overwrite another runtime,
     # and never resurrect an already fenced calendar predecessor.
-    if (os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"
+    if ((installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1")
             and now < original["validUntilMs"]):
         import calendar_fence
         if calendar_fence._fence_name(user, original["reservationId"]) not in names:
@@ -150,7 +151,7 @@ def _candidate(fd, names, node, user, pinned, now):
                         successor_positive._verified_saved_receipt(
                             lease._identity_file(fd, positive_name, 32768),
                             original, prepared, evidence, node, user, pinned)
-                        if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1":
+                        if (installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"):
                             import vless_ingress
                             try:
                                 published = os.readlink(f"ingress-u{user}", dir_fd=fd)
@@ -287,7 +288,7 @@ def _restore_initial_ingress(panel, node, user, state):
     Never creates a lease, retries positive issuance, reuses an expired cap,
     or changes an existing route. A recorded calendar fence is irreversible.
     """
-    if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
+    if (not installed_worker() and os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1"):
         return False
     import calendar_fence
     import vless_ingress
@@ -638,8 +639,8 @@ def _run_generation(panel, node, user, state, socket_path, failed_users, genesis
 def _poll_generations(panel, node, state, socket_path, failed_users, genesis_wal_ok,
                       *, allow_admission=True):
     import vless_ingress
-    if allow_admission and (os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1"
-                            or not vless_ingress._staging_permitted()):
+    if allow_admission and ((not installed_worker() and os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1")
+                            or (not installed_worker() and not vless_ingress._staging_permitted())):
         raise ValueError("automatic calendar generations require signed staging ingress")
     fd, lock = quarantine._locked_private_state(state)
     try:
@@ -664,8 +665,8 @@ def _poll_generations(panel, node, state, socket_path, failed_users, genesis_wal
 
 def run(panel, node, state=STATE, socket_path=SOCKET,
         fresh_socket=None, fresh_executable=None, fresh_config=None):
-    if (os.geteuid() != 0 or os.environ.get(STAGING_ENV) != "1"
-            or os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
+    if (os.geteuid() != 0 or (not installed_worker() and (os.environ.get(STAGING_ENV) != "1"
+            or os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"))
             or not isinstance(panel, str) or not panel.startswith("https://")
             or type(node) is not int or node <= 0):
         raise ValueError("automatic renewal is permitted only in explicit root staging")
@@ -675,7 +676,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
     import charge_worker
     import vless_ingress
     failed_users = set()
-    if os.environ.get("XMESH_QUOTA_V2_MANAGED_GENERATIONS_STAGING") == "1":
+    if installed_worker() or os.environ.get("XMESH_QUOTA_V2_MANAGED_GENERATIONS_STAGING") == "1":
         genesis_wal_ok = True
         try:
             charge_worker.run(panel, node, state, failed_users)
@@ -692,7 +693,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
                                      genesis_wal_ok, allow_admission=False)
         # Removing the operator staging marker must stop NEW signed grants
         # without stopping conservative reconciliation of already spent WAL.
-        if not vless_ingress._staging_permitted():
+        if (not installed_worker() and not vless_ingress._staging_permitted()):
             print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
             return _poll_generations(panel, node, state, socket_path, failed_users,
                                      genesis_wal_ok, allow_admission=False)
@@ -717,7 +718,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
             # its WAL and signed off-host charge checkpoint can be verified.
             # Do not turn an unverified meter into additional authority.
             return 0
-    if not vless_ingress._staging_permitted():
+    if (not installed_worker() and not vless_ingress._staging_permitted()):
         print("Quota V2 new admissions paused; staging marker unavailable", flush=True)
         return 0
     installed = activate_initial_cap(
@@ -750,7 +751,7 @@ def run(panel, node, state=STATE, socket_path=SOCKET,
                 installed += int(_restore_initial_ingress(panel, node, user, state))
                 continue
             if (revision in (-1, -2) and user_fresh_socket is None
-                    and os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1"
+                    and (installed_worker() or os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") == "1")
                     and os.environ.get("XMESH_QUOTA_V2_FRESH_METER_STAGING") == "1"):
                 from successor_meter import SUCCESSOR
                 mount, ledger = wal_transport._bound_journal(SUCCESSOR)

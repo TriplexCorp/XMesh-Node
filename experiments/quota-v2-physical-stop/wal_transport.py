@@ -266,11 +266,30 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
     journal_dest = journal.RUNTIME_DEST if journal.RUNTIME_DEST in mounts_by_dest else journal.JOURNAL_DEST
     required_mounts = {journal_dest, "/etc/xray/config.json"}
     image_volumes = {"/usr/local/etc/xray", "/var/log/xray"}
+    qualification = "/var/lib/xmesh-metered-xray"
+    qualified = qualification in mounts_by_dest
+    from qualified_runtime_image import installed_worker
+    if installed_worker() and not qualified:
+        raise ValueError("installed worker requires the read-only qualification mount")
+    if qualified:
+        import qualified_runtime_image as release
+        record = release.read_identity(release.QUALIFICATION)
+        mount = mounts_by_dest[qualification]
+        environment = inspect.get("Config", {}).get("Env")
+        if (pins is None or pins[0] != record["artifactSha256"]
+                or journal_dest != journal.RUNTIME_DEST
+                or set(mounts_by_dest) != required_mounts | {qualification}
+                or mount.get("Type") != "bind" or mount.get("RW") is not False
+                or mount.get("Source") != qualification
+                or not isinstance(environment, list)
+                or [v for v in environment if v.startswith("XMESH_QUOTA_V2_RUNTIME_ROLE=")]
+                   != ["XMESH_QUOTA_V2_RUNTIME_ROLE=meter"]):
+            raise ValueError("unverified installed metering runtime")
     mounts_safe = (
         isinstance(mounts, list) and 2 <= len(mounts) <= 4 and
         len(mounts_by_dest) == len(mounts) and
         required_mounts <= mounts_by_dest.keys() and
-        set(mounts_by_dest) <= required_mounts | image_volumes | {"/etc/xmesh-quota-v2-staging"} and
+        set(mounts_by_dest) <= required_mounts | image_volumes | {"/etc/xmesh-quota-v2-staging", qualification} and
         ("/etc/xmesh-quota-v2-staging" not in mounts_by_dest or
          mounts_by_dest["/etc/xmesh-quota-v2-staging"].get("Source") == "/etc/xmesh-quota-v2-staging" and
          mounts_by_dest["/etc/xmesh-quota-v2-staging"].get("Type") == "bind" and

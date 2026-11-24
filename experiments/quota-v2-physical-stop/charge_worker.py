@@ -9,6 +9,7 @@ import base64
 import bisect
 import hashlib
 import json
+from qualified_runtime_image import installed_worker
 import os
 from pathlib import Path
 import re
@@ -376,8 +377,8 @@ def _verify_private_successor_wal_owner(container_name, entries):
 def run(panel, node, state="/var/lib/xmesh-xray-sync", failed_users=None,
         container_name="xmesh-managed-xray"):
     if (os.geteuid() != 0 or
-            os.environ.get("XMESH_QUOTA_V2_AUTO_RENEW_STAGING") != "1" or
-            os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
+            (not installed_worker() and (os.environ.get("XMESH_QUOTA_V2_AUTO_RENEW_STAGING") != "1"
+            or os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"))
             or not isinstance(panel, str) or not panel.startswith("https://")
             or type(node) is not int or node <= 0):
         raise ValueError("WAL charging requires an explicit staged root Agent")

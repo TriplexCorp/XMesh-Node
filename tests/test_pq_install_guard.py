@@ -207,7 +207,7 @@ exit 77
         self.assertLess(source.index('systemctl enable xmesh-pq-activation-recovery.service'),
                         source.index('systemctl start xmesh-node-metrics.service'))
         # All dependencies are opt-in to reviewed 6.0.29, not 6.0.24.
-        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.30 ]]; then', source)
+        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.31 ]]; then', source)
         self.assertIn('WAL staging requires a fresh test node', source)
 
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
@@ -234,11 +234,11 @@ exit 77
         installer = (root / "deploy/install-v6-strict-operational-agents.sh").read_text()
         package = bootstrap.index("deploy/install-metered-xray.sh")
         gate = bootstrap.index("STRICT-PQ GATE PASSED")
-        refusal = bootstrap.index("approved quota services are unavailable")
+        metered = bootstrap.index('exec bash "$INSTALL_DIR/deploy/install-metered-services.sh"')
         router = bootstrap.index("docker compose up -d --no-build")
         self.assertLess(package, gate)
-        self.assertLess(gate, refusal)
-        self.assertLess(refusal, router)
+        self.assertLess(gate, metered)
+        self.assertLess(metered, router)
         self.assertIn("xmesh_refuse_metered_legacy_install", bootstrap[package:gate])
         self.assertLess(installer.index('source "$ROOT/deploy/xmesh-pq-install-guard.sh"'),
                         installer.index("xmesh_refuse_metered_legacy_install"))

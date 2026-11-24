@@ -10,6 +10,7 @@ refund, reset, or move an old byte. It is not remote hardware attestation.
 """
 import hashlib
 import subprocess
+from qualified_runtime_image import installed_worker
 import os
 from pathlib import Path
 import re
@@ -49,10 +50,16 @@ def _verify_fresh_container_env(docker):
     # root-owned staging marker in BOTH CI and non-CI modes. Production
     # may never turn on a fresh spending runtime using environment alone.
     import vless_ingress
-    if not vless_ingress._staging_permitted():
+    installed = installed_worker()
+    if not installed and not vless_ingress._staging_permitted():
         raise ValueError("fresh successor requires the root-only staging marker")
     host_ci = os.environ.get("GITHUB_ACTIONS") == "true"
-    if not host_ci:
+    if installed:
+        if not runtime_layout or any(v.split("=", 1)[0] in {
+                "GITHUB_ACTIONS", "XMESH_QUOTA_INGRESS_STAGING", "XMESH_QUOTA_V2_STAGING_RUNTIME",
+                "XMESH_EXPERIMENTAL_CRASH_AFTER_DRAIN"} for v in env):
+            raise ValueError("installed meter cannot inherit staging or fault injection")
+    elif not host_ci:
         mounts = docker.get("Mounts")
         marker = vless_ingress.STAGING_MARKER
         if ("XMESH_QUOTA_V2_STAGING_RUNTIME=1" not in env
@@ -71,8 +78,12 @@ def _verify_fresh_container_env(docker):
         "XMESH_EXPERIMENTAL_OBSERVED_DIR": (journal_integrity.RUNTIME_DEST + "/ledger"
                                            if runtime_layout else journal_integrity.JOURNAL_DEST),
     }
-    required["GITHUB_ACTIONS" if host_ci else "XMESH_QUOTA_V2_STAGING_RUNTIME"] = (
-        "true" if host_ci else "1")
+    if installed:
+        required["XMESH_QUOTA_V2_RUNTIME_ROLE"] = "meter"
+        required["XMESH_QUOTA_PRIVATE_VLESS"] = "1"
+    else:
+        required["GITHUB_ACTIONS" if host_ci else "XMESH_QUOTA_V2_STAGING_RUNTIME"] = (
+            "true" if host_ci else "1")
     if runtime_layout:
         required.update({
             "XMESH_EXPERIMENTAL_DRAIN_SOCKET": journal_integrity.RUNTIME_DEST + "/drain.sock",
@@ -168,6 +179,16 @@ def _checked_marker(record, old, digest, measured, prep):
     return record
 
 
+def _predecessor_measurement_pins(fd, old, node, pinned, executable_pin, config_pin):
+    """Installed successor observation must measure the signed predecessor too."""
+    if not installed_worker():
+        return None
+    original_config = calendar_fence._original_signed_scope(fd, old, node, pinned)
+    if original_config != config_pin:
+        raise ValueError("successor configuration differs from signed predecessor")
+    return executable_pin, original_config
+
+
 def observe_successor_meter(node, user, state, socket_path, executable_pin, config_pin,
                             *, predecessor=None, old_container=None, candidate_container=SUCCESSOR):
     """Capture the original signed scope and verify a separately pristine PID."""
@@ -212,7 +233,12 @@ def observe_successor_meter(node, user, state, socket_path, executable_pin, conf
         _verify_fresh_container_env(fresh)
         measured = wal_transport._measure_quarantined_runtime(
             (executable_pin, config_pin), container_name=candidate_container)
-        original = wal_transport._measure_quarantined_runtime(None, *old_args)
+        # The installed runtime requires independently pinned executable and
+        # config on BOTH sides of the generation transition. Derive the old
+        # config from the original signed policy, not Docker or the candidate.
+        old_pins = _predecessor_measurement_pins(
+            fd, old, node, pinned, executable_pin, config_pin)
+        original = wal_transport._measure_quarantined_runtime(old_pins, *old_args)
         if (measured[0] == original[0] or measured[2] == original[2]
                 or measured[3] == original[3] or measured[3] == old["runtimeId"]
                 or measured[0] != fresh.get("Id")
@@ -429,7 +455,8 @@ def start_generation(state, node, user, old, old_container, executable, config):
     """Provision only the deterministic empty candidate of a fenced reservation."""
     import vless_ingress
 
-    if not vless_ingress._staging_permitted():
+    installed = installed_worker()
+    if not installed and not vless_ingress._staging_permitted():
         raise ValueError("automatic generation launch requires isolated staging")
     name = container_for(user, old["reservationId"])
     fd, lock = quarantine._locked_private_state(state)
@@ -514,7 +541,11 @@ def start_generation(state, node, user, old, old_container, executable, config):
                 "-e", f"XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING={dest}/cap-binding.json",
                 "-e", f"XMESH_EXPERIMENTAL_OBSERVED_DIR={dest}/ledger",
                 "-e", f"XMESH_EXPERIMENTAL_SCOPED_INBOUNDS={','.join(allowed)}"]
-        if os.environ.get("GITHUB_ACTIONS") == "true":
+        if installed:
+            from qualified_runtime_image import QUALIFICATION
+            args.extend(["-e", "XMESH_QUOTA_V2_RUNTIME_ROLE=meter",
+                         "-v", f"{QUALIFICATION}:{QUALIFICATION}:ro"])
+        elif os.environ.get("GITHUB_ACTIONS") == "true":
             args.extend(["-e", "GITHUB_ACTIONS=true"])
         else:
             marker = vless_ingress.STAGING_MARKER

@@ -56,6 +56,16 @@ def read_identity(root):
         os.close(fd)
 
 
+def installed_worker():
+    """Only the installed systemd worker opts into release-bound admission."""
+    if os.environ.get("XMESH_QUOTA_V2_AGENT_MODE") != "installed":
+        return False
+    if os.geteuid() != 0:
+        raise ValueError("installed metering worker requires root")
+    read_identity(QUALIFICATION)
+    return True
+
+
 def stage_binary(source, destination, digest):
     fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     with os.fdopen(fd, "rb") as stream:

@@ -4,11 +4,16 @@ on:
     paths:
       - '.github/workflows/quota-v2-metered-bootstrap.yml'
       - 'deploy/install-metered-xray.sh'
+      - 'deploy/install-metered-services.sh'
       - 'bootstrap.sh'
       - 'deploy/xmesh-pq-install-guard.sh'
       - 'deploy/install-v6-strict-operational-agents.sh'
       - 'experiments/xray-dataplane-fence/**'
       - 'experiments/quota-v2-physical-stop/qualified_runtime_image.py'
+      - 'experiments/quota-v2-physical-stop/qualified_first_meter.py'
+      - 'experiments/quota-v2-physical-stop/wal_transport.py'
+      - 'experiments/quota-v2-physical-stop/successor_meter.py'
+      - 'tests/test_quota_v2_successor_meter.py'
       - 'tests/test_quota_v2_qualified_runtime_image.py'
 permissions:
   contents: read
@@ -74,6 +79,39 @@ jobs:
           report="$(sudo python3 "$GITHUB_WORKSPACE"/experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
           IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11"; assert r["productionActivationAuthorized"] is False'
           test -z "$(sudo docker ps -q --filter ancestor="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["imageId"])' "$report")")"
+          sudo python3 - "$GITHUB_WORKSPACE" "$report" <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, str(Path(sys.argv[1]) / "experiments/quota-v2-physical-stop"))
+          import qualified_first_meter as meter
+          image = json.loads(sys.argv[2])
+          profile = {"stats": {}, "api": {"tag": "xmesh_stats_api", "listen": "127.0.0.1:10085", "services": ["StatsService"]},
+                     "policy": {"levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}}},
+                     "inbounds": [{"tag": "vless-main", "listen": "127.0.0.1",
+                                   "protocol": "vless", "port": 28401,
+                                   "settings": {"decryption": "none", "clients": [{"id": "00000000-0000-4000-8000-000000000001", "email": "xmesh-u1--vless-main"}]}}],
+                     "outbounds": [{"protocol": "blackhole"}]}
+          meter.launch_meter(image["imageId"], profile, 1, "a" * 64, "b" * 64)
+          config = hashlib.sha256(meter.wal.observed.canonical(profile)).hexdigest()
+          os.environ["XMESH_QUOTA_V2_AGENT_MODE"] = "installed"
+          try:
+              pins = (image["artifactSha256"], config)
+              live = meter.wal._measure_quarantined_runtime(pins)
+              assert len(live[3]) == 64
+              for bad in (None, ("0" * 64, config), (pins[0], "0" * 64)):
+                  try:
+                      meter.wal._measure_quarantined_runtime(bad)
+                  except (ValueError, OSError):
+                      pass
+                  else:
+                      raise AssertionError("installed meter accepted absent or wrong runtime pins")
+              assert meter.wal._measure_quarantined_runtime(pins) == live
+          finally:
+              meter.release.docker("rm", "--force", "xmesh-managed-xray")
+          PYTHON
           inode="$(stat -c '%i' "$target")"
           sudo bash deploy/install-metered-xray.sh "$nexus"
           [[ "$(stat -c '%i' "$target")" == "$inode" ]]
@@ -84,3 +122,9 @@ jobs:
             exit 1
           fi
           [[ "$(sha256sum "$target")" == "$before" ]]
+
+      - name: Diagnose isolated meter startup on the disposable runner
+        if: failure()
+        run: |
+          sudo docker inspect --format 'state={{json .State}} net={{json .HostConfig.NetworkMode}} restart={{json .HostConfig.RestartPolicy}} bindings={{json .HostConfig.PortBindings}} ports={{json .NetworkSettings.Ports}} networks={{json .NetworkSettings.Networks}}' xmesh-managed-xray
+          sudo docker logs --tail 80 xmesh-managed-xray
