@@ -172,7 +172,7 @@ def frontend(profile):
     return {"inbounds": inbounds, "routing": {"rules": rules}, "outbounds": outbounds}
 
 
-def serve(panel, node, state, binary):
+def serve(panel, node, state, binary, *, installed=False):
     """Run a persistent loopback frontend from authenticated staging evidence."""
     import fcntl
     import hashlib
@@ -180,9 +180,14 @@ def serve(panel, node, state, binary):
     import genesis_reservation as lease
     import quarantine_policy as quarantine
 
-    if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
+    if installed:
+        import qualified_runtime_image as release
+        if binary != str(release.EXECUTABLE) or state != "/var/lib/xmesh-xray-sync":
+            raise ValueError("installed ingress requires the original executable and private state")
+        record = release.read_identity(release.QUALIFICATION)
+    elif os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
         raise ValueError("private ingress is not enabled for this fixture")
-    if not _staging_permitted():
+    elif not _staging_permitted():
         raise ValueError("unverified production ingress: missing root-only staging marker")
     fd, lock = quarantine._locked_private_state(state, read_only=True)
     try:
@@ -198,7 +203,11 @@ def serve(panel, node, state, binary):
                 or policy["quotaV2Genesis"]["firstActivationReceiptSha256"] != enrollment["activationReceiptSha256"]):
             raise ValueError("ingress roster differs from enrolled signed policy")
         intent = lease._identity_file(fd, quarantine.INTENT_FILE, 4096)
-        exe = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW)
+        if installed and (intent["executableSha256"] != record["artifactSha256"]
+                          or intent["activationReceiptSha256"] != enrollment["activationReceiptSha256"]
+                          or intent["configSha256"] != config_sha):
+            raise ValueError("installed ingress differs from qualified Genesis identity")
+        exe = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         info = os.fstat(exe)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022
                 or not 0 < info.st_size <= 256 << 20 or intent["nodeId"] != node):
@@ -223,7 +232,9 @@ def serve(panel, node, state, binary):
         os.close(lock)
         os.close(fd)
     runtime_env = {"XMESH_QUOTA_INGRESS_STATE": state}
-    if os.environ.get("GITHUB_ACTIONS") == "true":
+    if installed:
+        runtime_env["XMESH_QUOTA_V2_RUNTIME_ROLE"] = "ingress"
+    elif os.environ.get("GITHUB_ACTIONS") == "true":
         runtime_env["GITHUB_ACTIONS"] = "true"
     else:
         runtime_env["XMESH_QUOTA_INGRESS_STAGING"] = "1"
@@ -238,4 +249,9 @@ if __name__ == "__main__":
     parser.add_argument("--node", type=int, required=True)
     parser.add_argument("--state", default="/var/lib/xmesh-xray-sync")
     parser.add_argument("--binary", default="/var/lib/xmesh-measured-lab/xray-client")
-    serve(**vars(parser.parse_args()))
+    parser.add_argument("--installed", action="store_true")
+    args = parser.parse_args()
+    if args.installed:
+        import qualified_runtime_image as release
+        args.binary = str(release.EXECUTABLE)
+    serve(**vars(args))

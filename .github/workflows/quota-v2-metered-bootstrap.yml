@@ -84,9 +84,11 @@ jobs:
           sys.path.insert(0, str(Path(sys.argv[1]) / "experiments/quota-v2-physical-stop"))
           import qualified_first_meter as meter
           image = json.loads(sys.argv[2])
-          profile = {"inbounds": [{"tag": "vless-main", "listen": "127.0.0.1",
+          profile = {"stats": {}, "api": {"tag": "xmesh_stats_api", "listen": "127.0.0.1:10085", "services": ["StatsService"]},
+                     "policy": {"levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}}},
+                     "inbounds": [{"tag": "vless-main", "listen": "127.0.0.1",
                                    "protocol": "vless", "port": 28401,
-                                   "settings": {"decryption": "none", "clients": []}}],
+                                   "settings": {"decryption": "none", "clients": [{"id": "00000000-0000-4000-8000-000000000001", "email": "xmesh-u1--vless-main"}]}}],
                      "outbounds": [{"protocol": "blackhole"}]}
           meter.launch_meter(image["imageId"], profile, 1, "a" * 64, "b" * 64)
           config = hashlib.sha256(meter.wal.observed.canonical(profile)).hexdigest()
@@ -109,4 +111,4 @@ jobs:
         if: failure()
         run: |
           sudo docker inspect --format 'state={{json .State}} net={{json .HostConfig.NetworkMode}} restart={{json .HostConfig.RestartPolicy}} bindings={{json .HostConfig.PortBindings}} ports={{json .NetworkSettings.Ports}} networks={{json .NetworkSettings.Networks}}' xmesh-managed-xray
-          sudo docker logs --tail 20 xmesh-managed-xray
+          sudo docker logs --tail 80 xmesh-managed-xray
