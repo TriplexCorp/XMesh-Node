@@ -230,6 +230,33 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
             with self.subTest(user=user), self.assertRaises(ValueError):
                 successor_meter._signed_inbound_tags(good, user)
 
+    def test_vanished_generation_does_not_reuse_stale_runtime_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)
+            successor_meter._verify_unlaunched_runtime_root(path)
+            (path / "ledger").mkdir()
+            (path / "cap-binding.json").write_bytes(b"private exact binding")
+            successor_meter._verify_unlaunched_runtime_root(path)
+            for name in ("drain.sock", "positive-cap-u101.json",
+                         "xray-executable", ".partial-release"):
+                artifact = path / name
+                artifact.write_bytes(b"historical evidence")
+                try:
+                    with self.subTest(filename=name), self.assertRaisesRegex(
+                            ValueError, "prior generation runtime"):
+                        successor_meter._verify_unlaunched_runtime_root(path)
+                    self.assertEqual(artifact.read_bytes(), b"historical evidence")
+                finally:
+                    artifact.unlink()
+            (path / "cap-binding.json").unlink()
+            (path / "ledger").rmdir()
+            (path / "ledger").symlink_to("/tmp")
+            # Stale WAL symlinks are rejected by the separate pinned-directory
+            # opener before any candidate image may start.
+            with self.assertRaises((ValueError, OSError)):
+                successor_meter.wal_transport.journal._validate_directory(
+                    path / "ledger")
+
     def test_pinned_config_mount_rejects_unbounded_docker_shape(self):
         mount = {"Destination": "/etc/xray/config.json",
                  "Type": "bind", "RW": False,
