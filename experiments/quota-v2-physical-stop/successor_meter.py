@@ -282,6 +282,28 @@ def control_socket(container):
     return os.path.join(os.path.dirname(ledger), "drain.sock")
 
 
+def _pinned_config_source(docker):
+    """Extract exactly one read-only Xray config bind, never StopIteration.
+
+    The caller independently measures the pinned config bytes and real PID;
+    this validates Docker's mount shape before launching another candidate.
+    """
+    mounts = docker.get("Mounts") if isinstance(docker, dict) else None
+    if not isinstance(mounts, list):
+        raise ValueError("Xray has no verifiable configuration mount list")
+    matched = [mount for mount in mounts if isinstance(mount, dict)
+               and mount.get("Destination") == "/etc/xray/config.json"]
+    if len(matched) != 1:
+        raise ValueError("Xray requires one pinned configuration mount")
+    mount = matched[0]
+    source = mount.get("Source")
+    if (mount.get("Type") != "bind" or mount.get("RW") is not False
+            or not isinstance(source, str) or not os.path.isabs(source)
+            or source in ("/", "/dev/null")):
+        raise ValueError("Xray configuration mount differs from read-only pinned source")
+    return source
+
+
 def _signed_inbound_tags(old, user):
     """Validate the exact signed user/class roster before ANY Docker launch.
 
@@ -349,16 +371,11 @@ def verify_reusable_generation(name, state, old, old_container, executable, conf
     old_mounts = old_inspect.get("Mounts")
     if not isinstance(mounts, list) or not isinstance(old_mounts, list):
         raise ValueError("existing generation has no trusted Docker mounts")
-    def source_for(records, destination):
-        selected = [m for m in records if isinstance(m, dict)
-                    and m.get("Destination") == destination
-                    and m.get("Type") == "bind"]
-        if len(selected) != 1:
-            raise ValueError("existing generation has a foreign configuration mount")
-        return selected[0].get("Source")
-    if (source_for(mounts, wal_transport.journal.RUNTIME_DEST) != root
-            or source_for(mounts, "/etc/xray/config.json")
-            != source_for(old_mounts, "/etc/xray/config.json")):
+    runtime_mounts = [m for m in mounts if isinstance(m, dict)
+                      and m.get("Destination") == wal_transport.journal.RUNTIME_DEST
+                      and m.get("Type") == "bind" and m.get("RW") is True]
+    if (len(runtime_mounts) != 1 or runtime_mounts[0].get("Source") != root
+            or _pinned_config_source(current) != _pinned_config_source(old_inspect)):
         raise ValueError("existing generation differs from signed predecessor mounts")
     # The deterministic Docker name is not the binding. Read the exact
     # root-private persisted Node/activation/Ed25519 policy identity that the
@@ -439,8 +456,7 @@ def start_generation(state, node, user, old, old_container, executable, config):
         image = container.get("Image")
         if not isinstance(image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
             raise ValueError("generation requires an immutable Xray image")
-        config_source = next(m["Source"] for m in container["Mounts"]
-                             if m["Destination"] == "/etc/xray/config.json")
+        config_source = _pinned_config_source(container)
         root = Path(state) / name
         root.mkdir(mode=0o700, exist_ok=True)
         os.close(wal_transport.journal._validate_directory(root))
