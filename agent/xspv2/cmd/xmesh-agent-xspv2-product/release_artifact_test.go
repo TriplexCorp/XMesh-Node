@@ -196,3 +196,101 @@ func TestReleaseVerifiedCandidateRetryDoesNotOverwriteOrRefetch(t *testing.T) {
 		t.Fatal("corrupted candidate accepted as idempotent retry")
 	}
 }
+
+func TestPublishReleaseCandidateDoesNotReplaceExistingInode(t *testing.T) {
+	dir := t.TempDir()
+	temp := filepath.Join(dir, ".partial-source")
+	final := filepath.Join(dir, "candidate.bin")
+	if err := os.WriteFile(temp, []byte("verified bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(final, []byte("another verified candidate"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishReleaseCandidate(temp, final); err == nil {
+		t.Fatal("atomically replaced an existing verified candidate")
+	}
+	after, err := os.Lstat(final)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("existing inode was changed: %v", err)
+	}
+	unchanged, err := os.ReadFile(final)
+	if err != nil || string(unchanged) != "another verified candidate" {
+		t.Fatalf("existing candidate bytes were changed: %v", err)
+	}
+	if _, err := os.Lstat(temp); err != nil {
+		t.Fatalf("refused publication removed the original verified temporary: %v", err)
+	}
+}
+
+func TestReleaseCrashRecoveryAfterAtomicPublish(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root-owned staging directory")
+	}
+	dir := filepath.Join(t.TempDir(), "stage")
+	if err := privateReleaseDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("durably verified Agent release")
+	digest := sha256.Sum256(data)
+	candidate := filepath.Join(dir, "42-"+hex.EncodeToString(digest[:])+".bin")
+	tmp, err := os.CreateTemp(dir, ".partial-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(tmp.Name(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate SIGKILL between the atomic hard-link publication and
+	// temporary unlink: the candidate and partial refer to one inode.
+	locked, err := lockReleaseDirectory(dir)
+	if err != nil {
+		t.Fatalf("could not recover interrupted release publication: %v", err)
+	}
+	if err := locked.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(tmp.Name()); !os.IsNotExist(err) {
+		t.Fatalf("abandoned hard link still exists: %v", err)
+	}
+	if err := verifyCandidateBytes(candidate, hex.EncodeToString(digest[:]), 0600); err != nil {
+		t.Fatalf("recovered release candidate is no longer verified: %v", err)
+	}
+
+	// A foreign hard link is NOT a verified candidate and cannot be
+	// removed automatically. Keep the existing candidate untouched.
+	foreign, err := os.CreateTemp(dir, ".partial-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := foreign.Close(); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "foreign-link")
+	if err := os.Link(foreign.Name(), outside); err != nil {
+		t.Fatal(err)
+	}
+	if unexpected, err := lockReleaseDirectory(dir); err == nil {
+		unexpected.Close()
+		t.Fatal("accepted a partial with an unknown outside hard link")
+	}
+	if _, err := os.Lstat(foreign.Name()); err != nil {
+		t.Fatalf("foreign evidence was silently deleted: %v", err)
+	}
+	if err := verifyCandidateBytes(candidate, hex.EncodeToString(digest[:]), 0600); err != nil {
+		t.Fatalf("foreign evidence affected the verified candidate: %v", err)
+	}
+}
