@@ -51,7 +51,7 @@ func verifyReleaseOutcome(raw []byte, cfg productConfig, activation string, runn
 	if d.Decode(&receipt) != nil || d.Decode(new(any)) != io.EOF ||
 		receipt.Schema != "xmesh-product-agent-release-"+operation+"-v1" || receipt.NodeID != cfg.NodeID ||
 		receipt.CommandID <= 0 || receipt.ActivationSHA256 != activation || receipt.Installed != running ||
-		cfg.ReleaseIdentity.Version != "control-v6.0.24" || running.Version != "control-v6.0.27" ||
+		!validForwardProductRelease(cfg.ReleaseIdentity, running) ||
 		parsed.Env.Revision != running.SourceRevision {
 		return releaseCommitReceipt{}, errors.New("release commit does not identify this activation and executable")
 	}

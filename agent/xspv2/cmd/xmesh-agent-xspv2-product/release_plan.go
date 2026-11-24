@@ -56,7 +56,7 @@ func decodeReleasePlan(raw []byte, cfg productConfig, command int64, activation 
 		plan.Schema != "xmesh-product-agent-release-plan-v1" || plan.NodeID != cfg.NodeID ||
 		plan.CommandID != command || plan.KeyEpoch != parsed.Env.KeyEpoch ||
 		plan.ActivationSHA256 != activation || plan.Current != cfg.ReleaseIdentity ||
-		plan.Current.Version != "control-v6.0.24" || plan.Target.Version != "control-v6.0.27" ||
+		!validForwardProductRelease(plan.Current, plan.Target) ||
 		digestErr != nil || len(digest) != sha256.Size ||
 		revisionErr != nil || len(revision) != 20 ||
 		parsed.Env.Revision != plan.Target.SourceRevision ||
