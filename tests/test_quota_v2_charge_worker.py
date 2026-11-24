@@ -25,6 +25,36 @@ def signed(doc):
 
 
 class ChargeWorkerTests(unittest.TestCase):
+    def test_isolated_successor_wal_cannot_charge_a_foreign_user(self):
+        candidate = "xmesh-quota-u42-" + "a" * 32
+        good = {
+            "meter-" + "b" * 64 + ".jsonl": {
+                "email": "xmesh-u42--vless-main", "runtimeId": "c" * 64,
+            },
+            "meter-" + "d" * 64 + ".jsonl": {
+                "email": "xmesh-u42--vless-cdn", "runtimeId": "c" * 64,
+            },
+        }
+        self.assertIsNone(worker._verify_private_successor_wal_owner(candidate, good))
+        for birth in (
+            {"email": "xmesh-u43--vless-main", "runtimeId": "c" * 64},
+            {"email": "xmesh-u0--vless-main", "runtimeId": "c" * 64},
+            {"email": "not-a-signed-email", "runtimeId": "c" * 64},
+            {"runtimeId": "c" * 64},
+            None,
+        ):
+            mixed = dict(good, **{"meter-" + "e" * 64 + ".jsonl": birth})
+            with self.subTest(birth=birth), self.assertRaisesRegex(
+                    ValueError, "foreign|malformed|another user's byte intents"):
+                worker._verify_private_successor_wal_owner(candidate, mixed)
+        # The original shared Genesis Xray is intentionally multiuser.
+        self.assertIsNone(worker._verify_private_successor_wal_owner(
+            "xmesh-managed-xray", {
+                "meter-" + "e" * 64 + ".jsonl": {
+                    "email": "xmesh-u43--vless-main", "runtimeId": "c" * 64,
+                },
+            }))
+
     def test_historical_wal_selects_its_runtime_and_rejects_corrupt_evidence(self):
         old, current = "a" * 64, "b" * 64
         email = "xmesh-u42--vless-main"
