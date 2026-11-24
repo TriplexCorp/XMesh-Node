@@ -35,7 +35,7 @@ class ChargeWorkerTests(unittest.TestCase):
             state.mkdir(mode=0o700)
             initial = {
                 "Id": "a" * 64,
-                "State": {"Pid": os.getpid(),
+                "State": {"Pid": os.getpid(), "Running": True,
                           "StartedAt": "2026-11-24T07:00:00Z"},
             }
             changed = dict(initial, Id="b" * 64)
@@ -81,11 +81,21 @@ class ChargeWorkerTests(unittest.TestCase):
 
     def test_wal_charge_refuses_replaced_docker_kernel_or_private_journal(self):
         before = {"Id": "a" * 64,
-                  "State": {"Pid": 23456,
+                  "State": {"Pid": 23456, "Running": True,
                             "StartedAt": "2026-11-24T07:00:00Z"}}
         wal = "/var/lib/xmesh-private-wal"
         name = "xmesh-quota-u42-" + "b" * 32
         runtime = "c" * 64
+        stopped_before = dict(before, State=dict(before["State"], Running=False))
+        with (
+            mock.patch.object(wal_transport, "_bound_journal",
+                              return_value=(stopped_before, wal)),
+            mock.patch.object(wal_transport.runtime_identity,
+                              "trusted_runtime_identity") as measure,
+        ):
+            with self.assertRaisesRegex(ValueError, "changed during authenticated WAL charging"):
+                worker._verify_charging_runtime_unchanged(name, stopped_before, wal, runtime)
+            measure.assert_not_called()
         with (
             mock.patch.object(wal_transport, "_bound_journal",
                               return_value=(before, wal)) as inspect,
@@ -99,6 +109,8 @@ class ChargeWorkerTests(unittest.TestCase):
         for current, mount in (
             (dict(before, Id="d" * 64), wal),
             (dict(before, State=dict(before["State"], Pid=23457)), wal),
+            (dict(before, State=dict(before["State"], Running=False)), wal),
+            (dict(before, State=dict(before["State"], Running="true")), wal),
             (dict(before, State=dict(before["State"],
                                     StartedAt="2026-11-24T07:00:01Z")), wal),
             (before, "/var/lib/different-wal"),
@@ -317,7 +329,7 @@ class ChargeWorkerTests(unittest.TestCase):
                 mock.patch.object(wal_transport, "run"),
                 mock.patch.object(wal_transport, "_bound_journal",
                                   return_value=({"Id": "a" * 64,
-                                      "State": {"Pid": os.getpid(),
+                                      "State": {"Pid": os.getpid(), "Running": True,
                                                 "StartedAt": "2026-11-24T07:00:00Z"}}, str(root))),
                 mock.patch.object(worker.journal, "_verify_mount"),
                 mock.patch.object(worker.registry, "verify_meter_inventory",
