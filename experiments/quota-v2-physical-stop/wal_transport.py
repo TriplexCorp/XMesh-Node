@@ -268,6 +268,9 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
     image_volumes = {"/usr/local/etc/xray", "/var/log/xray"}
     qualification = "/var/lib/xmesh-metered-xray"
     qualified = qualification in mounts_by_dest
+    from qualified_runtime_image import installed_worker
+    if installed_worker() and not qualified:
+        raise ValueError("installed worker requires the read-only qualification mount")
     if qualified:
         import qualified_runtime_image as release
         record = release.read_identity(release.QUALIFICATION)

@@ -1,4 +1,5 @@
 """Private per-user routes for the isolated installed-Agent ingress."""
+from qualified_runtime_image import installed_worker
 import os
 import re
 import secrets
@@ -46,7 +47,7 @@ def target(pid, runtime):
 
 def publish(fd, payload, measured, predecessor=None, *, restore_missing=False):
     """Called under the Agent state lock after signed install and WAL evidence."""
-    if os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
+    if not installed_worker() and os.environ.get("XMESH_QUOTA_V2_INGRESS_STAGING") != "1":
         return
     # A route is NOT a new authorization. Only the already verified,
     # currently spendable Nexus cap may be published. A stale or foreign

@@ -4,6 +4,7 @@ on:
     paths:
       - '.github/workflows/quota-v2-metered-bootstrap.yml'
       - 'deploy/install-metered-xray.sh'
+      - 'deploy/install-metered-services.sh'
       - 'bootstrap.sh'
       - 'deploy/xmesh-pq-install-guard.sh'
       - 'deploy/install-v6-strict-operational-agents.sh'

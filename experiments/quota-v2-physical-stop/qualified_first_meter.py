@@ -78,9 +78,34 @@ def launch_meter(image_id, config, node, activation, key):
 
 def start(panel, node):
     os.umask(0o077)
-    image = release.build_image()
+    record = release.read_identity(release.QUALIFICATION)
     Path(STATE).mkdir(mode=0o700, exist_ok=True)
     os.close(wal.journal._validate_directory(STATE))
+    identity = quarantine._enrolled_activation(panel, node)
+    # A service restart may find the original live process and durable receipt.
+    # Never substitute a new process or a clean WAL for a committed runtime.
+    fd, lock = quarantine._locked_private_state(STATE)
+    try:
+        try:
+            original = quarantine._read_private(fd, "genesis-quarantine-envelope.json")
+        except FileNotFoundError:
+            original = None
+        if original is not None:
+            policy = original["reply"]["policy"]
+            key = wal._panel_pin()
+            quarantine._guard().check_signature(policy, original["reply"]["policySignature"], key)
+            signed = policy["quotaV2Genesis"]
+            if (policy["nodeId"] != node or signed["firstActivationReceiptSha256"] != identity["activationReceiptSha256"]
+                    or policy["kind"] != "xmesh.quota-v2.genesis-quarantine-policy"):
+                raise ValueError("stored Genesis belongs to another activation")
+            measured = wal._measure_quarantined_runtime((record["artifactSha256"], policy["configSha256"]))
+            if measured[3] != signed["runtimeId"]:
+                raise ValueError("refusing to resume a different metering process")
+            return
+    finally:
+        os.close(lock)
+        os.close(fd)
+    image = release.build_image()
     quarantine.preview_config(panel, node, STATE)
     fd, lock = quarantine._locked_private_state(STATE)
     try:
@@ -89,7 +114,13 @@ def start(panel, node):
         preview = quarantine.validate_preview(
             wal.observed.canonical(quarantine._read_private(fd, quarantine.PREVIEW_FILE)),
             node, identity["activationReceiptSha256"], key)["payload"]
-        launch_meter(image["imageId"], preview["config"], node, identity["activationReceiptSha256"], key)
+        names = release.docker("ps", "-a", "--filter", "name=^/xmesh-managed-xray$", "--format", "{{.Names}}").splitlines()
+        if names:
+            if names != [b"xmesh-managed-xray"]:
+                raise ValueError("ambiguous first meter identity")
+            wal._measure_quarantined_runtime((record["artifactSha256"], preview["configSha256"]))
+        else:
+            launch_meter(image["imageId"], preview["config"], node, identity["activationReceiptSha256"], key)
     finally:
         os.close(lock)
         os.close(fd)

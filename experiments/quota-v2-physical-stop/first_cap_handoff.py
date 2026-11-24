@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from qualified_runtime_image import installed_worker
 import os
 import re
 import stat
@@ -303,7 +304,7 @@ def fetch_and_install_rehearsal(panel, node_id, user_id, state, socket_path,
     The runtime measurement is local evidence. Nexus does not treat the
     remote host PID or its report as trusted kernel attestation.
     """
-    if (os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
+    if ((not installed_worker() and os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1")
             or os.geteuid() != 0 or not _int(node_id,1) or not _int(user_id,1)
             or not isinstance(panel,str) or not panel.startswith("https://")
             or not isinstance(executable_pin,str) or HEX64.fullmatch(executable_pin) is None
@@ -445,7 +446,7 @@ def _persist_renewal_request(state_fd, node_id, user_id, previous_revision,
 
 def fetch_and_install_renewal(panel, node_id, user_id, state, socket_path,
                               executable_pin, request_challenge, previous_revision):
-    if (os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1"
+    if ((not installed_worker() and os.environ.get("XMESH_QUOTA_V2_INSTALLED_CAP_DELIVERY") != "1")
             or os.geteuid() != 0 or not _int(node_id, 1) or not _int(user_id, 1)
             or not isinstance(panel, str) or not panel.startswith("https://")
             or HEX64.fullmatch(executable_pin) is None

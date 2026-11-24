@@ -222,9 +222,7 @@ assert state.get('automaticClassicalFallback') is False
 PY
 echo "STRICT-PQ GATE PASSED: productionActivation=true strictPQEnabled=true fallback=false"
 if [[ "$METERED_INSTALL" == 1 ]]; then
-  python3 "$INSTALL_DIR/experiments/quota-v2-physical-stop/qualified_first_meter.py" --panel "$PANEL" --node "$NODE"
-  echo "Metered Xray verified, but approved quota services are unavailable. Node startup is blocked." >&2
-  exit 1
+  exec bash "$INSTALL_DIR/deploy/install-metered-services.sh" "$PANEL" "$NODE"
 fi
 
 # Persist only non-secret product coordinates for root-owned service units.
