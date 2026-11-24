@@ -14,7 +14,8 @@ spec.loader.exec_module(updater)
 
 class XrayUpdateGateTest(unittest.TestCase):
     def test_quota_state_blocks_update_before_recovering_interrupted_switch(self):
-        for name in ("genesis-quarantine-envelope.json",
+        for name in ("quota-revocation-deny-pending",
+                     "genesis-quarantine-envelope.json",
                      "genesis-reservation-prepared-u42.json",
                      "genesis-reservation-confirmed-u42.json",
                      "genesis-positive-cap-u42.json",

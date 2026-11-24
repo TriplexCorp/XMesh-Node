@@ -128,6 +128,9 @@ grep -Fq '/api/v1/metrics/ingest' /usr/local/sbin/xmesh-node-metrics || { echo "
 if [[ "$WAL_STAGE_AGENT" == 0 ]];then
   fetch_install node-control-agent.sh /usr/local/sbin/xmesh-node-control 0700
   grep -Fq "AGENT_VERSION=\"$AGENT_VERSION\"" /usr/local/sbin/xmesh-node-control || { echo "control worker version does not match canonical Agent release" >&2; exit 1; }
+  if [[ "$AGENT_VERSION" == control-v6.0.27 ]];then
+    grep -Fxq "AGENT_VERSION = \"$AGENT_VERSION\"" /usr/local/libexec/xmesh-xray-update.py || { echo "Xray update worker version does not match canonical Agent release" >&2; exit 1; }
+  fi
 fi
 
 install -d -o root -g root -m 0700 /etc/xmesh-node-metrics /var/lib/xmesh-node-metrics /var/lib/xmesh-node-control /var/lib/xmesh-xray-sync

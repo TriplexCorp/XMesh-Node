@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-AGENT_VERSION = "control-v6.0.11"
+AGENT_VERSION = "control-v6.0.27"
 VERSION = re.compile(r"v?([0-9]+\.[0-9]+\.[0-9]+(?:[._+-][A-Za-z0-9._+-]+)?)\Z")
 IDENTITY = re.compile(r"sha256:[0-9a-f]{64}\Z")
 OFFICIAL = "ghcr.io/xtls/xray-core:"
@@ -266,6 +266,7 @@ class Updater:
             # replacement runtime. Even recovery of an interrupted update
             # must stay away from a quarantined or funded generation.
             quota_evidence = (
+                "quota-revocation-deny-pending",
                 # A confirmed Genesis lease already holds funded bytes even
                 # before its first spending cap has been installed. Refuse
                 # runtime replacement throughout preparation/confirmation.
