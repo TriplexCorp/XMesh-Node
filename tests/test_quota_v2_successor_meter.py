@@ -240,12 +240,12 @@ class IsolatedSuccessorMeterTests(unittest.TestCase):
                     return fresh
                 raise ValueError("foreign process")
 
-            with mock.patch.object(successor_meter.wal_transport,
-                                   "_bound_journal", side_effect=inspect), \\
-                 mock.patch.object(successor_meter.wal_transport,
-                                   "_measure_quarantined_runtime", side_effect=measure) as measuring, \\
-                 mock.patch.object(successor_meter, "_verify_fresh_container_env"), \\
-                 mock.patch.object(successor_meter, "_clean_mount") as clean:
+            with (mock.patch.object(successor_meter.wal_transport,
+                                    "_bound_journal", side_effect=inspect),
+                  mock.patch.object(successor_meter.wal_transport,
+                                    "_measure_quarantined_runtime", side_effect=measure) as measuring,
+                  mock.patch.object(successor_meter, "_verify_fresh_container_env"),
+                  mock.patch.object(successor_meter, "_clean_mount") as clean):
                 def check():
                     return successor_meter.verify_reusable_generation(
                         name, state, predecessor, "xmesh-managed-xray",
