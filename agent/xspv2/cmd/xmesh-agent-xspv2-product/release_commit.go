@@ -139,8 +139,11 @@ func confirmInstalledRelease(command int64) error {
 // only the revision used for subsequent authenticated requests changes.
 func checkOperationalRelease(cfg productConfig, running releaseIdentity) error {
 	raw, err := strictFile(releaseCommitFile, 0600)
-	if errors.Is(err, os.ErrNotExist) && running == cfg.ReleaseIdentity {
-		return nil
+	if errors.Is(err, os.ErrNotExist) {
+		if running == cfg.ReleaseIdentity {
+			return nil
+		}
+		return errors.New("running strict-PQ Agent differs from enrolled release identity: signed release commit required")
 	}
 	if err != nil {
 		return err
