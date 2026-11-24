@@ -206,7 +206,13 @@ func collectReleaseArtifact(dir string, plan releasePlan, rawPlan []byte, fetch 
 	// particular do not touch the existing inode or replace its contents:
 	// another process may have independently authenticated those bytes.
 	if _, err := os.Lstat(final); err == nil {
-		return verifyCandidateBytes(final, plan.Target.ArtifactSHA256, 0600)
+		if err := verifyCandidateBytes(final, plan.Target.ArtifactSHA256, 0600); err != nil {
+			return err
+		}
+		// A prior crash may have occurred after link(2) but before
+		// fsync(directory). An idempotent retry must finish that durability
+		// boundary without rewriting the exact verified inode.
+		return syncParent(final)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
