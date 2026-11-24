@@ -157,9 +157,9 @@ func TestReleaseVerifiedCandidateRetryDoesNotOverwriteOrRefetch(t *testing.T) {
 		}
 		end := min(req.Offset+releaseChunkBytes, int64(len(data)))
 		chunk := releaseArtifactChunk{
-			PlanSHA256: hex.EncodeToString(planHash[:]),
+			PlanSHA256:     hex.EncodeToString(planHash[:]),
 			ArtifactSHA256: plan.Target.ArtifactSHA256,
-			Offset: req.Offset, TotalBytes: int64(len(data)),
+			Offset:         req.Offset, TotalBytes: int64(len(data)),
 			DataB64: b64.EncodeToString(data[req.Offset:end]),
 		}
 		reply, err := json.Marshal(chunk)
