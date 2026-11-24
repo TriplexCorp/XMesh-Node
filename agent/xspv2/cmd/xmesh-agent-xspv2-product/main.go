@@ -178,11 +178,9 @@ type tunnelResponsePayload struct {
 }
 
 func selfDigest() (string, error) {
-	path, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	file, err := os.Open(path)
+	// A package replacement can rename the executable after execve.
+	// Hash the running Linux image by inode, even when its path was replaced.
+	file, err := os.Open("/proc/self/exe")
 	if err != nil {
 		return "", err
 	}
@@ -957,6 +955,10 @@ func verifyActive(panel string, nodeID int64) error {
 	if cfg.PanelURL != panel || cfg.NodeID != nodeID {
 		return errors.New("strict-PQ active state belongs to another panel or node")
 	}
+	running, err := identity()
+	if err != nil || running != cfg.ReleaseIdentity {
+		return errors.New("running strict-PQ Agent differs from enrolled release identity")
+	}
 	activeRaw, err := strictFile(activeFile, 0o600)
 	if err != nil {
 		return err
@@ -995,6 +997,42 @@ func verifyActive(panel string, nodeID int64) error {
 		!payload.ProductionActivation || !payload.StrictPQEnabled || payload.AutomaticClassicalFallback || payload.NodeID != nodeID ||
 		payload.RequestBindingSHA256 != active.RequestBindingSHA256 || payload.ActivatedAt != active.ActivatedAt {
 		return errors.New("strict-PQ durable receipt no longer verifies")
+	}
+	requestRaw, err := strictFile(activationRequest, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := verifyActivationReleaseBinding(requestRaw, active, running); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyActivationReleaseBinding(raw []byte, active activeState, running releaseIdentity) error {
+	// Nexus signs the SHA-256 of these exact request bytes. The local config
+	// and active marker alone do not prove what binary Nexus enrolled.
+	binding := sha256.Sum256(raw)
+	if hex.EncodeToString(binding[:]) != active.RequestBindingSHA256 {
+		return errors.New("strict-PQ signed activation request binding mismatch")
+	}
+	request, err := parseEnvelope(raw, "node.product.activate", "/api/v2/product/activate", 1)
+	if err != nil {
+		return err
+	}
+	var claims struct {
+		Schema                     string          `json:"schema"`
+		NodeID                     int64           `json:"nodeId"`
+		ReleaseIdentity            releaseIdentity `json:"releaseIdentity"`
+		AutomaticClassicalFallback bool            `json:"automaticClassicalFallback"`
+	}
+	if err := json.Unmarshal(request.Payload, &claims); err != nil {
+		return err
+	}
+	if request.Env.NodeID != active.NodeID || request.Env.KeyEpoch != int64(active.KeyEpoch) ||
+		request.Env.RequestID != active.RequestID || request.Env.Revision != running.SourceRevision ||
+		claims.Schema != "xmesh-v6-strict-pq-activation-request-1" || claims.NodeID != active.NodeID ||
+		claims.AutomaticClassicalFallback || claims.ReleaseIdentity != running {
+		return errors.New("signed strict-PQ activation does not cover the running release")
 	}
 	return nil
 }
