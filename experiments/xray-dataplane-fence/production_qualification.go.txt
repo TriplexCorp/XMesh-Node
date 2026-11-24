@@ -1,0 +1,120 @@
+package xmeshdrain
+
+import (
+    "crypto/sha256"
+    "encoding/hex"
+    "errors"
+    "io"
+    "os"
+    "path/filepath"
+    "regexp"
+    "strings"
+    "syscall"
+)
+
+// This file is created by the root-owned installer only after checking both
+// signed subjects. It is a local release qualification, NOT a spending cap.
+// The meter still requires a signed per-user admission and durable WAL.
+// Production services must use a separately reviewed, sealed config and
+// a read-only bind of this exact qualification directory into each meter.
+const productionQualification = "/var/lib/xmesh-metered-xray/identity"
+
+var qualificationSHA = regexp.MustCompile("^[a-f0-9]{40}$")
+var qualificationDigest = regexp.MustCompile("^[a-f0-9]{64}$")
+
+func verifyQualificationRecord(raw []byte, executable io.Reader) error {
+    fields := strings.Split(string(raw), "\n")
+    names := []string{"nexusRevision", "nodeSourceRevision", "upstreamSourceRevision", "patchSourceTree", "artifactSha256"}
+    if len(fields) != len(names)+1 || fields[len(names)] != "" {
+        return errors.New("invalid metered Xray qualification shape")
+    }
+    var digest string
+    for i, name := range names {
+        key, value, ok := strings.Cut(fields[i], "=")
+        if !ok || key != name {
+            return errors.New("invalid metered Xray qualification field")
+        }
+        if i == len(names)-1 {
+            if !qualificationDigest.MatchString(value) {
+                return errors.New("invalid qualified Xray digest")
+            }
+            digest = value
+        } else if !qualificationSHA.MatchString(value) {
+            return errors.New("invalid qualified source identity")
+        }
+    }
+    hash := sha256.New()
+    if n, err := io.Copy(hash, io.LimitReader(executable, (256<<20)+1)); err != nil || n <= 0 || n > 256<<20 {
+        return errors.New("cannot hash running Xray executable")
+    }
+    if hex.EncodeToString(hash.Sum(nil)) != digest {
+        return errors.New("running Xray differs from qualified artifact")
+    }
+    return nil
+}
+
+func verifyProductionExecutable() error {
+    if os.Geteuid() != 0 {
+        return errors.New("qualified Xray runtime requires root")
+    }
+    parent, err := os.Lstat(filepath.Dir(productionQualification))
+    if err != nil || !parent.IsDir() || parent.Mode().Perm() != 0700 || parent.Sys().(*syscall.Stat_t).Uid != 0 {
+        return errors.New("unsafe qualification directory")
+    }
+    file, err := os.OpenFile(productionQualification, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+    if err != nil { return err }
+    defer file.Close()
+    st, err := file.Stat()
+    if err != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0600 ||
+        st.Sys().(*syscall.Stat_t).Uid != 0 || st.Sys().(*syscall.Stat_t).Nlink != 1 || st.Size() <= 0 || st.Size() > 4096 {
+        return errors.New("unsafe qualification record")
+    }
+    raw, err := io.ReadAll(io.LimitReader(file, 4097))
+    if err != nil || len(raw) > 4096 { return errors.New("cannot read qualification") }
+    exe, err := os.Open("/proc/self/exe")
+    if err != nil { return err }
+    defer exe.Close()
+    return verifyQualificationRecord(raw, exe)
+}
+
+func validateProductionRole(role string, env func(string) string) error {
+    if role == "" { return nil }
+    if role != "meter" && role != "ingress" {
+        return errors.New("unknown quota runtime role")
+    }
+    for _, flag := range []string{"GITHUB_ACTIONS", "XMESH_QUOTA_V2_STAGING_RUNTIME",
+        "XMESH_QUOTA_INGRESS_STAGING", "XMESH_EXPERIMENTAL_CRASH_AFTER_DRAIN"} {
+        if env(flag) != "" { return errors.New("production quota runtime cannot use staging or fault injection") }
+    }
+    if role == "meter" {
+        if env("XMESH_EXPERIMENTAL_DRAIN") != "1" ||
+            env("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING") == "" ||
+            env("XMESH_QUOTA_PRIVATE_VLESS") != "1" ||
+            env("XMESH_EXPERIMENTAL_OBSERVED_DIR") == "" ||
+            env("XMESH_EXPERIMENTAL_DRAIN_SOCKET") == "" ||
+            env("XMESH_QUOTA_INGRESS_STATE") != "" {
+            return errors.New("production meter requires signed cap binding, private listeners and WAL")
+        }
+        tags, err := parseTrackedInboundTags(env("XMESH_EXPERIMENTAL_SCOPED_INBOUNDS"))
+        if err != nil { return err }
+        for tag := range tags {
+            if tag != "vless-main" && tag != "vless-cdn" { return errors.New("unqualified production meter scope") }
+        }
+    } else if env("XMESH_EXPERIMENTAL_DRAIN") != "" ||
+        env("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING") != "" ||
+        env("XMESH_QUOTA_PRIVATE_VLESS") != "" ||
+        !filepath.IsAbs(env("XMESH_QUOTA_INGRESS_STATE")) {
+        return errors.New("production ingress requires separate private meter routing")
+    }
+    return nil
+}
+
+// Called before package init. An invalid explicit production role aborts
+// startup instead of quietly disabling measurement or falling back to CI.
+func verifiedProductionRole() string {
+    role := os.Getenv("XMESH_QUOTA_V2_RUNTIME_ROLE")
+    if role == "" { return "" }
+    if err := validateProductionRole(role, os.Getenv); err != nil { panic(err) }
+    if err := verifyProductionExecutable(); err != nil { panic(err) }
+    return role
+}

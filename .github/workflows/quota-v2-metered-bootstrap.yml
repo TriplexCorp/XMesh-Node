@@ -28,6 +28,23 @@ jobs:
           target=/usr/local/libexec/xmesh-metered-xray
           nexus=1c8f2f7b23bae34857b77f43e0b794815adcbb28
           test ! -e "$target"
+          approved_tree=d9ef27c488cdd79b6eaff339d766e05869d80a7b
+          if [[ "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" != "$approved_tree" ]]; then
+            # A new patch has no existing release approval. Prove the
+            # current installer refuses it before exercising the approved
+            # release's positive reconstruction in a separate checkout.
+            if sudo bash deploy/install-metered-xray.sh "$nexus"; then
+              echo 'Unqualified new patch unexpectedly installed.' >&2
+              exit 1
+            fi
+            test ! -e "$target"
+            sudo test ! -e /var/lib/xmesh-metered-xray
+            approved_node=f9b2f3416c7488b6e4e7e901904b8f2dfd3745ca
+            git fetch --no-tags --depth=1 origin "$approved_node"
+            git worktree add --detach "$RUNNER_TEMP/approved-metered-node" "$approved_node"
+            cd "$RUNNER_TEMP/approved-metered-node"
+            test "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" = "$approved_tree"
+          fi
           sudo bash deploy/install-metered-xray.sh "$nexus"
           [[ "$(stat -c '%u:%a:%h' "$target")" == '0:755:1' ]]
           if sudo bash install.sh; then
@@ -53,8 +70,8 @@ jobs:
             [[ "$?" == 2 ]]
           fi
           sudo mv "$target.saved" "$target"
-          sudo python3 tests/test_quota_v2_qualified_runtime_image.py
-          report="$(sudo python3 experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
+          sudo python3 "$GITHUB_WORKSPACE"/tests/test_quota_v2_qualified_runtime_image.py
+          report="$(sudo python3 "$GITHUB_WORKSPACE"/experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
           IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="2884c0707cbe9026ef40dd46e16c6f9e7c0fd68c460b3a3ef8d38e35f0604244"; assert r["productionActivationAuthorized"] is False'
           test -z "$(sudo docker ps -q --filter ancestor="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["imageId"])' "$report")")"
           inode="$(stat -c '%i' "$target")"

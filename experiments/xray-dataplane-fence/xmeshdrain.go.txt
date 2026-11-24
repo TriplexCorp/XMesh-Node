@@ -49,10 +49,13 @@ func stagingMarkerApproved(flag string) bool {
     return ok && stat.Uid == 0 && stat.Nlink == 1
 }
 
-var enabled = os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1" &&
+var productionRole = verifiedProductionRole()
+
+var enabled = productionRole == "meter" || (productionRole == "" &&
+    os.Getenv("XMESH_EXPERIMENTAL_DRAIN") == "1" &&
     (os.Getenv("GITHUB_ACTIONS") == "true" ||
         (os.Getenv("XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING") != "" &&
-            stagingMarkerApproved("XMESH_QUOTA_V2_STAGING_RUNTIME")))
+            stagingMarkerApproved("XMESH_QUOTA_V2_STAGING_RUNTIME"))))
 
 // Every user-bearing inbound must be enumerated. A single-inbound fence
 // cannot protect a second CDN/secondary listener carrying the same identity.

@@ -123,6 +123,10 @@ def run(root: Path):
         shared / "historic_runtime_debt_test.go",
     )
 
+    for filename in ("production_qualification.go", "production_qualification_test.go"):
+        shutil.copyfile(NODE_ROOT / ("experiments/xray-dataplane-fence/" + filename + ".txt"),
+                        shared / filename)
+
     quota_errors = root / "common/xmeshquota"
     quota_errors.mkdir()
     shutil.copyfile(
