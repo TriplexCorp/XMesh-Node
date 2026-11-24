@@ -74,6 +74,41 @@ class V1PartialAcknowledgementTests(unittest.TestCase):
         _, _, denied = step(newer, la, 50, True, 4000)
         self.assertEqual(denied.get(UID), "quota")
 
+    def test_plan_extension_cannot_refill_exhausted_local_grant(self):
+        p = policy(1)
+        _, la, _ = step(p, {}, 0, False, 1000)
+        _, la, denied = step(p, la, 50, True, 2000)
+        self.assertEqual(denied.get(UID), "quota")
+        newer = policy(1, used=50, issued=3000, budget=100)
+        newer["users"][0]["limitBytes"] = 200
+        newer["users"][0]["expireAtMs"] = 120000
+        _, la, denied = step(newer, la, 50, False, 3000)
+        self.assertEqual(la["users"]["1"]["anchor"], 0)
+        self.assertEqual(la["users"]["1"]["budget"], 50)
+        self.assertEqual(denied.get(UID), "locally-revoked")
+
+    def test_finite_to_unlimited_retains_original_offline_cutoff(self):
+        p = policy(1)
+        _, la, _ = step(p, {}, 0, False, 1000)
+        _, la, _ = step(p, la, 40, True, 2000)
+        newer = policy(1, used=10, issued=3000, budget=None)
+        newer["users"][0]["limitBytes"] = 0
+        _, la, _ = step(newer, la, 40, False, 3000)
+        self.assertEqual(la["users"]["1"]["budget"], 50)
+        _, _, denied = step(newer, la, 50, True, 4000)
+        self.assertEqual(denied.get(UID), "quota")
+
+    def test_unlimited_to_finite_cannot_create_unsigned_local_baseline(self):
+        p = policy(1, budget=None)
+        p["users"][0]["limitBytes"] = 0
+        _, la, _ = step(p, {}, 0, False, 1000)
+        _, la, _ = step(p, la, 40, True, 2000)
+        newer = policy(1, issued=3000)
+        _, la, _ = step(newer, la, 40, False, 3000)
+        self.assertEqual(la["users"]["1"]["budget"], 0)
+        _, _, denied = step(newer, la, 40, True, 4000)
+        self.assertEqual(denied.get(UID), "quota")
+
     def test_runtime_restart_preserves_absolute_spending(self):
         p = policy(1)
         _, la, _ = step(p, {}, 0, False, 1000)
