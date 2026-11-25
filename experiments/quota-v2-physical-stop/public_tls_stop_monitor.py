@@ -7,7 +7,6 @@ must keep the child in its systemd control group, supply authenticated live
 revocation/installed-cap proof and run checks continuously. An uncalled
 monitor is NOT a security boundary and this file is not installed by Node.
 """
-import json
 import subprocess
 import time
 
@@ -34,7 +33,6 @@ class StopOnlyTlsMonitor:
         self._runtime_id = runtime_id
         self._wall_ms = time.time_ns() // 1_000_000
         self._mono_ns = time.monotonic_ns()
-        self._started_mono_ns = self._mono_ns
         # Duplicate strict decoding only to read a timestamp ALREADY
         # cryptographically verified by the compiler above.
         payload = wal_transport.observed.strict_json(authority)["payload"]
@@ -82,12 +80,18 @@ class StopOnlyTlsMonitor:
         if self._child.poll() is not None:
             self._stop("TLS ingress subprocess has exited")
         try:
-            if wal_transport.runtime_identity.trusted_runtime_identity(
-                    self._runtime_pid) != self._runtime_id:
-                self._stop("metered Xray runtime replaced")
+            observed_runtime = wal_transport.runtime_identity.trusted_runtime_identity(
+                self._runtime_pid)
+        except Exception:
+            # Missing /proc, malformed PID ancestry or an unexpected probe
+            # failure must never leave an existing TLS subprocess online.
+            self._stop("metered Xray runtime unavailable")
+        if observed_runtime != self._runtime_id:
+            self._stop("metered Xray runtime replaced")
+        try:
             public_tls_certificates.verify_certificate_lineage(self._config)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            self._stop("metered Xray or trusted TLS certificate unavailable")
+        except Exception:
+            self._stop("trusted TLS certificate unavailable")
         self._wall_ms, self._mono_ns = wall, mono
         # Deliberately no boolean "allowed" return. A successful stop-only
         # poll cannot issue permits, refresh caps or open an ingress.
