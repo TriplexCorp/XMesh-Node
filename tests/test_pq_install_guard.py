@@ -292,7 +292,7 @@ exit 77
         units = ('xmesh-quota-v2-egress.service', 'xmesh-quota-v2-meter.service',
                  'xmesh-quota-v2-ingress.service', 'xmesh-quota-v2-renewal.service')
         for name in units:
-            section = installer.split('cat > /etc/systemd/system/' + name, 1)[1].split('EOF', 1)[0]
+            section = installer.split('cat > /etc/systemd/system/' + name, 1)[1].split('[Unit]', 1)[1].split('\nEOF', 1)[0]
             self.assertIn('After=', section)
             self.assertIn('Requires=', section)
             self.assertIn('xmesh-pq-activation-recovery.service', section)
