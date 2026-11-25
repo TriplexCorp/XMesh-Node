@@ -632,6 +632,12 @@ func serveHTTP(w http.ResponseWriter, r *http.Request) {
         capControl.serve(w,r)
         return
     }
+    if capControl != nil && r.URL.Path == localCapObservePath {
+        // Read-only and root Unix peer authenticated. Never turns a local
+        // spending cap into authorization for a public listener.
+        capControl.serveObserved(w,r)
+        return
+    }
     if r.URL.Path == zeroMeterPath {
         // No caller, including a same-UID peer, can turn this endpoint
         // into a cap installation: it only reports an empty measured meter.
