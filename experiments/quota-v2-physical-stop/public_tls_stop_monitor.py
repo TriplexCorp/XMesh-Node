@@ -130,7 +130,6 @@ class StopOnlyTlsMonitor:
                            - (checked_mono_ns - self._mono_ns))
                     > MAX_DIVERGENCE_NS):
                 raise ValueError("TLS startup evidence expired or clock changed")
-            self._wall_ms, self._mono_ns = checked_wall_ms, checked_mono_ns
             # A heartbeat is a report that every independent cryptographic
             # and measured Xray check just succeeded. It is NEVER permission
             # for the guardian to open or continue traffic on its own.
@@ -138,6 +137,22 @@ class StopOnlyTlsMonitor:
                 raise ValueError("deadman attempted to issue traffic permission")
             if self._child.poll() is not None:
                 raise ValueError("TLS child died during startup supervision")
+            if self._revocation_watch.ensure_fresh() is not None:
+                raise ValueError("signed revocation witness expired during ACK")
+            # An independent guardian may take up to 1s to acknowledge a
+            # pulse. Validate the SIGNED expiry and the ORIGINAL watchdog
+            # interval after ACK, not only before its blocking IPC wait.
+            ack_wall_ms = time.time_ns() // 1_000_000
+            ack_mono_ns = time.monotonic_ns()
+            if (ack_wall_ms < checked_wall_ms or ack_mono_ns < checked_mono_ns
+                    or ack_wall_ms >= self._expires_ms
+                    or ack_mono_ns >= self._deadline_ns
+                    or ack_mono_ns - self._mono_ns >= MAX_CHECK_GAP_NS
+                    or abs((ack_wall_ms - self._wall_ms) * 1_000_000
+                           - (ack_mono_ns - self._mono_ns))
+                    > MAX_DIVERGENCE_NS):
+                raise ValueError("TLS startup authority expired during guardian ACK")
+            self._wall_ms, self._mono_ns = ack_wall_ms, ack_mono_ns
         except Exception:
             self._stop("initial TLS supervision preflight failed")
 
@@ -244,7 +259,21 @@ class StopOnlyTlsMonitor:
             self._stop("independent TLS deadman unavailable or unresponsive")
         if self._child.poll() is not None:
             self._stop("independent TLS deadman stopped the owned child")
-        self._wall_ms, self._mono_ns = final_wall, final_mono
+        try:
+            if self._revocation_watch.ensure_fresh() is not None:
+                raise ValueError("revocation witness cannot grant public TLS")
+        except Exception:
+            self._stop("signed revocation witness expired during guardian ACK")
+        ack_wall = time.time_ns() // 1_000_000
+        ack_mono = time.monotonic_ns()
+        if (ack_wall < final_wall or ack_mono < final_mono
+                or ack_wall >= self._expires_ms
+                or ack_mono >= self._deadline_ns
+                or ack_mono - self._mono_ns >= MAX_CHECK_GAP_NS
+                or abs((ack_wall - self._wall_ms) * 1_000_000
+                       - (ack_mono - self._mono_ns)) > MAX_DIVERGENCE_NS):
+            self._stop("TLS guardian ACK exceeded signed lifetime or watchdog")
+        self._wall_ms, self._mono_ns = ack_wall, ack_mono
         # Deliberately no boolean "allowed" return. A successful stop-only
         # poll cannot issue permits, refresh caps or open an ingress.
         return None
