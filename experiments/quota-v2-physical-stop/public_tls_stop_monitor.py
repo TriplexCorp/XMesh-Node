@@ -17,6 +17,7 @@ import time
 import public_tls_cap_watch
 import public_tls_certificates
 import public_tls_frontend
+import public_tls_revocation_watch
 import wal_transport
 
 MAX_CHECK_GAP_NS = 10_000_000_000
@@ -25,7 +26,8 @@ MAX_DIVERGENCE_NS = 5_000_000_000
 
 class StopOnlyTlsMonitor:
     def __init__(self, *, child, profile, authority, node, activation,
-                 genesis_sha, runtime_id, pinned, runtime_pid, cap_watch):
+                 genesis_sha, runtime_id, pinned, runtime_pid, cap_watch,
+                 revocation_watch):
         if not isinstance(child, subprocess.Popen):
             raise ValueError("only a directly-owned child process is monitorable")
         # A caller may already have started the child. Never leave that
@@ -49,7 +51,21 @@ class StopOnlyTlsMonitor:
                     or cap_watch.genesis_sha != genesis_sha
                     or cap_watch.pinned != pinned):
                 raise ValueError("missing or foreign complete signed-cap roster watcher")
+            if (not isinstance(
+                    revocation_watch,
+                    public_tls_revocation_watch.SignedTlsRevocationWatch)
+                    or revocation_watch.node != node
+                    or revocation_watch.activation != activation
+                    or revocation_watch.genesis_sha != genesis_sha
+                    or revocation_watch.runtime_id != runtime_id
+                    or revocation_watch.profile_sha256 != cap_watch.profile_sha256
+                    or revocation_watch.roster_sha256 != cap_watch.roster_sha256
+                    or revocation_watch.authority_sha256 != hashlib.sha256(
+                        authority).hexdigest()
+                    or revocation_watch.pinned != pinned):
+                raise ValueError("missing or foreign signed Nexus revocation witness")
             self._cap_watch = cap_watch
+            self._revocation_watch = revocation_watch
             self._config = public_tls_frontend.compile_signed_public_tls(
                 profile, authority, node=node, activation=activation,
                 genesis_sha=genesis_sha, runtime_id=runtime_id, pinned=pinned)
@@ -80,6 +96,10 @@ class StopOnlyTlsMonitor:
             # no positive public-TLS authorization. Missing *any* user dies.
             if self._cap_watch.check() is not None:
                 raise ValueError("cap watcher attempted to issue authorization")
+            if self._revocation_watch.check() is not None:
+                raise ValueError("revocation watcher attempted to issue authorization")
+            if self._revocation_watch.ensure_fresh() is not None:
+                raise ValueError("revocation watcher attempted to issue authorization")
         except Exception:
             self._stop("initial TLS supervision preflight failed")
 
@@ -94,7 +114,7 @@ class StopOnlyTlsMonitor:
                 self._child.wait(timeout=2)
         raise ValueError("public TLS process stopped: " + reason)
 
-    def check_stop_only(self, *, revoked):
+    def check_stop_only(self):
         """Never return traffic permission. Terminate child on ANY loss.
 
         This check is NOT sufficient to run an ingress. Signed spending-cap
@@ -103,8 +123,15 @@ class StopOnlyTlsMonitor:
         """
         if self.stopped:
             raise ValueError("public TLS stop latch is permanent")
-        if type(revoked) is not bool or revoked:
-            self._stop("revoked or unverified revocation state")
+        # Never accept a caller-supplied 'revoked=False'. Require a fresh
+        # nonce-bound Nexus Ed25519 witness on EVERY explicit monitor tick.
+        # This still needs an installed trusted polling supervisor and a
+        # database-backed issuer; no public ingress is enabled by this API.
+        try:
+            if self._revocation_watch.check() is not None:
+                raise ValueError("revocation witness cannot grant public TLS")
+        except Exception:
+            self._stop("signed Nexus revocation witness lost or revoked")
         wall = time.time_ns() // 1_000_000
         mono = time.monotonic_ns()
         if (wall < self._wall_ms or mono < self._mono_ns
@@ -147,6 +174,11 @@ class StopOnlyTlsMonitor:
                 or abs((end_wall - wall) * 1_000_000 - (end_mono - mono))
                 > MAX_DIVERGENCE_NS):
             self._stop("TLS cap check exceeded signed time or clock bounds")
+        try:
+            if self._revocation_watch.ensure_fresh() is not None:
+                raise ValueError("revocation witness cannot grant public TLS")
+        except Exception:
+            self._stop("signed revocation witness expired during cap probe")
         self._wall_ms, self._mono_ns = end_wall, end_mono
         # Deliberately no boolean "allowed" return. A successful stop-only
         # poll cannot issue permits, refresh caps or open an ingress.
