@@ -94,6 +94,20 @@ class StopOnlyTests(unittest.TestCase):
         self.cap_watch.genesis_sha = self.genesis
         self.cap_watch.pinned = self.pinned
         self.cap_watch.check.return_value = None
+        self.revocation_watch = mock.Mock(
+            spec=stop.public_tls_revocation_watch.SignedTlsRevocationWatch)
+        self.revocation_watch.node = self.node
+        self.revocation_watch.activation = self.activation
+        self.revocation_watch.genesis_sha = self.genesis
+        self.revocation_watch.runtime_id = self.runtime
+        self.revocation_watch.profile_sha256 = self.cap_watch.profile_sha256
+        self.revocation_watch.roster_sha256 = "d" * 64
+        self.revocation_watch.authority_sha256 = hashlib.sha256(
+            self.signed).hexdigest()
+        self.revocation_watch.pinned = self.pinned
+        self.cap_watch.roster_sha256 = self.revocation_watch.roster_sha256
+        self.revocation_watch.check.return_value = None
+        self.revocation_watch.ensure_fresh.return_value = None
 
     def stop_child(self):
         if self.child.poll() is None:
@@ -106,7 +120,7 @@ class StopOnlyTests(unittest.TestCase):
             node=self.node, activation=self.activation,
             genesis_sha=self.genesis, runtime_id=self.runtime,
             pinned=self.pinned, runtime_pid=1234,
-            cap_watch=self.cap_watch,
+            cap_watch=self.cap_watch, revocation_watch=self.revocation_watch,
         )
         params.update(changes)
         return stop.StopOnlyTlsMonitor(**params)
@@ -115,19 +129,19 @@ class StopOnlyTests(unittest.TestCase):
         self.wall_ns += wall_ms * 1_000_000
         self.mono_ns += monotonic_ms * 1_000_000
 
-    def assert_stopped(self, monitor, **kwargs):
+    def assert_stopped(self, monitor):
         with self.assertRaises(ValueError):
-            monitor.check_stop_only(revoked=False, **kwargs)
+            monitor.check_stop_only()
         self.assertTrue(monitor.stopped)
         self.assertIsNotNone(self.child.poll())
         with self.assertRaises(ValueError):
-            monitor.check_stop_only(revoked=False)
+            monitor.check_stop_only()
 
     def test_valid_poll_only_observes_without_granting_or_starting(self):
         monitor = self.monitor()
-        self.assertIsNone(monitor.check_stop_only(revoked=False))
+        self.assertIsNone(monitor.check_stop_only())
         self.tick(wall_ms=500,monotonic_ms=500)
-        self.assertIsNone(monitor.check_stop_only(revoked=False))
+        self.assertIsNone(monitor.check_stop_only())
         self.assertFalse(monitor.stopped)
         self.assertIsNone(self.child.poll())
 
@@ -148,15 +162,17 @@ class StopOnlyTests(unittest.TestCase):
 
     def test_revocation_stops_owned_subprocess_and_latches(self):
         monitor = self.monitor()
+        self.revocation_watch.check.side_effect = ValueError("Nexus signed revoked")
         with self.assertRaises(ValueError):
-            monitor.check_stop_only(revoked=True)
+            monitor.check_stop_only()
         self.assertTrue(monitor.stopped)
         self.assertIsNotNone(self.child.poll())
 
     def test_unknown_revocation_state_denied(self):
         monitor = self.monitor()
+        self.revocation_watch.check.side_effect = OSError("panel unavailable")
         with self.assertRaises(ValueError):
-            monitor.check_stop_only(revoked=None)
+            monitor.check_stop_only()
         self.assertIsNotNone(self.child.poll())
 
     def test_metered_runtime_pid_replacement_denied(self):
@@ -265,9 +281,9 @@ class StopOnlyTests(unittest.TestCase):
     def test_live_cap_watch_is_checked_at_every_tick(self):
         monitor = self.monitor()
         self.tick(wall_ms=300, monotonic_ms=300)
-        self.assertIsNone(monitor.check_stop_only(revoked=False))
+        self.assertIsNone(monitor.check_stop_only())
         self.tick(wall_ms=300, monotonic_ms=300)
-        self.assertIsNone(monitor.check_stop_only(revoked=False))
+        self.assertIsNone(monitor.check_stop_only())
         self.assertEqual(self.cap_watch.check.call_count, 3)
 
     def test_cap_probe_crossing_monitor_gap_fails_closed_after_return(self):
@@ -277,6 +293,63 @@ class StopOnlyTests(unittest.TestCase):
             return None
         self.cap_watch.check.side_effect = slow_probe
         self.assert_stopped(monitor)
+
+    def test_missing_or_foreign_signed_revocation_watcher_kills_child(self):
+        for index, bad in enumerate((
+            {"revocation_watch": None},
+            {"revocation_watch": mock.Mock()},
+            {"node": self.node + 1},
+            {"activation": "f" * 64},
+            {"genesis_sha": "f" * 64},
+            {"runtime_id": "f" * 64},
+            {"profile_sha256": "f" * 64},
+            {"authority_sha256": "f" * 64},
+            {"roster_sha256": "f" * 64},
+            {"pinned": "f" * 64},
+        )):
+            if index:
+                self.respawn_child()
+            if "revocation_watch" in bad:
+                watcher = bad["revocation_watch"]
+            else:
+                watcher = mock.Mock(
+                    spec=stop.public_tls_revocation_watch.SignedTlsRevocationWatch)
+                for key in ("node", "activation", "genesis_sha",
+                            "runtime_id", "profile_sha256", "authority_sha256",
+                            "roster_sha256", "pinned"):
+                    setattr(watcher, key, getattr(self.revocation_watch, key))
+                setattr(watcher, next(iter(bad)), next(iter(bad.values())))
+            with self.subTest(change=bad), self.assertRaisesRegex(
+                    ValueError, "initial TLS supervision preflight failed"):
+                self.monitor(revocation_watch=watcher)
+            self.assertIsNotNone(self.child.poll())
+
+    def test_revocation_fetch_fails_at_initial_supervision(self):
+        self.revocation_watch.check.side_effect = OSError("Nexus offline")
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_revocation_witness_expires_during_cap_probe(self):
+        monitor = self.monitor()
+        self.revocation_watch.ensure_fresh.side_effect = ValueError("expired")
+        self.assert_stopped(monitor)
+
+    def test_revocation_witness_cannot_return_positive_authorization(self):
+        self.revocation_watch.check.return_value = True
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_revocation_fetch_required_on_every_tick(self):
+        monitor = self.monitor()
+        for _ in range(2):
+            self.tick(wall_ms=300, monotonic_ms=300)
+            self.assertIsNone(monitor.check_stop_only())
+        self.assertEqual(self.revocation_watch.check.call_count, 3)
+        self.assertEqual(self.revocation_watch.ensure_fresh.call_count, 3)
 
     def test_invalid_initial_pid_and_expired_policy_kill_child(self):
         with self.assertRaisesRegex(
@@ -297,6 +370,8 @@ class StopOnlyTests(unittest.TestCase):
         self.assertEqual(self.identity_mock.call_count, 1)
         self.assertEqual(self.certificate_mock.call_count, 1)
         self.cap_watch.check.assert_called_once_with()
+        self.revocation_watch.check.assert_called_once_with()
+        self.revocation_watch.ensure_fresh.assert_called_once_with()
 
 
 if __name__ == "__main__":

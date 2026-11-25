@@ -107,6 +107,15 @@ class SignedCapRosterWatch:
                 # Freeze source bytes and derived values. A caller changing
                 # their dict later cannot silently switch grant or aliases.
                 grants[user] = (raw, scope, tuple(alias["email"] for alias in aliases))
+        # A signed revocation witness must cover the exact active lease
+        # snapshot, not just an unchanged VLESS roster. Any newer signed
+        # renewal requires a NEW watcher and fresh Nexus revocation proof.
+        self.roster_sha256 = hashlib.sha256(
+            wal_transport.observed.canonical([
+                {"userId": user, "grantSha256": hashlib.sha256(raw).hexdigest(),
+                 "aliases": list(aliases)}
+                for user, (raw, _scope, aliases) in sorted(grants.items())
+            ])).hexdigest()
         self.profile_sha256 = hashlib.sha256(
             wal_transport.observed.canonical(profile)).hexdigest()
         self.node = node
