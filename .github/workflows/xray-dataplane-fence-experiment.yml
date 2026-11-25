@@ -4,6 +4,11 @@ on:
   pull_request:
     branches: [main]
     paths:
+      # Sigstore binds the full Node source commit, not just the Xray patch tree.
+      # Any changed Agent identity must produce a NEW signed Xray candidate.
+      - 'AGENT_VERSION'
+      - 'bootstrap.sh'
+      - 'deploy/install-metered-services.sh'
       - 'experiments/xray-dataplane-fence/**'
       - 'experiments/quota-v2-physical-stop/cap_install.py'
       - '.github/workflows/xray-dataplane-fence-experiment.yml'
@@ -12,6 +17,11 @@ on:
     # created by an automation token does not emit a pull_request workflow.
     branches: ['**']
     paths:
+      # Sigstore binds the full Node source commit, not just the Xray patch tree.
+      # Any changed Agent identity must produce a NEW signed Xray candidate.
+      - 'AGENT_VERSION'
+      - 'bootstrap.sh'
+      - 'deploy/install-metered-services.sh'
       - 'experiments/xray-dataplane-fence/**'
       - 'experiments/quota-v2-physical-stop/cap_install.py'
       - '.github/workflows/xray-dataplane-fence-experiment.yml'
