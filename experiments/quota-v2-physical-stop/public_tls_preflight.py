@@ -22,7 +22,6 @@ import wal_transport
 MAX_REPLY = 1536
 MAX_PROBE_NS = 9_000_000_000
 CAP_FILE = re.compile(r"genesis-positive-cap-u([1-9][0-9]{0,18})\.json\Z")
-RENEW_FILE = re.compile(r"genesis-renewal-u[1-9][0-9]*-r[1-9][0-9]*\.json\Z")
 SOCKET = "/var/lib/xmesh-first-meter/runtime/drain.sock"
 MAX_LIFETIME_MS = 120_000
 STATUS = "candidate_only_not_authorized"
@@ -84,8 +83,15 @@ def _full_signed_roster(fd, original, node, activation, pinned, measured):
             raise ValueError("malformed, repeated or unquarantined TLS user")
         expected.add(uid)
     names = os.listdir(fd)
-    if any(RENEW_FILE.fullmatch(name) for name in names):
-        raise ValueError("a later signed cap generation requires a new TLS admission protocol")
+    # Unrecognized cap-like filenames can be old generations or attempts to
+    # smuggle additional signed users via a noncanonical decimal representation.
+    # They must not be silently ignored when proving the ENTIRE active roster.
+    if any(
+        (name.startswith("genesis-positive-cap-u") and not CAP_FILE.fullmatch(name))
+        or (name.startswith("genesis-renewal-u"))
+        for name in names
+    ):
+        raise ValueError("a noncanonical or later signed cap requires fresh TLS admission")
     stored = {}
     for name in names:
         match = CAP_FILE.fullmatch(name)
@@ -102,7 +108,13 @@ def _full_signed_roster(fd, original, node, activation, pinned, measured):
                 or type(envelope["userId"]) is not int or envelope["userId"] != uid
                 or not isinstance(envelope["signedEnvelope"], str)):
             raise ValueError("foreign or noncanonical root-owned signed TLS cap")
-        stored[uid] = envelope["signedEnvelope"].encode("utf-8")
+        raw = envelope["signedEnvelope"].encode("utf-8")
+        signed = wal_transport.observed.strict_json(raw)
+        if (not isinstance(signed, dict)
+                or not isinstance(signed.get("payload"), dict)
+                or signed["payload"].get("kind") != "xmesh.quota-v2.xray-cap-admission"):
+            raise ValueError("first-Genesis TLS roster contains a later cap generation")
+        stored[uid] = raw
     if set(stored) != expected:
         raise ValueError("missing initial cap for one or more signed TLS users")
     profile = original["reply"]["config"]
