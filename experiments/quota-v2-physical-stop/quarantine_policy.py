@@ -28,6 +28,7 @@ PATH = "/api/v1/node/desired-config"
 PIN_PATH = "/api/v1/node/quota-v2/policy-pin"
 LEASE_PATH = "/api/v1/node/quota-v2/genesis-reservation"
 CAP_DELIVERY_PATH = "/api/v1/node/quota-v2/genesis-cap-delivery"
+TLS_PREFLIGHT_PATH = "/api/v1/node/quota-v2/public-tls-preflight"
 MAX_REPLY = 262144
 PREVIEW_FILE = "genesis-config-preview.json"
 INTENT_FILE = "genesis-prepare-intent.json"
@@ -201,7 +202,7 @@ def _post_quarantined_desired(request, state, path=PATH):
     No curl, raw HTTP, Ed25519 legacy fallback, insecure TLS or alternate host
     is reachable from this operation.
     """
-    if path not in (PATH,PIN_PATH,LEASE_PATH,CAP_DELIVERY_PATH):
+    if path not in (PATH,PIN_PATH,LEASE_PATH,CAP_DELIVERY_PATH,TLS_PREFLIGHT_PATH):
         raise ValueError("unregistered XSP/2 product operation")
     with tempfile.TemporaryDirectory(prefix="xmesh-quarantine-",dir=state) as root:
         root=Path(root)
