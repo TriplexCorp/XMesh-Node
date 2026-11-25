@@ -56,14 +56,15 @@ def install_in_xray(path, trusted_pid, runtime, genesis, grant, scope):
 
         check_runtime()
         with socket.socket(socket.AF_UNIX) as conn:
-            conn.settimeout(12)
+            conn.settimeout(CAP_OBSERVE_SOCKET_TIMEOUT_S)
             conn.connect(str(path))
             peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
             peer_pid, peer_uid, _ = struct.unpack("3i", peer)
             if peer_pid != trusted_pid or peer_uid != uid:
                 raise ValueError("Unix peer is not the measured Xray process")
             check_runtime()
-            client = http.client.HTTPConnection("localhost", timeout=12)
+            client = http.client.HTTPConnection(
+                "localhost", timeout=CAP_OBSERVE_SOCKET_TIMEOUT_S)
             # Never reconnect by TCP if the checked Unix peer disconnects.
             client.auto_open = False
             client.sock = conn
@@ -396,6 +397,12 @@ def verify_local_cap_observation(raw, request, grant, node, activation):
         raise ValueError("local Xray cap reply changed signed scope, time or byte totals")
     # Return diagnostic state with an explicit never-positive safety boundary.
     return reply
+
+
+# A read-only cap probe is part of a 10-second fail-closed TLS stop
+# watchdog. It must not inherit 12-second write/renewal IPC timeouts:
+# a nonresponding local Xray must not leave an owned TLS child online.
+CAP_OBSERVE_SOCKET_TIMEOUT_S = 1.5
 
 
 def observe_installed_cap_in_xray(path, trusted_pid, runtime, node,
