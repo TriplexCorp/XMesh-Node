@@ -40,6 +40,21 @@ class TargetTests(unittest.TestCase):
                         egress.require_socket()
                     root.chmod(0o700)
 
+    @unittest.skipUnless(os.geteuid() == 0, "root-owned socket")
+    def test_crash_recovery_never_replaces_live_listener(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            path = root / "egress.sock"
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                path.chmod(0o600)
+                listener.listen(1)
+                with self.assertRaises(ValueError):
+                    egress.recover_stale_socket(path)
+            egress.recover_stale_socket(path)
+            self.assertFalse(path.exists())
+
     def test_public_destinations_and_dns_are_explicit(self):
         self.assertEqual(egress.parse_target(b"EXAMPLE.COM", 443),
                          ("example.com", 443))
@@ -93,11 +108,21 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await writer.wait_closed()
 
+    @staticmethod
+    async def assert_denied(reader):
+        # Linux may reset a Unix stream when the rejected peer left unread
+        # bytes in the kernel. Closed/reset is also fail-closed.
+        try:
+            result = await asyncio.wait_for(reader.read(1), 2)
+        except (ConnectionError, OSError):
+            return
+        assert result in (b"", b"\x01"), result
+
     async def test_rejects_unqualified_meter_before_connect(self):
         with mock.patch.object(egress, "require_qualified_peer",
                                side_effect=ValueError("not a meter")):
             reader, _ = await self.request()
-            self.assertEqual(await reader.readexactly(1), b"\x01")
+            await self.assert_denied(reader)
 
     async def test_valid_peer_has_bounded_frame_and_public_dns(self):
         with mock.patch.object(egress, "require_qualified_peer"):
@@ -118,7 +143,18 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 reader, writer = await self.request(port=port)
                 # Host-side postconnect public check correctly refuses even
                 # a test resolver that tries to smuggle a loopback endpoint.
-                self.assertEqual(await reader.readexactly(1), b"\x01")
+                await self.assert_denied(reader)
+                # Only this unit test overrides the routability validator.
+                # Production rejects loopback both before and after dial.
+                with mock.patch.object(egress, "is_global_address", return_value=True):
+                    reader, writer = await self.request(port=port)
+                    reply = await asyncio.wait_for(reader.readexactly(20), 3)
+                    self.assertEqual(reply[:2], b"\x00\x04")
+                    self.assertEqual(reply[2:6], b"\x7f\x00\x00\x01")
+                    self.assertEqual(struct.unpack("!H", reply[-2:])[0], port)
+                    writer.write(b"ping")
+                    await writer.drain()
+                    self.assertEqual(await reader.readexactly(4), b"ping")
 
     @staticmethod
     async def stop_local_server(server):
