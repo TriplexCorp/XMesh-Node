@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import time
+import uuid
 
 import public_tls_cap_watch
 
@@ -74,6 +75,7 @@ def _full_signed_roster(fd, original, node, activation, pinned, measured):
     if not isinstance(users, list) or not 1 <= len(users) <= 2048:
         raise ValueError("missing bounded original TLS user roster")
     expected = set()
+    user_uuids = {}
     for record in users:
         uid = record.get("userId") if isinstance(record, dict) else None
         if (type(uid) is not int or not 0 < uid <= 2**63-1
@@ -81,6 +83,19 @@ def _full_signed_roster(fd, original, node, activation, pinned, measured):
                 or type(record.get("offlineBudgetBytes")) is not int
                 or record["offlineBudgetBytes"] != 0):
             raise ValueError("malformed, repeated or unquarantined TLS user")
+        # A signed quota bound only to email may not silently retarget a
+        # different VLESS credential. The original Genesis policy owns the
+        # exact client UUID, independently of the signed cap's userId.
+        client_uuid = record.get("xrayId")
+        if not isinstance(client_uuid, str):
+            raise ValueError("signed Genesis user has no VLESS credential identity")
+        try:
+            canonical_uuid = str(uuid.UUID(client_uuid))
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("malformed signed Genesis VLESS UUID") from exc
+        if canonical_uuid != client_uuid:
+            raise ValueError("noncanonical signed Genesis VLESS UUID")
+        user_uuids[uid] = client_uuid
         expected.add(uid)
     names = os.listdir(fd)
     # Unrecognized cap-like filenames can be old generations or attempts to
@@ -121,10 +136,22 @@ def _full_signed_roster(fd, original, node, activation, pinned, measured):
     if (not isinstance(profile, dict) or
             wal_transport.observed.canonical(profile) is None):
         raise ValueError("missing original Genesis measured VLESS profile")
-    return public_tls_cap_watch.SignedCapRosterWatch(
+    roster = public_tls_cap_watch.SignedCapRosterWatch(
         profile=profile, signed_grants=stored, pinned=pinned, node=node,
         activation=activation, genesis_sha=original["reply"]["policySha256"],
         runtime_id=measured[3], trusted_pid=measured[2], socket_path=SOCKET)
+    # Reconcile the complete signed Genesis userId -> Xray UUID mapping to
+    # every real VLESS MAIN/CDN client compiled from that same signed profile.
+    # Matching only the signed cap's user ID and email is insufficient: a
+    # swapped UUID would route somebody else's credential through this quota.
+    for inbound in profile["inbounds"]:
+        for client in inbound["settings"]["clients"]:
+            match = public_tls_cap_watch.EMAIL.fullmatch(client["email"])
+            if (match is None
+                    or client["id"] != user_uuids.get(int(match.group(1)))):
+                raise ValueError(
+                    "signed Genesis user UUID differs from installed VLESS roster")
+    return roster
 
 
 def probe(panel, node, user, state, required_lifetime_ms=30_000):
