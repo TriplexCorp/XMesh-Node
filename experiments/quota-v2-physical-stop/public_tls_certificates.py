@@ -77,11 +77,18 @@ def verify_certificate_lineage(config):
         raise ValueError("signed public TLS inbounds are missing")
     result = {}
     for inbound in inbounds:
+        if not isinstance(inbound, dict) or inbound.get("tag") not in ("vless-main", "vless-cdn"):
+            raise ValueError("foreign public TLS inbound")
         settings = inbound.get("streamSettings", {})
+        if not isinstance(settings, dict) or set(settings) != {"network", "security", "tlsSettings"}:
+            raise ValueError("unsafe public TLS stream settings")
         tls_settings = settings.get("tlsSettings", {})
-        if (settings.get("network") != "tcp" or settings.get("security") != "tls"
+        if (not isinstance(tls_settings, dict)
+                or set(tls_settings) != {"serverName", "minVersion", "certificates"}
+                or settings.get("network") != "tcp" or settings.get("security") != "tls"
                 or tls_settings.get("minVersion") != "1.3"
-                or len(tls_settings.get("certificates", [])) != 1):
+                or not isinstance(tls_settings.get("certificates"), list)
+                or len(tls_settings["certificates"]) != 1):
             raise ValueError("noncanonical TLS ingress configuration")
         name = tls_settings.get("serverName")
         if not isinstance(name, str) or not tls.DOMAIN.fullmatch(name):
@@ -89,6 +96,8 @@ def verify_certificate_lineage(config):
         cert = _checked_lineage(name, "fullchain")
         key = _checked_lineage(name, "privkey")
         cert_record = tls_settings["certificates"][0]
+        if not isinstance(cert_record, dict) or set(cert_record) != {"certificateFile", "keyFile"}:
+            raise ValueError("unexpected TLS certificate configuration")
         if (cert_record.get("certificateFile") != str(cert)
                 or cert_record.get("keyFile") != str(key)):
             raise ValueError("TLS config key paths diverged from signed hostname")
@@ -103,6 +112,6 @@ def verify_certificate_lineage(config):
         if cert_pub != key_pub:
             raise ValueError("TLS private key does not match the signed certificate")
         result[inbound["tag"]] = (cert, key)
-    if len(result) != len(inbounds) or len({str(pair[0]) for pair in result.values()}) != len(result):
-        raise ValueError("duplicate TLS certificate scope")
+    if len(result) != len(inbounds):
+        raise ValueError("duplicate TLS inbound tag")
     return result
