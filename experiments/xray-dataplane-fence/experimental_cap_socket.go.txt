@@ -16,9 +16,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 const localCapPath = "/v1/quota-cap"
+const localCapObservePath = "/v1/quota-cap-observe"
+const localCapObserveRequestLimit = 512
 const localCapRequestLimit = 18 * 1024
 const genesisDomain = "XMESH_XRAY_GENESIS_PREPARED_V1\x00"
 
@@ -284,3 +287,138 @@ func (c *localCapControl) serve(w http.ResponseWriter, r *http.Request) {
 		GrantSHA256 string `json:"grantSha256"`
 	}{Runtime: runtime, GrantSHA256: hex.EncodeToString(digest[:])})
 }
+
+
+ // These observations are a read-only, root Unix peer-attested view of the
+ // ACTUAL metered Xray's in-memory signed cap. They are NOT a public TLS
+ // listener permit, external WAL finality or permission to issue quota.
+ type localCapObserveRequest struct {
+ 	SchemaVersion int    `json:"schemaVersion"`
+ 	UserID int64 `json:"userId"`
+ 	Email string `json:"email"`
+ 	RuntimeID string `json:"runtimeId"`
+ 	GrantSHA256 string `json:"grantSha256"`
+ 	Nonce string `json:"nonce"`
+ }
+ 
+ type localCapObserveResult struct {
+ 	SchemaVersion int `json:"schemaVersion"`
+ 	Kind string `json:"kind"`
+ 	Nonce string `json:"nonce"`
+ 	NodeID int64 `json:"nodeId"`
+ 	UserID int64 `json:"userId"`
+ 	Email string `json:"email"`
+ 	RuntimeID string `json:"runtimeId"`
+ 	ActivationReceiptSHA256 string `json:"activationReceiptSha256"`
+ 	PolicySHA256 string `json:"policySha256"`
+ 	AccountEpoch string `json:"accountEpoch"`
+ 	MeterEpoch string `json:"meterEpoch"`
+ 	ReservationID string `json:"reservationId"`
+ 	ReservationRevision int64 `json:"reservationRevision"`
+ 	GrantSHA256 string `json:"grantSha256"`
+ 	ValidUntilMs int64 `json:"validUntilMs"`
+ 	SharedCeilingBytes uint64 `json:"sharedCeilingBytes"`
+ 	NodeCeilingBytes uint64 `json:"nodeCeilingBytes"`
+ 	CdnCeilingBytes uint64 `json:"cdnCeilingBytes"`
+ 	ChargedBytes uint64 `json:"chargedBytes"`
+ 	ChargedCdnBytes uint64 `json:"chargedCdnBytes"`
+ 	InstalledLocalCap bool `json:"installedLocalCap"`
+ 	CanServePublic bool `json:"canServePublic"`
+ 	CanStart bool `json:"canStart"`
+ 	CanResume bool `json:"canResume"`
+ 	FinalMeterVerified bool `json:"finalMeterVerified"`
+ 	RefundableBytes uint64 `json:"refundableBytes"`
+ }
+ 
+ func (c *localCapControl) observe(req localCapObserveRequest) (localCapObserveResult,error) {
+ 	var out localCapObserveResult
+ 	if req.SchemaVersion!=1 || req.UserID<=0 ||
+ 		!signedCapHex64.MatchString(req.RuntimeID) ||
+ 		!signedCapHex64.MatchString(req.GrantSHA256) ||
+ 		!signedCapHex64.MatchString(req.Nonce) ||
+ 		req.Email=="" || !signedUserEmail.MatchString(req.Email) ||
+ 		canonicalMeterUser(req.Email)!="xmesh-u"+strconv.FormatInt(req.UserID,10) {
+ 		return out,errors.New("invalid exact scoped cap observation request")
+ 	}
+ 	// Query the process identity independently of the requested runtime.
+ 	actualRuntime,err:=currentRuntimeIdentity()
+ 	if err!=nil || actualRuntime!=req.RuntimeID {
+ 		return out,errors.New("metered Xray process changed")
+ 	}
+ 	gate.Lock()
+ 	defer gate.Unlock()
+ 	if !enabled || !experimentalByteCaps.strict || gate.runtimeID!=actualRuntime ||
+ 		gate.journalDir=="" || gate.meterTails==nil {
+ 		return out,errors.New("metered Xray does not have a strict WAL cap gate")
+ 	}
+ 	identity:="xmesh-u"+strconv.FormatInt(req.UserID,10)
+ 	cap:=experimentalByteCaps.users[identity]
+ 	if cap==nil || cap.runtimeID!=actualRuntime ||
+ 		cap.signedGrant.Kind!=signedCapKind && cap.signedGrant.Kind!=signedCapRenewalKind ||
+ 		cap.signedGrant.NodeID!=c.binding.NodeID ||
+ 		cap.signedGrant.UserID!=req.UserID ||
+ 		cap.signedGrant.ActivationReceiptSHA256!=c.binding.ActivationReceiptSHA256 ||
+ 		cap.signedGrant.RuntimeID!=actualRuntime ||
+ 		cap.signedGrant.ReservationRevision<=0 ||
+ 		hex.EncodeToString(cap.signedGrantDigest[:])!=req.GrantSHA256 {
+ 		return out,errors.New("signed cap digest or enrolled scope mismatched")
+ 	}
+ 	cdn,aliasOK:=cap.aliases[req.Email]
+ 	if !aliasOK || cap.signedGrant.CanStart || cap.signedGrant.CanResume ||
+ 		!cap.signedGrant.CanSpend || cap.signedGrant.FinalMeterVerified ||
+ 		cap.signedGrant.RefundableBytes!=0 {
+ 		return out,errors.New("unassigned alias or unsafe cap scope")
+ 	}
+ 	// A signed cap for the right user is not necessarily still spendable:
+ 	// exhaustion, fencing, tainted raw counters, expiry and clock rollback
+ 	// must all deny this read-only observation.
+ 	now:=experimentalCapClockMs()
+ 	if cap.expired || now<=0 || now<cap.lastSeenMs ||
+ 		now>=cap.validUntilMs || cap.deadline.IsZero() || !time.Now().Before(cap.deadline) ||
+ 		cap.chargedAll>=cap.grantCeiling || cap.chargedAll>=cap.nodeCeiling ||
+ 		(cdn && cap.chargedCDN>=cap.cdnCeiling) {
+ 		return out,errors.New("signed local cap has expired or no available bytes")
+ 	}
+ 	if u:=gate.users[identity];u!=nil &&
+ 		(u.historicDebtUnresolved || u.fenced || u.lateCounterMutation) {
+ 		return out,errors.New("metered Xray has unsettled or fenced user history")
+ 	}
+ 	p:=cap.signedGrant
+ 	return localCapObserveResult{
+ 		SchemaVersion:1,Kind:"xmesh.quota-v2.local-cap-observed",
+ 		Nonce:req.Nonce,NodeID:p.NodeID,UserID:p.UserID,Email:req.Email,
+ 		RuntimeID:actualRuntime,ActivationReceiptSHA256:p.ActivationReceiptSHA256,
+ 		PolicySHA256:p.PolicySHA256,AccountEpoch:p.AccountEpoch,
+ 		MeterEpoch:p.MeterEpoch,ReservationID:p.ReservationID,
+ 		ReservationRevision:p.ReservationRevision,GrantSHA256:req.GrantSHA256,
+ 		ValidUntilMs:p.ValidUntilMs,SharedCeilingBytes:cap.grantCeiling,
+ 		NodeCeilingBytes:cap.nodeCeiling,CdnCeilingBytes:cap.cdnCeiling,
+ 		ChargedBytes:cap.chargedAll,ChargedCdnBytes:cap.chargedCDN,
+ 		InstalledLocalCap:true,
+ 		CanServePublic:false,CanStart:false,CanResume:false,
+ 		FinalMeterVerified:false,RefundableBytes:0,
+ 	},nil
+ }
+ 
+ func (c *localCapControl) serveObserved(w http.ResponseWriter,r *http.Request) {
+ 	if r.Method!=http.MethodPost || r.URL.RawQuery!="" {
+ 		http.Error(w,"not found",http.StatusNotFound)
+ 		return
+ 	}
+ 	if r.Context().Value(capPeerKey{})!=true {
+ 		http.Error(w,"untrusted local metering peer",http.StatusForbidden)
+ 		return
+ 	}
+ 	raw,err:=io.ReadAll(http.MaxBytesReader(w,r.Body,localCapObserveRequestLimit))
+ 	var req localCapObserveRequest
+ 	if err!=nil || localCapJSON(raw,&req)!=nil {
+ 		http.Error(w,"invalid local cap observation request",http.StatusBadRequest)
+ 		return
+ 	}
+ 	result,err:=c.observe(req)
+ 	if err!=nil {
+ 		http.Error(w,"no current matching installed signed cap",http.StatusConflict)
+ 		return
+ 	}
+ 	_ = json.NewEncoder(w).Encode(result)
+ }
