@@ -80,6 +80,32 @@ class LinuxStopOnlyDeadmanTests(unittest.TestCase):
             self.guardian.pulse()
         self.assertIsNotNone(self.child.poll())
 
+    def test_sigstopped_guardian_cannot_fake_live_heartbeat(self):
+        self.guardian = deadman.StopOnlyDeadman(
+            child=self.child, timeout_ms=5_000)
+        self.assertIsNone(self.guardian.pulse())
+        guardian_pid = self.guardian._guardian.pid
+        os.kill(guardian_pid, signal.SIGSTOP)
+        try:
+            started = time.monotonic()
+            with self.assertRaisesRegex(ValueError, "owned child killed"):
+                self.guardian.pulse()
+            self.assertLess(time.monotonic() - started, 2.5)
+            self.assertIsNotNone(self.child.poll())
+        finally:
+            # A frozen guardian cannot reap itself. Release it before the
+            # fixture closes the pipes; its pinned TLS child is already dead.
+            if self.guardian._guardian.poll() is None:
+                os.kill(guardian_pid, signal.SIGCONT)
+
+    def test_each_heartbeat_requires_a_fresh_guardian_ack(self):
+        self.guardian = deadman.StopOnlyDeadman(
+            child=self.child, timeout_ms=5_000)
+        for _ in range(3):
+            self.assertIsNone(self.guardian.pulse())
+        self.assertIsNone(self.child.poll())
+        self.assertIsNone(self.guardian._guardian.poll())
+
     def test_reject_foreign_popen_and_inactive_child(self):
         for invalid in (None, os.getpid(), "not a Popen"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
