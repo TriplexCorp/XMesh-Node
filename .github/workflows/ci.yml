@@ -68,7 +68,7 @@ jobs:
       - run: python3 -m py_compile deploy/xmesh-quota-revocation-marker.py deploy/xmesh-xray-update.py deploy/xmesh-policy-guard.py deploy/xmesh-policy-guard-base.py deploy/xmesh-profile-attest.py deploy/xmesh-hot-user-reconcile.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
       - run: python3 -m py_compile experiments/quota-v2-physical-stop/metered_tcp_egress.py tests/test_quota_v2_metered_tcp_egress.py
-      - run: sudo python3 tests/test_quota_v2_metered_tcp_egress.py -v
+      - run: sudo env PYTHONDONTWRITEBYTECODE=1 python3 tests/test_quota_v2_metered_tcp_egress.py -v
       - run: python3 tests/test_quota_v2_xray_update_gate.py
       - run: python3 deploy/test-xmesh-policy-guard.py
       - run: python3 tests/test_v1_partial_ack_no_refill.py
