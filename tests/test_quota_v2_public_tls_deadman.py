@@ -2,6 +2,7 @@
 """Independent Linux pidfd deadman: real processes, no public listener."""
 import os
 from pathlib import Path
+from unittest import mock
 import select
 import signal
 import subprocess
@@ -25,7 +26,9 @@ def proc_gone_or_zombie(pid):
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
         return stat[stat.rfind(")") + 1:].split()[0] == "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # A process may disappear after /proc lookup but before read_text.
+        # ESRCH means the pidfd guardian successfully stopped it.
         return True
 
 
@@ -43,6 +46,11 @@ class LinuxStopOnlyDeadmanTests(unittest.TestCase):
         if self.child.poll() is None:
             self.child.kill()
         self.child.wait(timeout=5)
+
+    def test_disappearing_proc_stat_is_already_stopped(self):
+        with mock.patch.object(Path, "read_text",
+                               side_effect=ProcessLookupError(3, "No such process")):
+            self.assertTrue(proc_gone_or_zombie(12345))
 
     def test_directly_owned_live_child_can_be_guarded_but_never_authorized(self):
         self.guardian = deadman.StopOnlyDeadman(
@@ -125,7 +133,14 @@ class LinuxStopOnlyDeadmanTests(unittest.TestCase):
                 owner.kill()
             owner.wait(timeout=3)
             if pid is not None and not proc_gone_or_zombie(pid):
-                os.kill(pid, signal.SIGKILL)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if owner.stdout is not None:
+                owner.stdout.close()
+            if owner.stderr is not None:
+                owner.stderr.close()
 
 
 if __name__ == "__main__":
