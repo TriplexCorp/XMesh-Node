@@ -82,6 +82,17 @@ class StopOnlyTests(unittest.TestCase):
             return_value=self.runtime)
         self.identity_mock = self.identity.start()
         self.addCleanup(self.identity.stop)
+        # This file tests lifecycle failure and child termination. The
+        # separate real-Ed25519 roster suite tests the actual CapWatch source.
+        self.cap_watch = mock.Mock(
+            spec=stop.public_tls_cap_watch.SignedCapRosterWatch)
+        self.cap_watch.profile_sha256 = hashlib.sha256(
+            wal_transport.observed.canonical(profile())).hexdigest()
+        self.cap_watch.node = self.node
+        self.cap_watch.activation = self.activation
+        self.cap_watch.runtime_id = self.runtime
+        self.cap_watch.pinned = self.pinned
+        self.cap_watch.check.return_value = None
 
     def stop_child(self):
         if self.child.poll() is None:
@@ -94,6 +105,7 @@ class StopOnlyTests(unittest.TestCase):
             node=self.node, activation=self.activation,
             genesis_sha=self.genesis, runtime_id=self.runtime,
             pinned=self.pinned, runtime_pid=1234,
+            cap_watch=self.cap_watch,
         )
         params.update(changes)
         return stop.StopOnlyTlsMonitor(**params)
@@ -203,6 +215,59 @@ class StopOnlyTests(unittest.TestCase):
                     self.monitor()
             self.assertIsNotNone(self.child.poll())
 
+    def test_missing_or_foreign_watcher_kills_child_before_first_tick(self):
+        for index, changes in enumerate((
+            {"cap_watch": None},
+            {"cap_watch": mock.Mock()},
+            {"profile_sha256": "f" * 64},
+            {"node": self.node + 1},
+            {"runtime_id": "f" * 64},
+            {"pinned": "f" * 64},
+        )):
+            if index:
+                self.respawn_child()
+            if "cap_watch" in changes:
+                altered = changes["cap_watch"]
+            else:
+                altered = mock.Mock(
+                    spec=stop.public_tls_cap_watch.SignedCapRosterWatch)
+                for field in ("profile_sha256", "node", "activation",
+                              "runtime_id", "pinned"):
+                    setattr(altered, field, getattr(self.cap_watch, field))
+                setattr(altered, next(iter(changes)), next(iter(changes.values())))
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                    ValueError, "initial TLS supervision preflight failed"):
+                self.monitor(cap_watch=altered)
+            self.assertIsNotNone(self.child.poll())
+
+    def test_cap_witness_missing_during_startup_kills_child(self):
+        self.cap_watch.check.side_effect = OSError("metered Unix peer unavailable")
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_any_cap_witness_loss_during_poll_kills_owned_child(self):
+        monitor = self.monitor()
+        self.cap_watch.check.side_effect = ValueError("one CDN cap exhausted")
+        self.assert_stopped(monitor)
+        self.assertGreaterEqual(self.cap_watch.check.call_count, 2)
+
+    def test_cap_watcher_cannot_return_positive_authority(self):
+        self.cap_watch.check.return_value = True
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_live_cap_watch_is_checked_at_every_tick(self):
+        monitor = self.monitor()
+        self.tick(wall_ms=300, monotonic_ms=300)
+        self.assertIsNone(monitor.check_stop_only(revoked=False))
+        self.tick(wall_ms=300, monotonic_ms=300)
+        self.assertIsNone(monitor.check_stop_only(revoked=False))
+        self.assertEqual(self.cap_watch.check.call_count, 3)
+
     def test_invalid_initial_pid_and_expired_policy_kill_child(self):
         with self.assertRaisesRegex(
                 ValueError, "initial TLS supervision preflight failed"):
@@ -221,6 +286,7 @@ class StopOnlyTests(unittest.TestCase):
         self.assertIsNone(self.child.poll())
         self.assertEqual(self.identity_mock.call_count, 1)
         self.assertEqual(self.certificate_mock.call_count, 1)
+        self.cap_watch.check.assert_called_once_with()
 
 
 if __name__ == "__main__":
