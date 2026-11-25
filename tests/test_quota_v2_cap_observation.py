@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -218,6 +219,36 @@ class LocalCapObservationTests(unittest.TestCase):
                                  hashlib.sha256(raw).hexdigest())
                 self.assertEqual(result["chargedBytes"], 15)
                 self.assertIs(result["canServePublic"], False)
+
+    def test_same_uid_socket_with_foreign_live_pid_is_denied(self):
+        raw, _, scope = fixture()
+        with tempfile.TemporaryDirectory(prefix="xmesh-observe-pid-") as tmp:
+            root = Path(tmp)
+            os.chmod(root, 0o700)
+            endpoint = root / "foreign.sock"
+            with socket.socket(socket.AF_UNIX) as listener:
+                # The kernel reports the creating process for SO_PEERCRED.
+                # A different, still live process has the same UID but MUST
+                # not be mistaken for the independently measured Xray PID.
+                listener.bind(str(endpoint))
+                os.chmod(endpoint, 0o600)
+                listener.listen(1)
+                child = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(20)"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    with mock.patch.object(
+                        observed.wal_transport.runtime_identity,
+                        "trusted_runtime_identity", return_value=RUNTIME
+                    ):
+                        with self.assertRaisesRegex(
+                                ValueError, "peer is not the measured Xray"):
+                            observed.observe_installed_cap_in_xray(
+                                endpoint, child.pid, RUNTIME, NODE,
+                                ACTIVATION, raw, scope, MAIN)
+                finally:
+                    child.kill()
+                    child.wait(timeout=5)
 
     def test_foreign_pid_and_public_socket_path_are_rejected(self):
         raw, _, scope = fixture()
