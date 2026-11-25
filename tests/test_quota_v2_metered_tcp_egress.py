@@ -17,6 +17,29 @@ import metered_tcp_egress as egress
 
 
 class TargetTests(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, "root-owned socket")
+    def test_installed_egress_socket_requires_exact_private_owner_and_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            path = root / "egress.sock"
+            with mock.patch.object(egress, "BRIDGE_DIR", root), \
+                 mock.patch.object(egress, "SOCKET", path):
+                with self.assertRaises(FileNotFoundError):
+                    egress.require_socket()
+                with socket.socket(socket.AF_UNIX) as listener:
+                    listener.bind(str(path))
+                    path.chmod(0o600)
+                    egress.require_socket()
+                    path.chmod(0o666)
+                    with self.assertRaises(ValueError):
+                        egress.require_socket()
+                    path.chmod(0o600)
+                    root.chmod(0o755)
+                    with self.assertRaises(ValueError):
+                        egress.require_socket()
+                    root.chmod(0o700)
+
     def test_public_destinations_and_dns_are_explicit(self):
         self.assertEqual(egress.parse_target(b"EXAMPLE.COM", 443),
                          ("example.com", 443))

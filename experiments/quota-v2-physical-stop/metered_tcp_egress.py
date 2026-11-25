@@ -193,6 +193,15 @@ async def bridge(reader, writer, capacity):
         await writer.wait_closed()
 
 
+def require_socket():
+    """Only the installed root-owned Unix socket may be mounted into Xray."""
+    private_directory(BRIDGE_DIR)
+    info = SOCKET.lstat()
+    if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0
+            or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+        raise ValueError("untrusted root-only metered egress listener")
+
+
 def private_directory(path):
     info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
