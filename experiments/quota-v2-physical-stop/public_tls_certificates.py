@@ -10,11 +10,13 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import time
 
 import public_tls_frontend as tls
 
 LIVE_ROOT = Path("/etc/letsencrypt/live")
 ARCHIVE_ROOT = Path("/etc/letsencrypt/archive")
+SYSTEM_CA_FILE = Path("/etc/ssl/certs/ca-certificates.crt")
 MAX_CERT_BYTES = 1024 * 1024
 MAX_KEY_BYTES = 64 * 1024
 RENEWAL_MARGIN_SECONDS = 24 * 3600
@@ -67,7 +69,9 @@ def verify_certificate_lineage(config):
 
     The host's private key must match its signed certificate public key,
     the certificate must have an exact (not wildcard) DNS SAN and remain
-    valid throughout a 24h renewal safety window. Recheck before any new
+    valid throughout a 24h renewal safety window. Its full chain must
+    verify against the host root CA trust bundle as a TLS server, even at
+    the end of that window. Recheck before any new
     ingress process, after each renewal and during future active supervision.
     """
     if os.geteuid() != 0 or not isinstance(config, dict):
@@ -106,6 +110,22 @@ def verify_certificate_lineage(config):
         if (cert_record.get("certificateFile") != expected + "/fullchain.pem"
                 or cert_record.get("keyFile") != expected + "/privkey.pem"):
             raise ValueError("TLS config key paths diverged from signed hostname")
+        # Certbot-style filesystem names and an exact SAN alone are not
+        # proof of a trusted, correctly constrained certificate. Verify the
+        # complete chain against the installed OS root trust bundle at the
+        # future renewal-margin timestamp, including intermediate expiry,
+        # SSL server EKU and the exact DNS hostname. Self-signed/unknown CA
+        # lineages must never start a public listener.
+        ca = SYSTEM_CA_FILE
+        ca_info = ca.stat(follow_symlinks=False)
+        if (not stat.S_ISREG(ca_info.st_mode) or ca_info.st_uid != 0
+                or ca_info.st_mode & 0o022
+                or not 0 < ca_info.st_size <= MAX_CERT_BYTES):
+            raise ValueError("unsafe system TLS root trust bundle")
+        verify_at = int(time.time()) + RENEWAL_MARGIN_SECONDS
+        _openssl("verify", "-purpose", "sslserver",
+                 "-verify_hostname", name, "-attime", str(verify_at),
+                 "-CAfile", ca, "-untrusted", cert, cert)
         _openssl("x509", "-in", cert, "-noout", "-checkend", str(RENEWAL_MARGIN_SECONDS))
         alt = _openssl("x509", "-in", cert, "-noout", "-ext", "subjectAltName").decode("ascii")
         san = re.findall(r"(?<![A-Za-z])DNS:([a-zA-Z0-9*.-]+)", alt)
