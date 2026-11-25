@@ -16,6 +16,7 @@ HERE = Path(__file__).resolve().parents[1] / "experiments/quota-v2-physical-stop
 sys.path.insert(0, str(HERE))
 import public_tls_frontend as tls
 import public_tls_stop_monitor as stop
+import public_tls_spawn_preflight as prespawn
 import quarantine_policy
 import wal_transport
 from test_quota_v2_public_tls_frontend import profile, bindings
@@ -423,6 +424,78 @@ class StopOnlyTests(unittest.TestCase):
         self.assertEqual(monitor._mono_ns, self.mono_ns)
         self.assertIsNone(monitor.check_stop_only())
         self.assertIsNone(self.child.poll())
+
+    def pre_spawn_check(self, **changes):
+        params = dict(
+            profile=profile(), authority=self.signed,
+            node=self.node, activation=self.activation,
+            genesis_sha=self.genesis, runtime_id=self.runtime,
+            pinned=self.pinned, runtime_pid=1234,
+            cap_watch=self.cap_watch, revocation_watch=self.revocation_watch,
+        )
+        params.update(changes)
+        return prespawn.check_before_spawn(**params)
+
+    def test_pre_spawn_checks_all_live_proofs_without_starting_or_authorizing(self):
+        self.assertIsNone(self.pre_spawn_check())
+        self.assertIsNone(self.child.poll())
+        self.identity_mock.assert_called_once_with(1234)
+        self.certificate_mock.assert_called_once()
+        self.cap_watch.check.assert_called_once_with()
+        self.revocation_watch.check.assert_called_once_with()
+        self.revocation_watch.ensure_fresh.assert_called_once_with()
+
+    def test_pre_spawn_rejects_missing_or_foreign_signed_roster(self):
+        for bad in (
+            {"runtime_pid": 0},
+            {"genesis_sha": "f" * 64},
+            {"activation": "f" * 64},
+            {"pinned": "f" * 64},
+            {"cap_watch": None},
+            {"revocation_watch": None},
+            {"authority": self.signed.replace(b"Ed25519", b"Ed25719")},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.pre_spawn_check(**bad)
+        self.assertIsNone(self.child.poll())
+
+    def test_pre_spawn_never_turns_witness_return_values_into_permission(self):
+        self.cap_watch.check.return_value = True
+        with self.assertRaisesRegex(ValueError, "cap watcher cannot issue"):
+            self.pre_spawn_check()
+        self.cap_watch.check.return_value = None
+        self.revocation_watch.check.return_value = True
+        with self.assertRaisesRegex(ValueError, "revocation watcher cannot issue"):
+            self.pre_spawn_check()
+        self.revocation_watch.check.return_value = None
+        self.revocation_watch.ensure_fresh.return_value = True
+        with self.assertRaisesRegex(ValueError, "revocation witness"):
+            self.pre_spawn_check()
+        self.assertIsNone(self.child.poll())
+
+    def test_pre_spawn_expiry_during_cap_probe_denied(self):
+        def delayed_cap():
+            self.tick(wall_ms=60_001, monotonic_ms=60_001)
+            return None
+        self.cap_watch.check.side_effect = delayed_cap
+        with self.assertRaisesRegex(ValueError, "pre-spawn proofs expired"):
+            self.pre_spawn_check()
+
+    def test_pre_spawn_stalled_probe_and_clock_rollback_denied(self):
+        def stalled_cap():
+            self.tick(wall_ms=8001, monotonic_ms=8001)
+            return None
+        self.cap_watch.check.side_effect = stalled_cap
+        with self.assertRaisesRegex(ValueError, "pre-spawn proofs expired"):
+            self.pre_spawn_check()
+        self.cap_watch.check.side_effect = None
+        self.wall_ns, self.mono_ns = time.time_ns(), time.monotonic_ns()
+        def rollback():
+            self.tick(wall_ms=-5, monotonic_ms=5)
+            return None
+        self.revocation_watch.check.side_effect = rollback
+        with self.assertRaisesRegex(ValueError, "pre-spawn proofs expired"):
+            self.pre_spawn_check()
 
     def test_good_startup_checks_certificate_and_meter_before_first_poll(self):
         monitor = self.monitor()
