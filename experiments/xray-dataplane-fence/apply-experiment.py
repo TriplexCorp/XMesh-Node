@@ -127,6 +127,10 @@ def run(root: Path):
         shutil.copyfile(NODE_ROOT / ("experiments/xray-dataplane-fence/" + filename + ".txt"),
                         shared / filename)
 
+    for filename in ("experimental_egress.go", "experimental_egress_test.go"):
+        shutil.copyfile(NODE_ROOT / ("experiments/xray-dataplane-fence/" + filename + ".txt"),
+                        shared / filename)
+
     quota_errors = root / "common/xmeshquota"
     quota_errors.mkdir()
     shutil.copyfile(
@@ -167,6 +171,23 @@ def run(root: Path):
     inbound_source = replace_once(inbound_source, "\n\tif pl != nil {",
                                   "\n\tif private == \"\" && pl != nil {")
     inbound_file.write_text(inbound_source)
+    dialer_file = root / "transport/internet/dialer.go"
+    dialer_source = dialer_file.read_text()
+    dialer_source = replace_once(
+        dialer_source, '"github.com/xtls/xray-core/common"',
+        '"github.com/xtls/xray-core/app/xmeshdrain"\n    "github.com/xtls/xray-core/common"')
+    dialer_source = replace_once(
+        dialer_source,
+        "func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig) (net.Conn, error) {",
+        """func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig) (net.Conn, error) {
+    // Production meter has no network namespace. No system DNS, raw socket,
+    // dialerProxy, UDP or unaccounted fallback may bypass the private host
+    // bridge; the metered inbound must have an authenticated signed user.
+    if xmeshdrain.IsProductionMeter() {
+        return xmeshdrain.DialMeterEgress(ctx, dest)
+    }""")
+    dialer_file.write_text(dialer_source)
+
     outbound_file = root / "proxy/vless/outbound/outbound.go"
     outbound_source = replace_once(outbound_file.read_text(), '"github.com/xtls/xray-core/app/reverse"',
                                    '"github.com/xtls/xray-core/app/reverse"\n    "github.com/xtls/xray-core/app/xmeshdrain"')
@@ -794,7 +815,8 @@ type Writer interface {""",
 
     subprocess.run(
         ["gofmt", "-w", str(inbound_file), str(outbound_file), str(shared / "experimental_ingress.go"), str(shared / "xmeshdrain.go"),
-         str(shared / "experimental_cap_socket.go"),
+         str(shared / "experimental_egress.go"), str(shared / "experimental_egress_test.go"), str(dialer_file),
+          str(shared / "experimental_cap_socket.go"),
          str(shared / "experimental_zero_meter_preflight.go"),
          str(shared / "experimental_zero_meter_preflight_test.go"),
          str(shared / "observed_checkpoint.go"),

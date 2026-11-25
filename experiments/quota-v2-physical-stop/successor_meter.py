@@ -80,6 +80,7 @@ def _verify_fresh_container_env(docker):
     }
     if installed:
         required["XMESH_QUOTA_V2_RUNTIME_ROLE"] = "meter"
+        required["XMESH_QUOTA_EGRESS_SOCKET"] = "/run/xmesh-quota-egress/egress.sock"
         required["XMESH_QUOTA_PRIVATE_VLESS"] = "1"
     else:
         required["GITHUB_ACTIONS" if host_ci else "XMESH_QUOTA_V2_STAGING_RUNTIME"] = (
@@ -542,9 +543,13 @@ def start_generation(state, node, user, old, old_container, executable, config):
                 "-e", f"XMESH_EXPERIMENTAL_OBSERVED_DIR={dest}/ledger",
                 "-e", f"XMESH_EXPERIMENTAL_SCOPED_INBOUNDS={','.join(allowed)}"]
         if installed:
+            import metered_tcp_egress as egress
             from qualified_runtime_image import QUALIFICATION
+            egress.require_socket()
             args.extend(["-e", "XMESH_QUOTA_V2_RUNTIME_ROLE=meter",
-                         "-v", f"{QUALIFICATION}:{QUALIFICATION}:ro"])
+                         "-e", f"XMESH_QUOTA_EGRESS_SOCKET={egress.SOCKET}",
+                         "-v", f"{QUALIFICATION}:{QUALIFICATION}:ro",
+                         "-v", f"{egress.BRIDGE_DIR}:{egress.BRIDGE_DIR}:ro"])
         elif os.environ.get("GITHUB_ACTIONS") == "true":
             args.extend(["-e", "GITHUB_ACTIONS=true"])
         else:

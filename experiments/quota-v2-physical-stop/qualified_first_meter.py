@@ -7,6 +7,7 @@ import stat
 import time
 
 import qualified_runtime_image as release
+import metered_tcp_egress as egress
 import quarantine_policy as quarantine
 import wal_transport as wal
 
@@ -42,6 +43,7 @@ def launch_meter(image_id, config, node, activation, key):
     tags = [inbound["tag"] for inbound in config["inbounds"]]
     if not 1 <= len(tags) <= 2 or len(set(tags)) != len(tags) or set(tags) - {"vless-main", "vless-cdn"}:
         raise ValueError("unsupported signed first meter scope")
+    egress.require_socket()
     runtime = ROOT / "runtime"
     ledger = runtime / "ledger"
     for directory in (ROOT, runtime, ledger):
@@ -59,9 +61,11 @@ def launch_meter(image_id, config, node, activation, key):
                    "--network=none", "--restart=no", "--read-only", "--cap-drop=ALL",
                    "--security-opt=no-new-privileges", "--user=0:0",
                    "-v", f"{QUALIFICATION}:{QUALIFICATION}:ro",
+                   "-v", f"{egress.BRIDGE_DIR}:{egress.BRIDGE_DIR}:ro",
                    "-v", f"{config_path}:/etc/xray/config.json:ro",
                    "-v", f"{runtime}:{RUNTIME}:rw",
                    "-e", "XMESH_QUOTA_V2_RUNTIME_ROLE=meter",
+                   "-e", f"XMESH_QUOTA_EGRESS_SOCKET={egress.SOCKET}",
                    "-e", "XMESH_QUOTA_PRIVATE_VLESS=1",
                    "-e", "XMESH_EXPERIMENTAL_DRAIN=1",
                    "-e", "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS=" + ",".join(tags),

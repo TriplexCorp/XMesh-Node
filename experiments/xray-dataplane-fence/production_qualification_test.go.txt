@@ -26,6 +26,7 @@ func TestProductionRoleCannotFallBackToStaging(t *testing.T) {
         "XMESH_EXPERIMENTAL_OBSERVED_DIR":"/run/ledger",
         "XMESH_EXPERIMENTAL_DRAIN_SOCKET":"/run/drain.sock",
         "XMESH_EXPERIMENTAL_SCOPED_INBOUNDS":"vless-main,vless-cdn",
+        "XMESH_QUOTA_EGRESS_SOCKET":meteredEgressSocket,
     }
     get := func(k string) string { return env[k] }
     if err:=validateProductionRole("meter",get); err!=nil {t.Fatal(err)}
@@ -34,7 +35,7 @@ func TestProductionRoleCannotFallBackToStaging(t *testing.T) {
         if validateProductionRole("meter",get)==nil {t.Fatalf("accepted staging flag %s",flag)}
         delete(env,flag)
     }
-    for _, flag := range []string{"XMESH_EXPERIMENTAL_DRAIN","XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING","XMESH_QUOTA_PRIVATE_VLESS","XMESH_EXPERIMENTAL_OBSERVED_DIR","XMESH_EXPERIMENTAL_DRAIN_SOCKET","XMESH_EXPERIMENTAL_SCOPED_INBOUNDS"} {
+    for _, flag := range []string{"XMESH_EXPERIMENTAL_DRAIN","XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING","XMESH_QUOTA_PRIVATE_VLESS","XMESH_EXPERIMENTAL_OBSERVED_DIR","XMESH_EXPERIMENTAL_DRAIN_SOCKET","XMESH_EXPERIMENTAL_SCOPED_INBOUNDS","XMESH_QUOTA_EGRESS_SOCKET"} {
         value:=env[flag];delete(env,flag)
         if validateProductionRole("meter",get)==nil {t.Fatalf("accepted missing meter setting %s",flag)}
         env[flag]=value

@@ -64,9 +64,11 @@ jobs:
           go-version-file: go.mod
       - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
       - run: test "$(cat VERSION)" = "6.0.0"
-      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.31"
+      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.32"
       - run: python3 -m py_compile deploy/xmesh-quota-revocation-marker.py deploy/xmesh-xray-update.py deploy/xmesh-policy-guard.py deploy/xmesh-policy-guard-base.py deploy/xmesh-profile-attest.py deploy/xmesh-hot-user-reconcile.py deploy/xmesh-tls-provision.py
       - run: python3 tests/test_tls_provision.py
+      - run: python3 -m py_compile experiments/quota-v2-physical-stop/metered_tcp_egress.py tests/test_quota_v2_metered_tcp_egress.py
+      - run: sudo env PYTHONDONTWRITEBYTECODE=1 python3 tests/test_quota_v2_metered_tcp_egress.py -v
       - run: python3 tests/test_quota_v2_xray_update_gate.py
       - run: python3 deploy/test-xmesh-policy-guard.py
       - run: python3 tests/test_v1_partial_ack_no_refill.py
@@ -76,7 +78,7 @@ jobs:
       - name: Per-user VLESS ingress rejects stale routes and preserves isolation
         run: sudo env XMESH_REQUIRE_REAL_UNIX=1 python3 tests/test_quota_v2_vless_ingress.py -v
       - run: sudo python3 tests/test_quota_v2_charge_worker.py
-      - run: bash -n bootstrap.sh deploy/install-v6-strict-operational-agents.sh
+      - run: bash -n bootstrap.sh deploy/install-v6-strict-operational-agents.sh deploy/install-metered-services.sh
       - run: python3 deploy/test-xmesh-policy-independent-credentials.py
       - run: python3 tests/test_hot_user_reconcile.py
       - run: python3 tests/test_user_meter.py

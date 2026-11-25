@@ -83,6 +83,8 @@ jobs:
           import hashlib
           import json
           import os
+          import subprocess
+          import time
           from pathlib import Path
           import sys
           sys.path.insert(0, str(Path(sys.argv[1]) / "experiments/quota-v2-physical-stop"))
@@ -94,7 +96,28 @@ jobs:
                                    "protocol": "vless", "port": 28401,
                                    "settings": {"decryption": "none", "clients": [{"id": "00000000-0000-4000-8000-000000000001", "email": "xmesh-u1--vless-main"}]}}],
                      "outbounds": [{"protocol": "blackhole"}]}
-          meter.launch_meter(image["imageId"], profile, 1, "a" * 64, "b" * 64)
+          # Disposable runner-only host listener. This exercises the exact
+          # root-owned Unix mount without authorizing public traffic.
+          egress_dir = Path("/run/xmesh-quota-egress")
+          egress_dir.mkdir(mode=0o700, exist_ok=True)
+          egress_dir.chmod(0o700)
+          daemon = subprocess.Popen(
+              [sys.executable, str(Path(sys.argv[1]) / "experiments/quota-v2-physical-stop/metered_tcp_egress.py")],
+              env=dict(os.environ, XMESH_QUOTA_V2_AGENT_MODE="installed"),
+          )
+          try:
+              for _ in range(80):
+                  if (egress_dir / "egress.sock").is_socket():
+                      break
+                  if daemon.poll() is not None:
+                      raise AssertionError("private host egress daemon failed to start")
+                  time.sleep(0.1)
+              else:
+                  raise AssertionError("root-only egress socket unavailable")
+              meter.launch_meter(image["imageId"], profile, 1, "a" * 64, "b" * 64)
+          finally:
+              daemon.terminate()
+              daemon.wait(timeout=15)
           config = hashlib.sha256(meter.wal.observed.canonical(profile)).hexdigest()
           os.environ["XMESH_QUOTA_V2_AGENT_MODE"] = "installed"
           try:

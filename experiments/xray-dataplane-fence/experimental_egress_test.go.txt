@@ -1,0 +1,44 @@
+package xmeshdrain
+
+import (
+    "encoding/binary"
+    "testing"
+
+    xnet "github.com/xtls/xray-core/common/net"
+)
+
+func TestMeteredTCPBridgeWireAndFailClosed(t *testing.T) {
+    good:=xnet.TCPDestination(xnet.DomainAddress("example.com"),443)
+    frame,err:=meterEgressRequest(good)
+    if err!=nil {t.Fatal(err)}
+    if string(frame[:4])!="XME1" || binary.BigEndian.Uint16(frame[4:6])!=11 ||
+        binary.BigEndian.Uint16(frame[6:8])!=443 || string(frame[8:])!="example.com" {
+        t.Fatal("unexpected metered egress wire request")
+    }
+    for _,bad:=range []xnet.Destination{
+        xnet.UDPDestination(xnet.DomainAddress("example.com"),53),
+        xnet.TCPDestination(xnet.DomainAddress("localhost"),443),
+        xnet.TCPDestination(xnet.DomainAddress("example.com"),0),
+        xnet.TCPDestination(xnet.DomainAddress("one/two"),443),
+    } {
+        if _,err:=meterEgressRequest(bad);err==nil {t.Fatalf("unsafe meter egress accepted: %v",bad)}
+    }
+    raw:=make([]byte,20)
+    raw[0],raw[1]=0,4
+    copy(raw[2:6],[]byte{93,184,215,14})
+    binary.BigEndian.PutUint16(raw[18:],443)
+    addr,err:=meteredEgressReply(raw)
+    if err!=nil || addr.Port!=443 || addr.IP.String()!="93.184.215.14" {t.Fatalf("invalid address: %v %v",addr,err)}
+    for _,mutate:=range []func([]byte){
+        func(b []byte){b[0]=1},
+        func(b []byte){b[1]=9},
+        func(b []byte){b[6]=1},
+        func(b []byte){b[19]=0;b[18]=0},
+        func(b []byte){b[2]=0;b[3]=0;b[4]=0;b[5]=0},
+    } {
+        copyBytes:=append([]byte(nil),raw...)
+        mutate(copyBytes)
+        if _,err:=meteredEgressReply(copyBytes);err==nil {t.Fatal("accepted altered outbound bridge response")}
+    }
+    if _,err:=meteredEgressReply(raw[:19]);err==nil {t.Fatal("accepted truncated peer response")}
+}

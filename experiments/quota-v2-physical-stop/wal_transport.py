@@ -267,6 +267,7 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
     required_mounts = {journal_dest, "/etc/xray/config.json"}
     image_volumes = {"/usr/local/etc/xray", "/var/log/xray"}
     qualification = "/var/lib/xmesh-metered-xray"
+    egress_dir = "/run/xmesh-quota-egress"
     qualified = qualification in mounts_by_dest
     from qualified_runtime_image import installed_worker
     if installed_worker() and not qualified:
@@ -278,9 +279,13 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
         environment = inspect.get("Config", {}).get("Env")
         if (pins is None or pins[0] != record["artifactSha256"]
                 or journal_dest != journal.RUNTIME_DEST
-                or set(mounts_by_dest) != required_mounts | {qualification}
+                or set(mounts_by_dest) != required_mounts | {qualification, egress_dir}
                 or mount.get("Type") != "bind" or mount.get("RW") is not False
                 or mount.get("Source") != qualification
+                or egress_dir not in mounts_by_dest
+                or mounts_by_dest[egress_dir].get("Type") != "bind"
+                or mounts_by_dest[egress_dir].get("RW") is not False
+                or mounts_by_dest[egress_dir].get("Source") != egress_dir
                 or not isinstance(environment, list)
                 or [v for v in environment if v.startswith("XMESH_QUOTA_V2_RUNTIME_ROLE=")]
                    != ["XMESH_QUOTA_V2_RUNTIME_ROLE=meter"]):
@@ -289,7 +294,7 @@ def _measure_quarantined_runtime(pins=None, container_name="xmesh-managed-xray")
         isinstance(mounts, list) and 2 <= len(mounts) <= 4 and
         len(mounts_by_dest) == len(mounts) and
         required_mounts <= mounts_by_dest.keys() and
-        set(mounts_by_dest) <= required_mounts | image_volumes | {"/etc/xmesh-quota-v2-staging", qualification} and
+        set(mounts_by_dest) <= required_mounts | image_volumes | {"/etc/xmesh-quota-v2-staging", qualification, egress_dir} and
         ("/etc/xmesh-quota-v2-staging" not in mounts_by_dest or
          mounts_by_dest["/etc/xmesh-quota-v2-staging"].get("Source") == "/etc/xmesh-quota-v2-staging" and
          mounts_by_dest["/etc/xmesh-quota-v2-staging"].get("Type") == "bind" and
