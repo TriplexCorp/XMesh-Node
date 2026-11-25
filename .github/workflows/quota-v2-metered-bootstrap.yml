@@ -31,9 +31,9 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           target=/usr/local/libexec/xmesh-metered-xray
-          nexus=5ee2543bc0f1a2a14d44d69ad3c3fad5fb40ebdb
+          nexus=c86236175ed507a0c4c78d8c7dfdc9f217202af3
           test ! -e "$target"
-          approved_tree=27b8535d80514d6c9775df46ffb286cbf7884a9f
+          approved_tree=6320eade435fb941fe53048c7259bf75c2fe788e
           if [[ "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" != "$approved_tree" ]]; then
             # A new patch has no existing release approval. Prove the
             # current installer refuses it before exercising the approved
@@ -44,7 +44,7 @@ jobs:
             fi
             test ! -e "$target"
             sudo test ! -e /var/lib/xmesh-metered-xray
-            approved_node=efca0dea82cc9ac347feb94790c83b82174a70e3
+            approved_node=15ecd5b63ea63125f2dd119c3e905ff57414fe8e
             git fetch --no-tags --depth=1 origin "$approved_node"
             git worktree add --detach "$RUNNER_TEMP/approved-metered-node" "$approved_node"
             cd "$RUNNER_TEMP/approved-metered-node"
@@ -58,7 +58,7 @@ jobs:
           else
             [[ "$?" == 2 ]]
           fi
-          printf '%s  %s\n' 28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11 "$target" | sha256sum --check
+          printf '%s  %s\n' a6c4e6bb68cf88e38f85873d3adf8b68b49c79c125a79e8361d67f3ecfa22007 "$target" | sha256sum --check
           qualification=/var/lib/xmesh-metered-xray/identity
           [[ "$(sudo stat -c '%u:%a:%h' "$qualification")" == 0:600:1 ]]
           [[ "$(sudo stat -c '%u:%a' "$(dirname "$qualification")")" == 0:700 ]]
@@ -66,7 +66,7 @@ jobs:
             echo 'Unprivileged runner can read the private qualification record.' >&2
             exit 1
           fi
-          sudo grep -Fxq "artifactSha256=28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11" "$qualification"
+          sudo grep -Fxq "artifactSha256=a6c4e6bb68cf88e38f85873d3adf8b68b49c79c125a79e8361d67f3ecfa22007" "$qualification"
           sudo mv "$target" "$target.saved"
           if sudo bash install.sh; then
             echo 'Legacy installation accepted after metered executable loss.' >&2
@@ -77,7 +77,7 @@ jobs:
           sudo mv "$target.saved" "$target"
           sudo python3 "$GITHUB_WORKSPACE"/tests/test_quota_v2_qualified_runtime_image.py
           report="$(sudo python3 "$GITHUB_WORKSPACE"/experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
-          IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="28117fb4b4a749dab7c264d27b608cba0a8865ded1bb4766d9c4d5434a1e4d11"; assert r["productionActivationAuthorized"] is False'
+          IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="a6c4e6bb68cf88e38f85873d3adf8b68b49c79c125a79e8361d67f3ecfa22007"; assert r["productionActivationAuthorized"] is False'
           test -z "$(sudo docker ps -q --filter ancestor="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["imageId"])' "$report")")"
           sudo python3 - "$GITHUB_WORKSPACE" "$report" <<'PYTHON'
           import hashlib
