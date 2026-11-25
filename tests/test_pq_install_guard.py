@@ -206,8 +206,8 @@ exit 77
                         source.index('systemctl daemon-reload'))
         self.assertLess(source.index('systemctl enable xmesh-pq-activation-recovery.service'),
                         source.index('systemctl start xmesh-node-metrics.service'))
-        # All dependencies are opt-in to reviewed 6.0.29, not 6.0.24.
-        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.33 ]]; then', source)
+        # Reboot recovery is mandatory for the current signed 6.0.35 product, not only the historical 6.0.33.
+        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.35 ]]; then', source)
         self.assertIn('WAL staging requires a fresh test node', source)
 
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
