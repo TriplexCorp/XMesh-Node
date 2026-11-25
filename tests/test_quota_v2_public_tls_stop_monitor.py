@@ -380,6 +380,50 @@ class StopOnlyTests(unittest.TestCase):
             self.monitor()
         self.assertIsNotNone(self.child.poll())
 
+    def test_signed_authority_expiring_during_initial_probe_kills_child(self):
+        def exhaust_policy():
+            self.tick(wall_ms=60_001, monotonic_ms=60_001)
+            return None
+        self.cap_watch.check.side_effect = exhaust_policy
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+        self.revocation_watch.check.assert_called_once_with()
+        self.revocation_watch.ensure_fresh.assert_called_once_with()
+
+    def test_startup_probe_over_deadman_gap_must_not_send_heartbeat(self):
+        def slow_probe():
+            self.tick(wall_ms=10_050, monotonic_ms=10_050)
+            return None
+        self.cap_watch.check.side_effect = slow_probe
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_clock_rollback_during_initial_revocation_probe_kills_child(self):
+        def rewind_wall():
+            self.tick(wall_ms=-1, monotonic_ms=1)
+            return None
+        self.revocation_watch.check.side_effect = rewind_wall
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_initial_preflight_anchor_moves_to_verified_end_of_probes(self):
+        def probe():
+            self.tick(wall_ms=2500, monotonic_ms=2500)
+            return None
+        self.cap_watch.check.side_effect = probe
+        monitor = self.monitor()
+        self.assertFalse(monitor.stopped)
+        self.assertEqual(monitor._wall_ms, self.wall_ns // 1_000_000)
+        self.assertEqual(monitor._mono_ns, self.mono_ns)
+        self.assertIsNone(monitor.check_stop_only())
+        self.assertIsNone(self.child.poll())
+
     def test_good_startup_checks_certificate_and_meter_before_first_poll(self):
         monitor = self.monitor()
         self.assertFalse(monitor.stopped)

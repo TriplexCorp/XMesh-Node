@@ -108,6 +108,23 @@ class StopOnlyTlsMonitor:
                 raise ValueError("revocation watcher attempted to issue authorization")
             if self._revocation_watch.ensure_fresh() is not None:
                 raise ValueError("revocation watcher attempted to issue authorization")
+            # The startup checks themselves consume time. Never signal the
+            # independent guardian after expiry, a missed 10s deadline or
+            # a wall/monotonic divergence, even if each individual witness
+            # returned successfully. Re-anchor the first periodic tick only
+            # after this complete check; a failed preflight kills the child.
+            checked_wall_ms = time.time_ns() // 1_000_000
+            checked_mono_ns = time.monotonic_ns()
+            if (checked_wall_ms < self._wall_ms
+                    or checked_mono_ns < self._mono_ns
+                    or checked_wall_ms >= self._expires_ms
+                    or checked_mono_ns >= self._deadline_ns
+                    or checked_mono_ns - self._mono_ns >= MAX_CHECK_GAP_NS
+                    or abs((checked_wall_ms - self._wall_ms) * 1_000_000
+                           - (checked_mono_ns - self._mono_ns))
+                    > MAX_DIVERGENCE_NS):
+                raise ValueError("TLS startup evidence expired or clock changed")
+            self._wall_ms, self._mono_ns = checked_wall_ms, checked_mono_ns
             # A heartbeat is a report that every independent cryptographic
             # and measured Xray check just succeeded. It is NEVER permission
             # for the guardian to open or continue traffic on its own.
