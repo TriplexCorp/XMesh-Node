@@ -273,6 +273,16 @@ CAP_OBSERVE_SCOPE = frozenset({
     "userId", "policySha256", "accountEpoch", "meterEpoch", "reservationId",
     "revision", "nonce", "aliases",
 })
+CAP_OBSERVE_GRANT_KEYS = frozenset({
+    "schemaVersion", "kind", "nodeId", "userId",
+    "activationReceiptSha256", "runtimeId", "policySha256",
+    "accountEpoch", "meterEpoch", "reservationId", "reservationRevision",
+    "nonce", "inventoryTailDigest", "witnessedWalBytes",
+    "witnessedCdnBytes", "sharedCeilingBytes", "nodeCeilingBytes",
+    "cdnCeilingBytes", "aliasScopes", "issuedAtMs", "installBeforeMs",
+    "validUntilMs", "canSpend", "canStart", "canResume",
+    "finalMeterVerified", "refundableBytes",
+})
 
 
 def _observed_cap_request(runtime, node, activation, signed_grant, scope, email, nonce):
@@ -309,7 +319,9 @@ def _observed_cap_request(runtime, node, activation, signed_grant, scope, email,
         "canSpend": True, "canStart": False, "canResume": False,
         "finalMeterVerified": False, "refundableBytes": 0,
     }
-    if (p.get("schemaVersion") != 1
+    if (set(p) != CAP_OBSERVE_GRANT_KEYS
+            or type(p.get("schemaVersion")) is not int
+            or p["schemaVersion"] != 1
             or p.get("kind") not in (
                 "xmesh.quota-v2.xray-cap-admission",
                 "xmesh.quota-v2.xray-cap-renewal")
