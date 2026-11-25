@@ -1068,7 +1068,8 @@ func allowedProductTunnelPath(path string) bool {
 		"/api/v1/node/quota-v2/wal",
 		"/api/v1/node/quota-v2/policy-pin",
 		"/api/v1/node/quota-v2/genesis-reservation",
-		"/api/v1/node/quota-v2/genesis-cap-delivery":
+		"/api/v1/node/quota-v2/genesis-cap-delivery",
+		"/api/v1/node/quota-v2/public-tls-preflight":
 		return true
 	default:
 		return false
