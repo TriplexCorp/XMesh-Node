@@ -105,15 +105,15 @@ WAL_AUTO_RENEW="${XMESH_QUOTA_V2_AUTO_RENEW_STAGING:-0}"
 if [[ "$WAL_AUTO_RENEW" != 0 && "$WAL_AUTO_RENEW" != 1 ]];then
   echo "Invalid quota auto renewal staging flag" >&2;exit 2
 fi
-if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.32 ) ]];then
-  echo "Quota auto renewal requires the explicit control-v6.0.32 WAL staging Agent." >&2;exit 2
+if [[ "$WAL_AUTO_RENEW" == 1 && ( "$WAL_STAGE_AGENT" != 1 || "$AGENT_VERSION" != control-v6.0.33 ) ]];then
+  echo "Quota auto renewal requires the explicit control-v6.0.33 WAL staging Agent." >&2;exit 2
 fi
-if [[ "$AGENT_VERSION" == control-v6.0.32 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
-  echo "control-v6.0.32 requires an exact Nexus release revision." >&2
+if [[ "$AGENT_VERSION" == control-v6.0.33 && ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
+  echo "control-v6.0.33 requires an exact Nexus release revision." >&2
   exit 2
 fi
 if [[ "$WAL_STAGE_AGENT" != 0 || "$AGENT_VERSION" == control-v6.0.25 ]];then
-  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.32 ) || "$WAL_STAGE_AGENT" != 1 ||
+  if [[ ( "$AGENT_VERSION" != control-v6.0.25 && "$AGENT_VERSION" != control-v6.0.33 ) || "$WAL_STAGE_AGENT" != 1 ||
         ! "${XMESH_NEXUS_RELEASE_REF:-}" =~ ^[a-f0-9]{40}$ ]];then
     echo "Experimental WAL/Genesis Agent requires explicit staging and an exact Nexus revision." >&2
     exit 2
@@ -162,6 +162,7 @@ for unit in \
   xmesh-node-metrics.timer xmesh-node-metrics.service \
   xmesh-node-control.timer xmesh-node-control.service \
   xmesh-xray-sync.timer xmesh-xray-sync.service \
+  xmesh-quota-v2-ingress.service xmesh-quota-v2-meter.service xmesh-quota-v2-egress.service \
   xmesh-quota-v2-renewal.timer xmesh-quota-v2-renewal.service \
   xmesh-node-user-meter.timer xmesh-node-user-meter.service \
   xmesh-node-tls-renew.timer xmesh-node-tls-renew.service \

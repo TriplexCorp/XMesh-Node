@@ -11,11 +11,43 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 modules="$root/experiments/quota-v2-physical-stop"
 [[ "$root" == /opt/xmesh-node ]]
 install -d -o root -g root -m 0700 /var/lib/xmesh-xray-sync
+# Reboot must recover the ORIGINAL enrolled strict-PQ identity before any
+# metering socket, ingress, or WAL worker is allowed to start. This never
+# authorizes a stale signed cap or starts a lost Xray process.
+cat > /etc/systemd/system/xmesh-pq-activation-recovery.service <<'EOF'
+[Unit]
+Description=XMesh strict-PQ recover original signed Agent activation before operations
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=10s
+StartLimitBurst=32
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/bin/xmesh-agent-xspv2-product resume-activation
+TimeoutStartSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/xmesh-agent/product
+[Install]
+WantedBy=multi-user.target
+EOF
 cat > /etc/systemd/system/xmesh-quota-v2-egress.service <<EOF
 [Unit]
 Description=XMesh root-owned outbound TCP bridge for signed metered Xray
-After=docker.service network-online.target
-Requires=docker.service
+After=docker.service network-online.target xmesh-pq-activation-recovery.service
+Requires=docker.service xmesh-pq-activation-recovery.service
 Wants=network-online.target
 Before=xmesh-quota-v2-meter.service
 [Service]
@@ -41,8 +73,8 @@ EOF
 cat > /etc/systemd/system/xmesh-quota-v2-meter.service <<EOF
 [Unit]
 Description=XMesh qualified first meter and signed Genesis
-After=docker.service network-online.target xmesh-quota-v2-egress.service
-Requires=docker.service xmesh-quota-v2-egress.service
+After=docker.service network-online.target xmesh-quota-v2-egress.service xmesh-pq-activation-recovery.service
+Requires=docker.service xmesh-quota-v2-egress.service xmesh-pq-activation-recovery.service
 Wants=network-online.target
 [Service]
 Type=oneshot
@@ -59,8 +91,8 @@ EOF
 cat > /etc/systemd/system/xmesh-quota-v2-ingress.service <<EOF
 [Unit]
 Description=XMesh signed VLESS ingress
-After=xmesh-quota-v2-meter.service
-Requires=xmesh-quota-v2-meter.service
+After=xmesh-quota-v2-meter.service xmesh-pq-activation-recovery.service
+Requires=xmesh-quota-v2-meter.service xmesh-pq-activation-recovery.service
 [Service]
 Type=simple
 Environment=XMESH_QUOTA_V2_AGENT_MODE=installed
@@ -78,8 +110,8 @@ EOF
 cat > /etc/systemd/system/xmesh-quota-v2-renewal.service <<EOF
 [Unit]
 Description=XMesh authenticated WAL reconciliation and signed cap renewal
-After=xmesh-quota-v2-meter.service
-Requires=xmesh-quota-v2-meter.service
+After=xmesh-quota-v2-meter.service xmesh-pq-activation-recovery.service
+Requires=xmesh-quota-v2-meter.service xmesh-pq-activation-recovery.service
 [Service]
 Type=oneshot
 Environment=XMESH_QUOTA_V2_AGENT_MODE=installed
@@ -103,7 +135,12 @@ AccuracySec=1s
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable xmesh-quota-v2-egress.service xmesh-quota-v2-meter.service xmesh-quota-v2-ingress.service xmesh-quota-v2-renewal.timer
+# Persist recovery topology before starting an ingress or charge worker.
+systemctl enable xmesh-pq-activation-recovery.service \
+  xmesh-quota-v2-egress.service xmesh-quota-v2-meter.service \
+  xmesh-quota-v2-ingress.service xmesh-quota-v2-renewal.timer
+systemctl start xmesh-pq-activation-recovery.service
+/usr/local/bin/xmesh-agent-xspv2-product verify-active --panel "$panel" --node-id "$node" >/dev/null
 systemctl start xmesh-quota-v2-egress.service
 systemctl start xmesh-quota-v2-meter.service
 systemctl start xmesh-quota-v2-renewal.timer xmesh-quota-v2-ingress.service

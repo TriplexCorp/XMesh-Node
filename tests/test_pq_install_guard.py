@@ -207,7 +207,7 @@ exit 77
         self.assertLess(source.index('systemctl enable xmesh-pq-activation-recovery.service'),
                         source.index('systemctl start xmesh-node-metrics.service'))
         # All dependencies are opt-in to reviewed 6.0.29, not 6.0.24.
-        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.32 ]]; then', source)
+        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.33 ]]; then', source)
         self.assertIn('WAL staging requires a fresh test node', source)
 
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
@@ -269,6 +269,42 @@ exit 77
             qualification.rmdir()
             qualification.symlink_to("missing")
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 2)
+
+
+    def test_metered_reboot_is_gated_on_original_pq_activation(self):
+        bootstrap = (ROOT / 'bootstrap.sh').read_text()
+        installer = (ROOT / 'deploy/install-metered-services.sh').read_text()
+        # Even a partial first installation must not leave the metered
+        # frontend or bridge running during an unverified new enrollment.
+        disable = bootstrap[bootstrap.index('for unit in '):bootstrap.index('systemctl disable --now "$unit"')]
+        for name in ('xmesh-quota-v2-ingress.service', 'xmesh-quota-v2-meter.service',
+                     'xmesh-quota-v2-egress.service', 'xmesh-quota-v2-renewal.service'):
+            self.assertIn(name, disable)
+        self.assertLess(bootstrap.index('PRODUCT_ACTIVATION_STATE="$(xmesh_verify_or_resume_enrolled_product'),
+                        bootstrap.index('systemctl disable --now "$unit"'))
+        self.assertLess(bootstrap.index('STRICT-PQ GATE PASSED'),
+                        bootstrap.index('exec bash "$INSTALL_DIR/deploy/install-metered-services.sh"'))
+
+        self.assertIn('ExecStart=/usr/local/bin/xmesh-agent-xspv2-product resume-activation',
+                      installer)
+        self.assertIn('ReadWritePaths=/var/lib/xmesh-agent/product', installer)
+        self.assertIn('StartLimitBurst=32', installer)
+        units = ('xmesh-quota-v2-egress.service', 'xmesh-quota-v2-meter.service',
+                 'xmesh-quota-v2-ingress.service', 'xmesh-quota-v2-renewal.service')
+        for name in units:
+            section = installer.split('cat > /etc/systemd/system/' + name, 1)[1].split('[Unit]', 1)[1].split('\nEOF', 1)[0]
+            self.assertIn('After=', section)
+            self.assertIn('Requires=', section)
+            self.assertIn('xmesh-pq-activation-recovery.service', section)
+        self.assertLess(installer.index('systemctl enable xmesh-pq-activation-recovery.service'),
+                        installer.index('systemctl start xmesh-pq-activation-recovery.service'))
+        self.assertLess(installer.index('systemctl start xmesh-pq-activation-recovery.service'),
+                        installer.index('systemctl start xmesh-quota-v2-egress.service'))
+        self.assertLess(installer.rindex('verify-active --panel "$panel"'),
+                        installer.index('systemctl start xmesh-quota-v2-egress.service'))
+        self.assertNotIn('docker start xmesh-managed-xray', installer)
+        self.assertNotIn('--restart=always', installer)
+
 
 
 if __name__ == '__main__':
