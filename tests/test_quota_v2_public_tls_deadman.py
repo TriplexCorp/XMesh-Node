@@ -2,6 +2,7 @@
 """Independent Linux pidfd deadman: real processes, no public listener."""
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
@@ -105,8 +106,11 @@ class LinuxStopOnlyDeadmanTests(unittest.TestCase):
             stderr=subprocess.PIPE, text=True)
         pid = None
         try:
+            ready = select.poll()
+            ready.register(owner.stdout.fileno(), select.POLLIN | select.POLLHUP)
+            self.assertTrue(ready.poll(4000), "orphan owner never became ready")
             line = owner.stdout.readline().strip()
-            self.assertTrue(line, owner.stderr.read())
+            self.assertTrue(line, "orphan owner failed before guardian READY")
             pid, guardian_pid = map(int, line.split())
             os.kill(owner.pid, signal.SIGKILL)
             owner.wait(timeout=3)
