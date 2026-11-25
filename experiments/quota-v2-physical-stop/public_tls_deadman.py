@@ -156,11 +156,18 @@ class StopOnlyDeadman:
                     os.close(fd)
 
     def pulse(self):
-        if (self._writer is None or self._guardian is None
-                or self._guardian.poll() is not None
-                or self.child.poll() is not None):
-            raise ValueError("unavailable TLS deadman or already stopped child")
-        os.write(self._writer, b"P")
+        try:
+            if (self._writer is None or self._guardian is None
+                    or self._guardian.poll() is not None
+                    or self.child.poll() is not None):
+                raise ValueError("unavailable TLS deadman or already stopped child")
+            os.write(self._writer, b"P")
+        except (OSError, ValueError):
+            # A killed/failed guardian is not a reason to keep TLS alive.
+            if self.child.poll() is None:
+                self.child.kill()
+                self.child.wait(timeout=2)
+            raise ValueError("TLS guardian heartbeat lost; owned child killed") from None
         return None
 
     def close(self):
