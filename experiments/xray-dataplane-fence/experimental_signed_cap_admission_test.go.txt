@@ -5,10 +5,13 @@ import (
     "context"
     "crypto/ed25519"
     "crypto/rand"
+    "crypto/sha256"
     "encoding/hex"
     "encoding/json"
     "errors"
     "os"
+    "net/http"
+    "net/http/httptest"
     "path/filepath"
     "strings"
     "sync"
@@ -735,3 +738,148 @@ func TestV2SignedRenewalRejectsWALLossAndFreshRuntime(t *testing.T) {
 		t.Fatal("renewal opened fresh Xray state")
 	}
 }
+
+ 
+ // This proof comes from the live, independently metered Xray process, not
+ // a reused Node or Nexus SQL assertion. It reports the signed cap state
+ // without granting PUBLIC TLS or resetting any WAL balances.
+ func TestV2LocalSignedCapObservationNeverCreatesPublicAuthority(t *testing.T) {
+     _,manager,p,scope,pub,priv:=signedCapTestFixture(t)
+     raw:=signedCapTestEnvelope(t,p,priv)
+     digest:=sha256.Sum256(raw)
+     c:=&localCapControl{binding:localCapBinding{
+         NodeID:p.NodeID,ActivationReceiptSHA256:p.ActivationReceiptSHA256,
+     }}
+     req:=localCapObserveRequest{
+         SchemaVersion:1,UserID:p.UserID,Email:capMain,
+         RuntimeID:p.RuntimeID,GrantSHA256:hex.EncodeToString(digest[:]),
+         Nonce:strings.Repeat("d",64),
+     }
+     if _,err:=c.observe(req);err==nil {
+         t.Fatal("a user without a locally installed signed cap was reported as observed")
+     }
+     if err:=installSignedFirstGenesisCap(raw,pub,scope);err!=nil {t.Fatal(err)}
+     snapshot,err:=c.observe(req)
+     if err!=nil{t.Fatalf("fresh actual metered cap not observed: %v",err)}
+     if snapshot.Kind!="xmesh.quota-v2.local-cap-observed" ||
+         snapshot.SchemaVersion!=1 || !snapshot.InstalledLocalCap ||
+         snapshot.NodeID!=p.NodeID || snapshot.UserID!=p.UserID ||
+         snapshot.Nonce!=req.Nonce || snapshot.Email!=capMain ||
+         snapshot.RuntimeID!=p.RuntimeID ||
+         snapshot.GrantSHA256!=req.GrantSHA256 ||
+         snapshot.ReservationID!=p.ReservationID ||
+         snapshot.ReservationRevision!=p.ReservationRevision ||
+         snapshot.SharedCeilingBytes!=100 || snapshot.NodeCeilingBytes!=70 ||
+         snapshot.CdnCeilingBytes!=20 || snapshot.ChargedBytes!=0 ||
+         snapshot.CanServePublic || snapshot.CanStart || snapshot.CanResume ||
+         snapshot.FinalMeterVerified || snapshot.RefundableBytes!=0 {
+         t.Fatalf("local observation claimed foreign scope or public authority: %+v",snapshot)
+     }
+     main:=newCapCounter(t,manager,capMain,"downlink")
+     cdn:=newCapCounter(t,manager,capCDN,"uplink")
+     if !capAttempt(t,main,capMain,"downlink",30) ||
+         !capAttempt(t,cdn,capCDN,"uplink",20) {t.Fatal("failed to charge actual signed WAL cap")}
+     remaining,err:=c.observe(req)
+     if err!=nil || remaining.ChargedBytes!=50 || remaining.ChargedCdnBytes!=20 {
+         t.Fatalf("local cap observation lost cumulative spend: %+v %v",remaining,err)
+     }
+     cdnReq:=req;cdnReq.Email=capCDN
+     if _,err:=c.observe(cdnReq);err==nil {
+         t.Fatal("CDN spending class still observable as available after exhaustion")
+     }
+     if !capAttempt(t,main,capMain,"downlink",20) {t.Fatal("failed to exhaust exact Node cap")}
+     if _,err:=c.observe(req);err==nil {
+         t.Fatal("exhausted shared Node cap still returned an available observation")
+     }
+ }
+ 
+ func TestV2LocalSignedCapObservationRejectsForeignAndRevokedState(t *testing.T) {
+     _,_,p,scope,pub,priv:=signedCapTestFixture(t)
+     raw:=signedCapTestEnvelope(t,p,priv)
+     hash:=sha256.Sum256(raw)
+     c:=&localCapControl{binding:localCapBinding{
+         NodeID:p.NodeID,ActivationReceiptSHA256:p.ActivationReceiptSHA256,
+     }}
+     req:=localCapObserveRequest{
+         SchemaVersion:1,UserID:p.UserID,Email:capMain,
+         RuntimeID:p.RuntimeID,GrantSHA256:hex.EncodeToString(hash[:]),
+         Nonce:strings.Repeat("d",64),
+     }
+     if err:=installSignedFirstGenesisCap(raw,pub,scope);err!=nil {t.Fatal(err)}
+     invalid:=[]struct{name string;change func(*localCapObserveRequest)}{
+         {"foreign-user",func(x *localCapObserveRequest){x.UserID++}},
+         {"foreign-alias",func(x *localCapObserveRequest){x.Email="xmesh-u101--foreign"}},
+         {"other-runtime",func(x *localCapObserveRequest){x.RuntimeID=strings.Repeat("f",64)}},
+         {"other-grant",func(x *localCapObserveRequest){x.GrantSHA256=strings.Repeat("f",64)}},
+         {"missing-nonce",func(x *localCapObserveRequest){x.Nonce=""}},
+         {"wrong-schema",func(x *localCapObserveRequest){x.SchemaVersion=2}},
+     }
+     for _,tc:=range invalid{
+         t.Run(tc.name,func(t *testing.T){
+             modified:=req;tc.change(&modified)
+             if _,err:=c.observe(modified);err==nil{
+                 t.Fatal("foreign or malformed local cap observation succeeded")
+             }
+         })
+     }
+     c.binding.NodeID++
+     if _,err:=c.observe(req);err==nil {t.Fatal("wrong enrolled Node returned signed cap")}
+     c.binding.NodeID--
+     gate.Lock()
+     identity:=canonicalMeterUser(capMain)
+     cap:=experimentalByteCaps.users[identity]
+     cap.lastSeenMs=experimentalCapClockMs()+10_000
+     gate.Unlock()
+     if _,err:=c.observe(req);err==nil {t.Fatal("clock rollback retained observed grant")}
+     gate.Lock()
+     cap.lastSeenMs=experimentalCapClockMs()
+     cap.expired=true
+     gate.Unlock()
+     if _,err:=c.observe(req);err==nil {t.Fatal("expired grant was observed as current")}
+ }
+ 
+ func TestV2LocalSignedCapObservationSocketAuthenticationAndCanonicalRequest(t *testing.T) {
+     _,_,p,scope,pub,priv:=signedCapTestFixture(t)
+     raw:=signedCapTestEnvelope(t,p,priv)
+     hash:=sha256.Sum256(raw)
+     c:=&localCapControl{binding:localCapBinding{
+         NodeID:p.NodeID,ActivationReceiptSHA256:p.ActivationReceiptSHA256,
+     }}
+     if err:=installSignedFirstGenesisCap(raw,pub,scope);err!=nil {t.Fatal(err)}
+     req:=localCapObserveRequest{
+         SchemaVersion:1,UserID:p.UserID,Email:capMain,
+         RuntimeID:p.RuntimeID,GrantSHA256:hex.EncodeToString(hash[:]),
+         Nonce:strings.Repeat("d",64),
+     }
+     serialized,err:=json.Marshal(req)
+     if err!=nil{t.Fatal(err)}
+     var canonical map[string]interface{}
+     if err:=json.Unmarshal(serialized,&canonical);err!=nil{t.Fatal(err)}
+     payload,err:=json.Marshal(canonical)
+     if err!=nil{t.Fatal(err)}
+     invoke:=func(raw []byte,authorized bool) *httptest.ResponseRecorder {
+         request:=httptest.NewRequest(http.MethodPost,localCapObservePath,bytes.NewReader(raw))
+         if authorized {
+             request=request.WithContext(context.WithValue(request.Context(),capPeerKey{},true))
+         }
+         result:=httptest.NewRecorder()
+         c.serveObserved(result,request)
+         return result
+     }
+     if got:=invoke(payload,false);got.Code!=http.StatusForbidden{
+         t.Fatalf("untrusted local Unix peer acquired observation HTTP %d",got.Code)
+     }
+     if got:=invoke(append(payload,[]byte("{}")...),true);got.Code!=http.StatusBadRequest{
+         t.Fatalf("noncanonical trailing JSON accepted: %d",got.Code)
+     }
+     if got:=invoke(append([]byte{},[]byte("{\"nonce\":\"f\",")...),true);got.Code!=http.StatusBadRequest{
+         t.Fatalf("malformed local observation request accepted: %d",got.Code)
+     }
+     got:=invoke(payload,true)
+     if got.Code!=http.StatusOK {t.Fatalf("trusted Unix peer did not obtain read-only proof: %d %s",got.Code,got.Body.String())}
+     var result localCapObserveResult
+     if err:=json.Unmarshal(got.Body.Bytes(),&result);err!=nil{t.Fatal(err)}
+     if result.Nonce!=req.Nonce || result.CanServePublic || result.CanStart || result.CanResume {
+         t.Fatal("an observed private spending cap was mistaken for TLS/public authority")
+     }
+ }
