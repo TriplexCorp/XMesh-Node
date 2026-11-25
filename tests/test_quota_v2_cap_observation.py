@@ -7,6 +7,7 @@ Ed25519 first_cap_handoff.verify_grant against its pinned Nexus key.
 """
 import copy
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -219,6 +220,19 @@ class LocalCapObservationTests(unittest.TestCase):
                                  hashlib.sha256(raw).hexdigest())
                 self.assertEqual(result["chargedBytes"], 15)
                 self.assertIs(result["canServePublic"], False)
+
+    def test_bounded_observation_never_shrinks_signed_cap_write_timeout(self):
+        # CI regression against accidentally shortening the independent
+        # signed-cap WRITE path while protecting the read-only TLS watcher.
+        self.assertEqual(observed.CAP_OBSERVE_SOCKET_TIMEOUT_S, 1.5)
+        original_write = inspect.getsource(observed.install_in_xray)
+        read_only = inspect.getsource(observed.observe_installed_cap_in_xray)
+        self.assertIn("conn.settimeout(12)", original_write)
+        self.assertIn('HTTPConnection("localhost", timeout=12)', original_write)
+        self.assertIn(
+            "conn.settimeout(CAP_OBSERVE_SOCKET_TIMEOUT_S)", read_only)
+        self.assertIn(
+            "timeout=CAP_OBSERVE_SOCKET_TIMEOUT_S", read_only)
 
     def test_real_private_unix_peer_stall_fails_before_tls_watchdog_window(self):
         raw, _, scope = fixture()
