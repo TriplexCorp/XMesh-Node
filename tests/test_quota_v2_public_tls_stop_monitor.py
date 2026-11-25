@@ -75,12 +75,12 @@ class StopOnlyTests(unittest.TestCase):
         self.certificate = mock.patch.object(
             stop.public_tls_certificates, "verify_certificate_lineage",
             return_value={"vless-main":"root-owned","vless-cdn":"root-owned"})
-        self.certificate.start()
+        self.certificate_mock = self.certificate.start()
         self.addCleanup(self.certificate.stop)
         self.identity = mock.patch.object(
             stop.wal_transport.runtime_identity, "trusted_runtime_identity",
             return_value=self.runtime)
-        self.identity.start()
+        self.identity_mock = self.identity.start()
         self.addCleanup(self.identity.stop)
 
     def stop_child(self):
@@ -160,14 +160,67 @@ class StopOnlyTests(unittest.TestCase):
             side_effect=ValueError("bad lineage")):
             self.assert_stopped(monitor)
 
-    def test_replayed_foreign_signature_cannot_initialize_monitor(self):
-        for changes in (
+    def respawn_child(self):
+        # Every rejected startup must have killed its previous owned child.
+        self.assertIsNotNone(self.child.poll())
+        self.child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def test_replayed_foreign_signature_kills_owned_child_during_startup(self):
+        for index, changes in enumerate((
             {"runtime_id":"d"*64}, {"activation":"e"*64},
             {"pinned":"f"*64}, {"genesis_sha":"f"*64},
-        ):
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
+        )):
+            if index:
+                self.respawn_child()
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                    ValueError, "initial TLS supervision preflight failed"):
                 self.monitor(**changes)
+            self.assertIsNotNone(self.child.poll())
+
+    def test_unverified_certificate_kills_child_before_first_poll(self):
+        with mock.patch.object(
+            stop.public_tls_certificates, "verify_certificate_lineage",
+            side_effect=ValueError("wrong SAN or expired certificate")):
+            with self.assertRaisesRegex(
+                    ValueError, "initial TLS supervision preflight failed"):
+                self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_metered_runtime_mismatch_and_probe_error_kill_child_at_startup(self):
+        for index, kwargs in enumerate((
+            {"return_value": "f" * 64},
+            {"side_effect": OSError("procfs unavailable")},
+        )):
+            if index:
+                self.respawn_child()
+            with mock.patch.object(
+                stop.wal_transport.runtime_identity, "trusted_runtime_identity",
+                **kwargs):
+                with self.assertRaisesRegex(
+                        ValueError, "initial TLS supervision preflight failed"):
+                    self.monitor()
+            self.assertIsNotNone(self.child.poll())
+
+    def test_invalid_initial_pid_and_expired_policy_kill_child(self):
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor(runtime_pid=0)
+        self.assertIsNotNone(self.child.poll())
+        self.respawn_child()
+        self.tick(wall_ms=60_001, monotonic_ms=60_001)
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_good_startup_checks_certificate_and_meter_before_first_poll(self):
+        monitor = self.monitor()
+        self.assertFalse(monitor.stopped)
         self.assertIsNone(self.child.poll())
+        self.assertEqual(self.identity_mock.call_count, 1)
+        self.assertEqual(self.certificate_mock.call_count, 1)
 
 
 if __name__ == "__main__":
