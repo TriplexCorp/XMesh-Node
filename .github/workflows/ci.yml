@@ -109,6 +109,10 @@ jobs:
         run: sudo python3 tests/test_quota_v2_quarantine_handoff.py -v
       - name: Real Ed25519 and signed staged-policy-to-Xray cap ownership negatives
         run: sudo python3 tests/test_quota_v2_first_cap_handoff.py -v
+      - name: Verify Agent read-only local cap witness and measured Unix peer PID
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/cap_install.py tests/test_quota_v2_cap_observation.py
+          python3 tests/test_quota_v2_cap_observation.py -v
       - name: Strict fresh-Xray zero-WAL proof and no-authority marker regression
         run: sudo python3 tests/test_quota_v2_successor_meter.py -v
       - name: Strict-PQ zero-spend Genesis lease prepare/echo Ed25519 and root-state tests

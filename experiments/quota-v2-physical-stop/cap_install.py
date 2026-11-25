@@ -12,6 +12,9 @@ from pathlib import Path
 import select
 import socket
 import stat
+import re
+import secrets
+import time
 import struct
 
 # This module is colocated with the existing strict-XSP/2 WAL client and
@@ -253,6 +256,212 @@ def observe_zero_meter_in_xray(path, trusted_pid, runtime, scope):
         result = wal_transport.observed.strict_json(raw)
         _verify_fresh_zero_meter_receipt(result, scope, runtime)
         check_runtime()
+        return result
+    finally:
+        os.close(pidfd)
+
+
+# A live read-only observation is NOT quota issuance or public TLS authority.
+# The caller must supply the independently Ed25519-verified Nexus grant and
+# the original confirmed Node lease scope. The hash of that exact signed grant
+# is checked by Xray's own in-memory cap, not by a Node-maintained cache.
+CAP_OBSERVE_PATH = "/v1/quota-cap-observe"
+CAP_OBSERVE_REPLY_MAX = 4096
+CAP_OBSERVE_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+CAP_OBSERVE_HEX128 = re.compile(r"[0-9a-f]{128}\Z")
+CAP_OBSERVE_SCOPE = frozenset({
+    "userId", "policySha256", "accountEpoch", "meterEpoch", "reservationId",
+    "revision", "nonce", "aliases",
+})
+CAP_OBSERVE_GRANT_KEYS = frozenset({
+    "schemaVersion", "kind", "nodeId", "userId",
+    "activationReceiptSha256", "runtimeId", "policySha256",
+    "accountEpoch", "meterEpoch", "reservationId", "reservationRevision",
+    "nonce", "inventoryTailDigest", "witnessedWalBytes",
+    "witnessedCdnBytes", "sharedCeilingBytes", "nodeCeilingBytes",
+    "cdnCeilingBytes", "aliasScopes", "issuedAtMs", "installBeforeMs",
+    "validUntilMs", "canSpend", "canStart", "canResume",
+    "finalMeterVerified", "refundableBytes",
+})
+
+
+def _observed_cap_request(runtime, node, activation, signed_grant, scope, email, nonce):
+    """Use the original verified grant bytes, never a caller-provided cap hash."""
+    if (not isinstance(signed_grant, bytes)
+            or not 0 < len(signed_grant) <= 8192
+            or not isinstance(scope, dict) or set(scope) != CAP_OBSERVE_SCOPE
+            or type(node) is not int or node <= 0
+            or any(not isinstance(x, str) or not CAP_OBSERVE_HEX64.fullmatch(x)
+                   for x in (runtime, activation, nonce))
+            or type(scope["userId"]) is not int or scope["userId"] <= 0
+            or not isinstance(email, str)):
+        raise ValueError("unverified scoped Xray cap observation inputs")
+    doc = wal_transport.observed.strict_json(signed_grant)
+    if (not isinstance(doc, dict)
+            or set(doc) != {"algorithm", "payload", "signature"}
+            or doc["algorithm"] != "Ed25519"
+            or not isinstance(doc["signature"], str)
+            or not CAP_OBSERVE_HEX128.fullmatch(doc["signature"])
+            or not isinstance(doc["payload"], dict)
+            or signed_grant != wal_transport.observed.canonical(doc) + b"\n"):
+        raise ValueError("Xray cap observation requires exact canonical signed grant bytes")
+    p = doc["payload"]
+    matched = {
+        "nodeId": node, "activationReceiptSha256": activation,
+        "runtimeId": runtime, "userId": scope["userId"],
+        "policySha256": scope["policySha256"],
+        "accountEpoch": scope["accountEpoch"],
+        "meterEpoch": scope["meterEpoch"],
+        "reservationId": scope["reservationId"],
+        "reservationRevision": scope["revision"],
+        "nonce": scope["nonce"],
+        "aliasScopes": scope["aliases"],
+        "canSpend": True, "canStart": False, "canResume": False,
+        "finalMeterVerified": False, "refundableBytes": 0,
+    }
+    if (set(p) != CAP_OBSERVE_GRANT_KEYS
+            or type(p.get("schemaVersion")) is not int
+            or p["schemaVersion"] != 1
+            or p.get("kind") not in (
+                "xmesh.quota-v2.xray-cap-admission",
+                "xmesh.quota-v2.xray-cap-renewal")
+            or any(type(p.get(k)) is not type(value) or p[k] != value
+                   for k, value in matched.items())
+            or not isinstance(scope["aliases"], list)
+            or not 1 <= len(scope["aliases"]) <= 16
+            or not any(a == {"email": email, "class": cls}
+                       for a in scope["aliases"] for cls in ("main", "cdn"))
+            or type(p.get("validUntilMs")) is not int
+            or p["validUntilMs"] <= time.time_ns() // 1_000_000
+            or any(type(p.get(k)) is not int or p[k] <= 0
+                   for k in ("sharedCeilingBytes", "nodeCeilingBytes"))
+            or type(p.get("cdnCeilingBytes")) is not int
+            or p["cdnCeilingBytes"] < 0):
+        raise ValueError("foreign, expired or malformed independently verified Xray cap")
+    grant_digest = hashlib.sha256(signed_grant).hexdigest()
+    return {
+        "schemaVersion": 1, "userId": scope["userId"],
+        "email": email, "runtimeId": runtime,
+        "grantSha256": grant_digest, "nonce": nonce,
+    }, p
+
+
+def verify_local_cap_observation(raw, request, grant, node, activation):
+    """Verify a nonce-bound, nonauthorizing answer from the measured Xray.
+
+    Must be used only *after* SO_PEERCRED, pidfd and runtime-identity checks.
+    This is not a public listener permit or off-host WAL / revocation proof.
+    """
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= CAP_OBSERVE_REPLY_MAX:
+        raise ValueError("invalid local signed-cap observation reply size")
+    reply = wal_transport.observed.strict_json(raw)
+    if not isinstance(reply, dict):
+        raise ValueError("invalid local signed-cap reply")
+    expected = {
+        "schemaVersion": 1,
+        "kind": "xmesh.quota-v2.local-cap-observed",
+        "nonce": request["nonce"],
+        "nodeId": node,
+        "userId": request["userId"],
+        "email": request["email"],
+        "runtimeId": request["runtimeId"],
+        "activationReceiptSha256": activation,
+        "policySha256": grant["policySha256"],
+        "accountEpoch": grant["accountEpoch"],
+        "meterEpoch": grant["meterEpoch"],
+        "reservationId": grant["reservationId"],
+        "reservationRevision": grant["reservationRevision"],
+        "grantSha256": request["grantSha256"],
+        "validUntilMs": grant["validUntilMs"],
+        "sharedCeilingBytes": grant["sharedCeilingBytes"],
+        "nodeCeilingBytes": grant["nodeCeilingBytes"],
+        "cdnCeilingBytes": grant["cdnCeilingBytes"],
+        "installedLocalCap": True,
+        "canServePublic": False, "canStart": False,
+        "canResume": False, "finalMeterVerified": False,
+        "refundableBytes": 0,
+    }
+    if (set(reply) != set(expected) | {"chargedBytes", "chargedCdnBytes"}
+            or any(type(reply.get(k)) is not type(v) or reply[k] != v
+                   for k, v in expected.items())
+            or any(type(reply.get(k)) is not int or reply[k] < 0
+                   for k in ("chargedBytes", "chargedCdnBytes"))
+            or reply["chargedBytes"] >= min(
+                grant["sharedCeilingBytes"], grant["nodeCeilingBytes"])
+            or reply["chargedCdnBytes"] > reply["chargedBytes"]
+            or reply["chargedCdnBytes"] > grant["cdnCeilingBytes"]
+            or (request["email"].endswith("--vless-cdn")
+                and reply["chargedCdnBytes"] >= grant["cdnCeilingBytes"])
+            or time.time_ns() // 1_000_000 >= reply["validUntilMs"]):
+        raise ValueError("local Xray cap reply changed signed scope, time or byte totals")
+    # Return diagnostic state with an explicit never-positive safety boundary.
+    return reply
+
+
+def observe_installed_cap_in_xray(path, trusted_pid, runtime, node,
+                                  activation, signed_grant, scope, email):
+    """Read the *actual* live measured Xray's installed cap via root Unix IPC.
+
+    The caller has ALREADY independently authenticated the Nexus Ed25519
+    grant and Node's confirmed reservation. This routine additionally
+    pins the exact Xray pidfd, kernel Unix peer, runtime, original grant bytes,
+    nonce and both cumulative MAIN/CDN charges. It NEVER installs quota or
+    authorizes public TLS.
+    """
+    if type(trusted_pid) is not int or trusted_pid <= 0:
+        raise ValueError("missing measured Xray PID")
+    nonce = secrets.token_hex(32)
+    request, grant = _observed_cap_request(
+        runtime, node, activation, signed_grant, scope, email, nonce)
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError("local cap observation requires absolute Unix socket")
+    uid = os.geteuid()
+    parent, endpoint = path.parent.lstat(), path.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != uid
+            or parent.st_mode & 0o077
+            or not stat.S_ISSOCK(endpoint.st_mode) or endpoint.st_uid != uid
+            or endpoint.st_mode & 0o077):
+        raise ValueError("local cap observation socket outside private service boundary")
+    body = json.dumps(request, sort_keys=True, separators=(",", ":")).encode("ascii")
+    if not 0 < len(body) <= 512:
+        raise ValueError("oversized local cap observation request")
+    pidfd = os.pidfd_open(trusted_pid, 0)
+    try:
+        poll = select.poll()
+        poll.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+
+        def check_live_runtime():
+            if (poll.poll(0)
+                    or wal_transport.runtime_identity.trusted_runtime_identity(
+                        trusted_pid) != runtime):
+                raise ValueError("observed Xray process exited or changed")
+
+        check_live_runtime()
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(12)
+            conn.connect(str(path))
+            raw_peer = conn.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            peer_pid, peer_uid, _ = struct.unpack("3i", raw_peer)
+            if peer_pid != trusted_pid or peer_uid != uid:
+                raise ValueError("cap observation Unix peer is not the measured Xray")
+            check_live_runtime()
+            client = http.client.HTTPConnection("localhost", timeout=12)
+            client.auto_open = False
+            client.sock = conn
+            try:
+                client.request("POST", CAP_OBSERVE_PATH, body=body,
+                               headers={"Connection": "close"})
+                response = client.getresponse()
+                raw = response.read(CAP_OBSERVE_REPLY_MAX + 1)
+                if response.status != 200 or len(raw) > CAP_OBSERVE_REPLY_MAX:
+                    raise ValueError(
+                        f"no valid installed Xray cap observed (HTTP {response.status})")
+            finally:
+                client.close()
+        result = verify_local_cap_observation(raw, request, grant, node, activation)
+        check_live_runtime()
         return result
     finally:
         os.close(pidfd)
