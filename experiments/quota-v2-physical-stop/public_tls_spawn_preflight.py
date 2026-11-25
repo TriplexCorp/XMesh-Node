@@ -81,6 +81,12 @@ def check_before_spawn(*, profile, authority, node, activation, genesis_sha,
         raise ValueError("revocation watcher cannot issue public TLS permission")
     if revocation_watch.ensure_fresh() is not None:
         raise ValueError("expired or authorizing Nexus revocation witness")
+    # The metered process might restart WHILE certificate, cap and Nexus
+    # revocation checks are in progress. The pre-spawn proof must bind the
+    # actual final runtime, not just the PID witnessed before those calls.
+    if wal_transport.runtime_identity.trusted_runtime_identity(
+            runtime_pid) != runtime_id:
+        raise ValueError("metered Xray changed during TLS pre-spawn proof")
     end_wall = time.time_ns() // 1_000_000
     end_mono = time.monotonic_ns()
     if (end_wall < start_wall or end_mono < start_mono
