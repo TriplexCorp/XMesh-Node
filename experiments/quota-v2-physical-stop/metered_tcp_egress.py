@@ -30,6 +30,10 @@ DOMAIN = re.compile(r"(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:
 MAX_PEERS = 128
 
 
+def is_global_address(address):
+    return ipaddress.ip_address(address).is_global
+
+
 def parse_target(raw, port):
     if type(port) is not int or not 1 <= port <= 65535 or not 1 <= len(raw) <= 253:
         raise ValueError("invalid outbound TCP endpoint")
@@ -41,7 +45,7 @@ def parse_target(raw, port):
     except ValueError:
         parsed = None
     if parsed is not None:
-        if not parsed.is_global:
+        if not is_global_address(parsed):
             raise ValueError("private, special or local TCP destination denied")
         return str(parsed), port
     if (not DOMAIN.fullmatch(name) or name.endswith("..") or name.rstrip(".").endswith(
@@ -71,7 +75,7 @@ async def public_tcp_addresses(name, port):
             ip = ipaddress.ip_address(address)
         except ValueError:
             continue
-        if ip.is_global and (family, str(ip)) not in unique:
+        if is_global_address(ip) and (family, str(ip)) not in unique:
             unique.add((family, str(ip)))
             yield family, str(ip)
     if not unique:
@@ -140,6 +144,7 @@ async def transfer(reader, writer):
 
 async def bridge(reader, writer, capacity):
     remote_writer = None
+    accepted = False
     try:
         if capacity.locked():
             raise ValueError("egress connection limit reached")
@@ -169,17 +174,18 @@ async def bridge(reader, writer, capacity):
                 raise ValueError("public TCP dial unavailable")
             peer_address = remote_writer.get_extra_info("peername")
             ip = ipaddress.ip_address(peer_address[0])
-            if not ip.is_global:
+            if not is_global_address(ip):
                 raise ValueError("connected socket changed to private endpoint")
             address = ip.packed + (b"\x00" * (16 - len(ip.packed)))
             writer.write(b"\x00" + bytes([ip.version]) + address +
                          struct.pack("!H", peer_address[1]))
             await writer.drain()
+            accepted = True
             await asyncio.gather(transfer(reader, remote_writer),
                                  transfer(remote_reader, writer))
     except (ValueError, UnicodeError, OSError, EOFError, asyncio.TimeoutError,
             asyncio.IncompleteReadError):
-        if remote_writer is None:
+        if not accepted:
             try:
                 writer.write(b"\x01")
                 await writer.drain()
@@ -188,9 +194,15 @@ async def bridge(reader, writer, capacity):
     finally:
         if remote_writer is not None:
             remote_writer.close()
-            await remote_writer.wait_closed()
+            try:
+                await remote_writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
 
 
 def require_socket():
@@ -200,6 +212,27 @@ def require_socket():
     if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0
             or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
         raise ValueError("untrusted root-only metered egress listener")
+
+
+def recover_stale_socket(path):
+    """Recover a root-owned crash artifact, never replace an active listener."""
+    import errno
+    try:
+        prior = path.lstat()
+    except FileNotFoundError:
+        return
+    if (not stat.S_ISSOCK(prior.st_mode) or prior.st_uid != 0
+            or prior.st_nlink != 1 or stat.S_IMODE(prior.st_mode) != 0o600):
+        raise ValueError("unsafe existing egress listener")
+    with socket.socket(socket.AF_UNIX) as probe:
+        status = probe.connect_ex(str(path))
+    if status not in (errno.ECONNREFUSED, errno.ENOENT):
+        raise ValueError("egress listener is already active or untrusted")
+    now = path.lstat() if path.exists() else None
+    if now is not None:
+        if now.st_ino != prior.st_ino or now.st_dev != prior.st_dev:
+            raise ValueError("egress listener changed during crash recovery")
+        path.unlink()
 
 
 def private_directory(path):
@@ -214,8 +247,7 @@ async def serve(path=SOCKET):
         raise ValueError("egress bridge requires root")
     path = Path(path)
     private_directory(path.parent)
-    if path.exists() or path.is_symlink():
-        raise ValueError("existing egress socket requires explicit recovery")
+    recover_stale_socket(path)
     capacity = asyncio.Semaphore(MAX_PEERS)
     server = await asyncio.start_unix_server(
         lambda r, w: bridge(r, w, capacity), path=str(path), backlog=128)
