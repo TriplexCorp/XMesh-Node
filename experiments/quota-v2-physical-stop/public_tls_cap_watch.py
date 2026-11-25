@@ -35,13 +35,13 @@ class SignedCapRosterWatch:
     """
 
     def __init__(self, *, profile, signed_grants, pinned, node, activation,
-                 runtime_id, trusted_pid, socket_path):
+                 genesis_sha, runtime_id, trusted_pid, socket_path):
         if (type(node) is not int or node <= 0
                 or type(trusted_pid) is not int or trusted_pid <= 0
                 or not isinstance(socket_path, (str, os.PathLike))
                 or not os.path.isabs(socket_path)
                 or any(not isinstance(x, str) or not HEX64.fullmatch(x)
-                       for x in (pinned, activation, runtime_id))):
+                       for x in (pinned, activation, genesis_sha, runtime_id))):
             raise ValueError("invalid independently enrolled TLS-cap watch identity")
         # Reuse the pinned staging compiler; it rejects foreign VLESS
         # protocols, public source listeners, unsupported flows and routing.
@@ -87,6 +87,7 @@ class SignedCapRosterWatch:
                         or type(p["userId"]) is not int or p["userId"] != user
                         or p["activationReceiptSha256"] != activation
                         or p["runtimeId"] != runtime_id
+                        or p["policySha256"] != genesis_sha
                         or p["aliasScopes"] != aliases
                         or type(p["reservationRevision"]) is not int
                         or p["reservationRevision"] <= 0
@@ -111,6 +112,7 @@ class SignedCapRosterWatch:
         self.node = node
         self.activation = activation
         self.runtime_id = runtime_id
+        self.genesis_sha = genesis_sha
         self.pinned = pinned
         self._pid = trusted_pid
         self._socket = os.fspath(socket_path)

@@ -46,6 +46,7 @@ class StopOnlyTlsMonitor:
                     or cap_watch.node != node
                     or cap_watch.activation != activation
                     or cap_watch.runtime_id != runtime_id
+                    or cap_watch.genesis_sha != genesis_sha
                     or cap_watch.pinned != pinned):
                 raise ValueError("missing or foreign complete signed-cap roster watcher")
             self._cap_watch = cap_watch
