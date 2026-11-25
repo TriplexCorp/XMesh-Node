@@ -25,6 +25,45 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX128 = re.compile(r"[0-9a-f]{128}\Z")
 
 
+def enrolled_fetch(*, state, user, node, activation, genesis_sha, runtime_id,
+                   profile_sha256, authority_sha256, roster_sha256):
+    """Return only the exact strict-PQ polling transport for a fixed scope.
+
+    The installed supervisor must construct this from independently verified
+    root-owned Genesis, authority and live cap evidence. This helper does
+    not create a witness or start a public listener.
+    """
+    import os
+    from pathlib import Path
+
+    if (os.geteuid() != 0 or type(user) is not int or user <= 0
+            or type(node) is not int or node <= 0
+            or any(not isinstance(v, str) or HEX64.fullmatch(v) is None
+                   for v in (activation, genesis_sha, runtime_id,
+                             profile_sha256, authority_sha256, roster_sha256))):
+        raise ValueError("invalid enrolled TLS revocation transport identity")
+    if not isinstance(state, (str, Path)) or not Path(state).is_absolute():
+        raise ValueError("invalid root-owned TLS revocation state")
+    scope = {
+        "nodeId": node, "userId": user,
+        "activationReceiptSha256": activation,
+        "genesisPolicySha256": genesis_sha,
+        "runtimeId": runtime_id, "profileRevision": profile_sha256,
+        "capRosterSha256": roster_sha256, "requiredLifetimeMs": 7000,
+    }
+
+    def fetch(nonce):
+        if not isinstance(nonce, str) or HEX64.fullmatch(nonce) is None:
+            raise ValueError("invalid TLS revocation poll nonce")
+        return quarantine_policy._post_quarantined_desired(
+            {"scope": dict(scope), "authoritySha256": authority_sha256,
+             "challenge": nonce},
+            state, quarantine_policy.TLS_REVOCATION_PATH,
+        )
+
+    return fetch
+
+
 class SignedTlsRevocationWatch:
     """No positive grant: checks nonce-bound signatures and hard deadlines."""
 
