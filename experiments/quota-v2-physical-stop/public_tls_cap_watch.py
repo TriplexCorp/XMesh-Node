@@ -48,6 +48,7 @@ class SignedCapRosterWatch:
         compiled = vless_ingress.frontend(profile)
         roster = {}
         identities = {}
+        seen_emails = set()
         for inbound in compiled["inbounds"]:
             tag = inbound["tag"]
             cls = tag.removeprefix("vless-")
@@ -55,8 +56,9 @@ class SignedCapRosterWatch:
             for client in clients:
                 email = client["email"]
                 match = EMAIL.fullmatch(email)
-                if match is None or match.group(2) != cls or email in roster.get(int(match.group(1)), []):
+                if match is None or match.group(2) != cls or email in seen_emails:
                     raise ValueError("duplicate or foreign signed VLESS roster identity")
+                seen_emails.add(email)
                 user = int(match.group(1))
                 if user > 2**63 - 1:
                     raise ValueError("signed user identity overflows Xray")
