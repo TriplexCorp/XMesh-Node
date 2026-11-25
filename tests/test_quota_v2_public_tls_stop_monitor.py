@@ -75,12 +75,12 @@ class StopOnlyTests(unittest.TestCase):
         self.certificate = mock.patch.object(
             stop.public_tls_certificates, "verify_certificate_lineage",
             return_value={"vless-main":"root-owned","vless-cdn":"root-owned"})
-        self.certificate.start()
+        self.certificate_mock = self.certificate.start()
         self.addCleanup(self.certificate.stop)
         self.identity = mock.patch.object(
             stop.wal_transport.runtime_identity, "trusted_runtime_identity",
             return_value=self.runtime)
-        self.identity.start()
+        self.identity_mock = self.identity.start()
         self.addCleanup(self.identity.stop)
 
     def stop_child(self):
@@ -219,8 +219,8 @@ class StopOnlyTests(unittest.TestCase):
         monitor = self.monitor()
         self.assertFalse(monitor.stopped)
         self.assertIsNone(self.child.poll())
-        self.assertEqual(self.identity.call_count, 1)
-        self.assertEqual(self.certificate.call_count, 1)
+        self.assertEqual(self.identity_mock.call_count, 1)
+        self.assertEqual(self.certificate_mock.call_count, 1)
 
 
 if __name__ == "__main__":
