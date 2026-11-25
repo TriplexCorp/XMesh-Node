@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pure public TLS VLESS config checks; no public listener or cap issuer."""
 import copy
+import hashlib
 from pathlib import Path
 import sys
 import unittest
@@ -118,6 +119,8 @@ class PublicTlsCompilerTests(unittest.TestCase):
         node = 47
         activation = "a" * 64
         genesis_sha = "b" * 64
+        runtime_id = "c" * 64
+        revision = hashlib.sha256(quarantine._guard().canonical(profile())).hexdigest()
         now = 1_800_000_000_000
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -131,7 +134,9 @@ class PublicTlsCompilerTests(unittest.TestCase):
             payload = {
                 "schemaVersion": 1, "kind": "xmesh.quota-v2.public-tls-ingress",
                 "nodeId": node, "activationReceiptSha256": activation,
-                "genesisPolicySha256": genesis_sha, "canServePublic": True,
+                "genesisPolicySha256": genesis_sha,
+                "runtimeId": runtime_id, "profileRevision": revision,
+                "canServePublic": True,
                 "issuedAtMs": now, "validUntilMs": now + 60_000,
                 "bindings": bindings(),
             }
@@ -153,25 +158,29 @@ class PublicTlsCompilerTests(unittest.TestCase):
             valid = signed(payload)
             approved = tls.verify_signed_public_tls(
                 valid, node=node, activation=activation,
-                genesis_sha=genesis_sha, pinned=pub, now_ms=now)
+                genesis_sha=genesis_sha, runtime_id=runtime_id,
+                profile_revision=revision, pinned=pub, now_ms=now)
             self.assertEqual(
                 tls.compile_signed_public_tls(
                     profile(), valid, node=node, activation=activation,
-                    genesis_sha=genesis_sha, pinned=pub,
-                    now_ms=now)["inbounds"][0]["listen"], "0.0.0.0")
+                    genesis_sha=genesis_sha, runtime_id=runtime_id,
+                    pinned=pub, now_ms=now)["inbounds"][0]["listen"], "0.0.0.0")
             with self.assertRaises((TypeError, ValueError)):
                 tls.compile_signed_public_tls(
                     profile(), b"{}", node=node, activation=activation,
-                    genesis_sha=genesis_sha, pinned=pub, now_ms=now)
+                    genesis_sha=genesis_sha, runtime_id=runtime_id,
+                    pinned=pub, now_ms=now)
 
             for override in (
                 {"node": node + 1}, {"activation": "c" * 64},
-                {"genesis_sha": "d" * 64}, {"pinned": "e" * 64},
+                {"genesis_sha": "d" * 64}, {"runtime_id": "d" * 64},
+                {"profile_revision": "f" * 64}, {"pinned": "e" * 64},
                 {"now_ms": now - 1}, {"now_ms": now + 60_000},
             ):
                 with self.subTest(override=override), self.assertRaises(ValueError):
                     args = dict(node=node, activation=activation,
-                                genesis_sha=genesis_sha, pinned=pub, now_ms=now)
+                                genesis_sha=genesis_sha, runtime_id=runtime_id,
+                                profile_revision=revision, pinned=pub, now_ms=now)
                     args.update(override)
                     tls.verify_signed_public_tls(valid, **args)
             tampered = json.loads(valid)
@@ -179,13 +188,23 @@ class PublicTlsCompilerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tls.verify_signed_public_tls(
                     guard.canonical(tampered), node=node, activation=activation,
-                    genesis_sha=genesis_sha, pinned=pub, now_ms=now)
-            for patch in ({"canServePublic": False}, {"validUntilMs": now + 3600_000},
+                    genesis_sha=genesis_sha, runtime_id=runtime_id,
+                    profile_revision=revision, pinned=pub, now_ms=now)
+            changed = profile()
+            changed["inbounds"][0]["port"] = 29999
+            with self.assertRaises(ValueError):
+                tls.compile_signed_public_tls(
+                    changed, valid, node=node, activation=activation,
+                    genesis_sha=genesis_sha, runtime_id=runtime_id,
+                    pinned=pub, now_ms=now)
+            for patch in ({"runtimeId": "f" * 64}, {"profileRevision": "e" * 64},
+                          {"canServePublic": False}, {"validUntilMs": now + 3600_000},
                           {"kind": "other"}, {"nodeId": 90}):
                 with self.subTest(patch=patch), self.assertRaises(ValueError):
                     tls.verify_signed_public_tls(
                         signed(dict(payload, **patch)), node=node, activation=activation,
-                        genesis_sha=genesis_sha, pinned=pub, now_ms=now)
+                        genesis_sha=genesis_sha, runtime_id=runtime_id,
+                    profile_revision=revision, pinned=pub, now_ms=now)
 
 
 if __name__ == "__main__":
