@@ -213,15 +213,14 @@ def run(binary, root, echo_port, processes, netns=None, *, public_tls=False):
     profile = server_profile(echo_port, ports, reserve_port())
     client_config = client_profile(ports, socks)
     if public_tls:
-        # The one-off fixture uses self-signed local test certificates.
-        # These knobs MUST NEVER be installed: production validates exact
+        # The one-off fixture pins its self-signed local test certificates.
+        # These hostnames MUST NEVER be installed: production validates exact
         # Certbot lineages and the certificate chain independently.
         for outbound in client_config["outbounds"]:
             cls = outbound["tag"].rsplit("-", 1)[-1]
             outbound["streamSettings"] = {
                 "network": "tcp", "security": "tls",
-                "tlsSettings": {"serverName": f"{cls}.quota-test.example.com",
-                                "allowInsecure": True},
+                "tlsSettings": {"serverName": f"{cls}.quota-test.example.com"},
             }
     else:
         frontend = vless_ingress.frontend(profile)
@@ -327,6 +326,22 @@ def run(binary, root, echo_port, processes, netns=None, *, public_tls=False):
             record = inbound["streamSettings"]["tlsSettings"]["certificates"][0]
             record["certificateFile"] = str(cert)
             record["keyFile"] = str(secret)
+            # Xray v26.10.31 removed allowInsecure. Trust only the exact
+            # ephemeral leaf certificate issued for this disposable local
+            # test; no global certificate verification bypass is permitted.
+            cert_der = subprocess.check_output([
+                "openssl", "x509", "-in", str(cert), "-outform", "DER",
+            ], timeout=15)
+            fingerprint = hashlib.sha256(cert_der).hexdigest()
+            for outbound in client_config["outbounds"]:
+                if outbound["tag"].rsplit("-", 1)[-1] == name.removeprefix("vless-"):
+                    outbound["streamSettings"]["tlsSettings"][
+                        "pinnedPeerCertSha256"] = fingerprint
+        assert all(
+            len(out["streamSettings"]["tlsSettings"].get("pinnedPeerCertSha256", "")) == 64
+            for out in client_config["outbounds"]
+        ), "TLS client must pin the ephemeral certificate for each signed alias"
+        (root / "client.json").write_bytes(canonical(client_config))
         frontend["log"] = {"loglevel": "warning"}
         (root / "frontend.json").write_bytes(canonical(frontend))
     # No byte budget can pass merely because a private inbound was started.
