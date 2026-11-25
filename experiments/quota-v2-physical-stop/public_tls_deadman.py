@@ -23,6 +23,7 @@ import time
 MAX_SILENCE_MS = 10_000
 MIN_SILENCE_MS = 100
 READY_TIMEOUT_MS = 2_000
+ACK_TIMEOUT_MS = 1_000  # A silent or SIGSTOPed guardian must fail closed.
 
 
 def _starttime_and_parent(pid):
@@ -43,7 +44,7 @@ def _kill_pidfd(pidfd):
         pass
 
 
-def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, timeout_ms):
+def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, ack_fd, timeout_ms):
     """Separate guardian process. Never accepts an 'allowed' wire message."""
     pinned_fd = None
     ready = False
@@ -51,8 +52,8 @@ def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, timeout_ms):
         if (type(timeout_ms) is not int
                 or not MIN_SILENCE_MS <= timeout_ms <= MAX_SILENCE_MS
                 or os.getppid() != expected_parent
-                or heartbeat_fd < 3 or ready_fd < 3
-                or heartbeat_fd == ready_fd):
+                or any(fd < 3 for fd in (heartbeat_fd, ready_fd, ack_fd))
+                or len({heartbeat_fd, ready_fd, ack_fd}) != 3):
             return 2
         before, owner = _starttime_and_parent(child_pid)
         if owner != expected_parent:
@@ -61,7 +62,7 @@ def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, timeout_ms):
         after, owner = _starttime_and_parent(child_pid)
         if before != after or owner != expected_parent:
             return 2
-        # The two FDs were passed by our direct parent, not opened by path.
+        # All FDs were passed by our direct parent, not opened by path.
         # The parent must not consider supervision established until READY.
         os.write(ready_fd, b"READY")
         ready = True
@@ -89,6 +90,10 @@ def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, timeout_ms):
                     if data != b"P":  # No permit channel or free-form wire.
                         return 1
                     last = time.monotonic_ns()
+                    # An ACK proves that this independent process is still
+                    # consuming heartbeat messages. An unwatched one-way pipe
+                    # may accept writes for hours after its reader SIGSTOPs.
+                    os.write(ack_fd, b"A")
     except (OSError, ValueError, OverflowError):
         return 1
     finally:
@@ -99,7 +104,7 @@ def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, timeout_ms):
                 _kill_pidfd(pinned_fd)
             finally:
                 os.close(pinned_fd)
-        for fd in (heartbeat_fd, ready_fd):
+        for fd in (heartbeat_fd, ready_fd, ack_fd):
             try:
                 os.close(fd)
             except OSError:
@@ -121,15 +126,17 @@ class StopOnlyDeadman:
             raise ValueError("independent TLS deadman requires owned live child")
         self.child = child
         self._writer = None
+        self._ack_reader = None
         self._guardian = None
         reader, writer = os.pipe2(os.O_CLOEXEC)
         ready_r, ready_w = os.pipe2(os.O_CLOEXEC)
+        ack_r, ack_w = os.pipe2(os.O_CLOEXEC)
         try:
             guardian = subprocess.Popen(
                 [sys.executable, "-I", os.path.abspath(__file__), "--guardian",
                  str(child.pid), str(os.getpid()), str(reader), str(ready_w),
-                 str(timeout_ms)],
-                pass_fds=(reader, ready_w),
+                 str(ack_w), str(timeout_ms)],
+                pass_fds=(reader, ready_w, ack_w),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, close_fds=True)
             self._guardian = guardian
@@ -137,6 +144,8 @@ class StopOnlyDeadman:
             reader = -1
             os.close(ready_w)
             ready_w = -1
+            os.close(ack_w)
+            ack_w = -1
             poller = select.poll()
             poller.register(ready_r, select.POLLIN | select.POLLHUP | select.POLLERR)
             events = poller.poll(READY_TIMEOUT_MS)
@@ -144,6 +153,8 @@ class StopOnlyDeadman:
                 raise ValueError("independent TLS deadman did not bind child pidfd")
             self._writer = writer
             writer = -1
+            self._ack_reader = ack_r
+            ack_r = -1
         except Exception:
             self.close()
             if child.poll() is None:
@@ -151,17 +162,24 @@ class StopOnlyDeadman:
                 child.wait(timeout=2)
             raise
         finally:
-            for fd in (reader, writer, ready_r, ready_w):
+            for fd in (reader, writer, ready_r, ready_w, ack_r, ack_w):
                 if fd >= 0:
                     os.close(fd)
 
     def pulse(self):
         try:
-            if (self._writer is None or self._guardian is None
-                    or self._guardian.poll() is not None
+            if (self._writer is None or self._ack_reader is None
+                    or self._guardian is None or self._guardian.poll() is not None
                     or self.child.poll() is not None):
                 raise ValueError("unavailable TLS deadman or already stopped child")
             os.write(self._writer, b"P")
+            poller = select.poll()
+            poller.register(self._ack_reader, select.POLLIN | select.POLLHUP |
+                            select.POLLERR)
+            if not poller.poll(ACK_TIMEOUT_MS) or os.read(self._ack_reader, 1) != b"A":
+                raise ValueError("independent guardian did not acknowledge heartbeat")
+            if self._guardian.poll() is not None or self.child.poll() is not None:
+                raise ValueError("deadman or TLS child exited during heartbeat")
         except (OSError, ValueError):
             # A killed/failed guardian is not a reason to keep TLS alive.
             if self.child.poll() is None:
@@ -172,8 +190,11 @@ class StopOnlyDeadman:
 
     def close(self):
         writer, self._writer = self._writer, None
+        reader, self._ack_reader = self._ack_reader, None
         if writer is not None:
             os.close(writer)
+        if reader is not None:
+            os.close(reader)
         if self._guardian is not None:
             try:
                 self._guardian.wait(timeout=2)
@@ -191,7 +212,7 @@ class StopOnlyDeadman:
 
 
 def _cli():
-    if len(sys.argv) != 7 or sys.argv[1] != "--guardian":
+    if len(sys.argv) != 8 or sys.argv[1] != "--guardian":
         return 2
     try:
         return _serve(*map(int, sys.argv[2:]))
