@@ -4,6 +4,11 @@ import copy
 from pathlib import Path
 import sys
 import unittest
+import json
+import hashlib
+import subprocess
+import tempfile
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] /
                        "experiments" / "quota-v2-physical-stop"))
@@ -107,6 +112,75 @@ class PublicTlsCompilerTests(unittest.TestCase):
                 p = profile()
                 mutate(p)
                 tls.compile_public_tls(p, bindings())
+
+
+    def test_real_ed25519_public_authority_is_scoped_and_short_lived(self):
+        import quarantine_policy as quarantine
+        node = 47
+        activation = "a" * 64
+        genesis_sha = "b" * 64
+        now = 1_800_000_000_000
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            private = root / "key.pem"
+            subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519",
+                            "-out", str(private)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            pub = subprocess.check_output(
+                ["openssl", "pkey", "-in", str(private), "-pubout",
+                 "-outform", "DER"])[-32:].hex()
+            payload = {
+                "schemaVersion": 1, "kind": "xmesh.quota-v2.public-tls-ingress",
+                "nodeId": node, "activationReceiptSha256": activation,
+                "genesisPolicySha256": genesis_sha, "canServePublic": True,
+                "issuedAtMs": now, "validUntilMs": now + 60_000,
+                "bindings": bindings(),
+            }
+            guard = quarantine._guard()
+
+            def signed(value):
+                canonical = root / "canonical.json"
+                signature = root / "signature.bin"
+                canonical.write_bytes(guard.canonical(value))
+                subprocess.run(
+                    ["openssl", "pkeyutl", "-sign", "-inkey", str(private),
+                     "-rawin", "-in", str(canonical), "-out", str(signature)],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                return guard.canonical({
+                    "algorithm": "Ed25519", "payload": value,
+                    "signature": signature.read_bytes().hex(),
+                })
+
+            valid = signed(payload)
+            approved = tls.verify_signed_public_tls(
+                valid, node=node, activation=activation,
+                genesis_sha=genesis_sha, pinned=pub, now_ms=now)
+            self.assertEqual(
+                tls.compile_public_tls(profile(), approved)["inbounds"][0]["listen"],
+                "0.0.0.0")
+
+            for override in (
+                {"node": node + 1}, {"activation": "c" * 64},
+                {"genesis_sha": "d" * 64}, {"pinned": "e" * 64},
+                {"now_ms": now - 1}, {"now_ms": now + 60_000},
+            ):
+                with self.subTest(override=override), self.assertRaises(ValueError):
+                    tls.verify_signed_public_tls(
+                        valid, **dict(node=node, activation=activation,
+                                     genesis_sha=genesis_sha, pinned=pub,
+                                     now_ms=now, **override))
+            tampered = json.loads(valid)
+            tampered["payload"]["bindings"][0]["port"] = 9999
+            with self.assertRaises(ValueError):
+                tls.verify_signed_public_tls(
+                    guard.canonical(tampered), node=node, activation=activation,
+                    genesis_sha=genesis_sha, pinned=pub, now_ms=now)
+            for patch in ({"canServePublic": False}, {"validUntilMs": now + 3600_000},
+                          {"kind": "other"}, {"nodeId": 90}):
+                with self.subTest(patch=patch), self.assertRaises(ValueError):
+                    tls.verify_signed_public_tls(
+                        signed(dict(payload, **patch)), node=node, activation=activation,
+                        genesis_sha=genesis_sha, pinned=pub, now_ms=now)
 
 
 if __name__ == "__main__":
