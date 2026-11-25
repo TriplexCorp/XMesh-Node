@@ -15,6 +15,7 @@ import subprocess
 import time
 
 import public_tls_cap_watch
+import public_tls_deadman
 import public_tls_certificates
 import public_tls_frontend
 import public_tls_revocation_watch
@@ -35,7 +36,14 @@ class StopOnlyTlsMonitor:
         # or lifetime preflight fails before the first monitor tick.
         self._child = child
         self.stopped = False
+        self._deadman = None
         try:
+            # A separate Linux process pins the already-owned child with a
+            # pidfd BEFORE any potentially blocking TLS/Xray preflight. A
+            # frozen or dead Python monitor cannot leave this child alive
+            # indefinitely waiting for the next explicit stop-only check.
+            self._deadman = public_tls_deadman.StopOnlyDeadman(
+                child=child, timeout_ms=10_000)
             if type(runtime_pid) is not int or runtime_pid <= 0:
                 raise ValueError("metered runtime PID not established")
             # A TLS listener without a complete LIVE cap witness must never
@@ -100,6 +108,13 @@ class StopOnlyTlsMonitor:
                 raise ValueError("revocation watcher attempted to issue authorization")
             if self._revocation_watch.ensure_fresh() is not None:
                 raise ValueError("revocation watcher attempted to issue authorization")
+            # A heartbeat is a report that every independent cryptographic
+            # and measured Xray check just succeeded. It is NEVER permission
+            # for the guardian to open or continue traffic on its own.
+            if self._deadman.pulse() is not None:
+                raise ValueError("deadman attempted to issue traffic permission")
+            if self._child.poll() is not None:
+                raise ValueError("TLS child died during startup supervision")
         except Exception:
             self._stop("initial TLS supervision preflight failed")
 
@@ -112,6 +127,8 @@ class StopOnlyTlsMonitor:
             except subprocess.TimeoutExpired:
                 self._child.kill()
                 self._child.wait(timeout=2)
+        if self._deadman is not None:
+            self._deadman.close()
         raise ValueError("public TLS process stopped: " + reason)
 
     def check_stop_only(self):
@@ -179,6 +196,13 @@ class StopOnlyTlsMonitor:
                 raise ValueError("revocation witness cannot grant public TLS")
         except Exception:
             self._stop("signed revocation witness expired during cap probe")
+        try:
+            if self._deadman.pulse() is not None:
+                raise ValueError("deadman attempted to issue traffic permission")
+        except Exception:
+            self._stop("independent TLS deadman unavailable or unresponsive")
+        if self._child.poll() is not None:
+            self._stop("independent TLS deadman stopped the owned child")
         self._wall_ms, self._mono_ns = end_wall, end_mono
         # Deliberately no boolean "allowed" return. A successful stop-only
         # poll cannot issue permits, refresh caps or open an ingress.
