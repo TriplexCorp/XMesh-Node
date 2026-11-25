@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "quota-v2-physical-
 from cap_install import install_in_xray, observe_zero_meter_in_xray, fence_calendar_in_xray
 from runtime_identity import trusted_runtime_identity
 import vless_ingress
+import public_tls_frontend
 
 USER_A, USER_B, NODE = 83001, 83002, 4719
 UUID_A = "11111111-1111-4111-8111-111111111111"
@@ -206,14 +207,26 @@ def _namespace_echo(netns, user, echo_port, root, processes):
     raise AssertionError("isolated echo unavailable")
 
 
-def run(binary, root, echo_port, processes, netns=None):
+def run(binary, root, echo_port, processes, netns=None, *, public_tls=False):
     ports = {cls: reserve_port() for cls in CLASSES}
     socks = {f"{u}-{c}": reserve_port() for u in (USER_A, USER_B) for c in CLASSES}
     profile = server_profile(echo_port, ports, reserve_port())
-    frontend = vless_ingress.frontend(profile)
-    frontend["log"] = {"loglevel": "warning"}
-    (root/"frontend.json").write_bytes(canonical(frontend))
-    (root/"client.json").write_bytes(canonical(client_profile(ports, socks)))
+    client_config = client_profile(ports, socks)
+    if public_tls:
+        # The one-off fixture pins its self-signed local test certificates.
+        # These hostnames MUST NEVER be installed: production validates exact
+        # Certbot lineages and the certificate chain independently.
+        for outbound in client_config["outbounds"]:
+            cls = outbound["tag"].rsplit("-", 1)[-1]
+            outbound["streamSettings"] = {
+                "network": "tcp", "security": "tls",
+                "tlsSettings": {"serverName": f"{cls}.quota-test.example.com"},
+            }
+    else:
+        frontend = vless_ingress.frontend(profile)
+        frontend["log"] = {"loglevel": "warning"}
+        (root/"frontend.json").write_bytes(canonical(frontend))
+    (root/"client.json").write_bytes(canonical(client_config))
     policy_sha = hashlib.sha256(canonical(profile)).hexdigest()
     key = root/"nexus-key.pem"
     subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519",
@@ -271,6 +284,66 @@ def run(binary, root, echo_port, processes, netns=None):
     first = launch("backend-1", backend[1]["env"])
     await_socket(backend[1]["socket"], first)
     active[1] = (first.pid, trusted_runtime_identity(first.pid))
+    if public_tls:
+        # Bind a REAL disposable Ed25519 signature to the measured running
+        # Xray process and original raw VLESS profile. Public listeners are
+        # confined to loopback in this CI-only TLS transport rehearsal.
+        issued = time.time_ns() // 1_000_000
+        bindings = [
+            {"tag": f"vless-{cls}", "port": ports[cls],
+             "domain": f"{cls}.quota-test.example.com"}
+            for cls in CLASSES
+        ]
+        payload = {
+            "schemaVersion": 1, "kind": "xmesh.quota-v2.public-tls-ingress",
+            "nodeId": NODE, "activationReceiptSha256": ACTIVATION,
+            "genesisPolicySha256": "e" * 64,
+            "runtimeId": active[1][1], "profileRevision": policy_sha,
+            "issuedAtMs": issued, "validUntilMs": issued + 120_000,
+            "canServePublic": True, "bindings": bindings,
+        }
+        signed = sign(root, key, b"", payload)
+        frontend = public_tls_frontend.compile_signed_public_tls(
+            profile, signed, node=NODE, activation=ACTIVATION,
+            genesis_sha="e" * 64, runtime_id=active[1][1],
+            pinned=pub[-32:].hex(), now_ms=issued)
+        for inbound in frontend["inbounds"]:
+            name = inbound["tag"]
+            domain = next(x["domain"] for x in bindings if x["tag"] == name)
+            cert = root / f"{name}-cert.pem"
+            secret = root / f"{name}-key.pem"
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "ec",
+                "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                "-nodes", "-days", "1", "-out", str(cert),
+                "-keyout", str(secret), "-subj", f"/CN={domain}",
+                "-addext", f"subjectAltName=DNS:{domain}",
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            # Test-only transport substitution: NEVER a signed certificate
+            # admission. The independent root-owned lineage gate must run
+            # before any production socket is created.
+            inbound["listen"] = "127.0.0.1"
+            record = inbound["streamSettings"]["tlsSettings"]["certificates"][0]
+            record["certificateFile"] = str(cert)
+            record["keyFile"] = str(secret)
+            # Xray v26.10.31 removed allowInsecure. Trust only the exact
+            # ephemeral leaf certificate issued for this disposable local
+            # test; no global certificate verification bypass is permitted.
+            cert_der = subprocess.check_output([
+                "openssl", "x509", "-in", str(cert), "-outform", "DER",
+            ], timeout=15)
+            fingerprint = hashlib.sha256(cert_der).hexdigest()
+            for outbound in client_config["outbounds"]:
+                if outbound["tag"].rsplit("-", 1)[-1] == name.removeprefix("vless-"):
+                    outbound["streamSettings"]["tlsSettings"][
+                        "pinnedPeerCertSha256"] = fingerprint
+        assert all(
+            len(out["streamSettings"]["tlsSettings"].get("pinnedPeerCertSha256", "")) == 64
+            for out in client_config["outbounds"]
+        ), "TLS client must pin the ephemeral certificate for each signed alias"
+        (root / "client.json").write_bytes(canonical(client_config))
+        frontend["log"] = {"loglevel": "warning"}
+        (root / "frontend.json").write_bytes(canonical(frontend))
     # No byte budget can pass merely because a private inbound was started.
     for cls in CLASSES:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -335,6 +408,22 @@ def run(binary, root, echo_port, processes, netns=None):
                                         f"xmesh-u{USER_B}--vless-main") == {
             "uplink": 32768, "downlink": 32768,
         }
+        if public_tls:
+            # Actual TLS-encrypted VLESS has been decoded by the isolated
+            # frontend, crossed a per-user private Unix socket, and charged
+            # by the signed measured Xray. No unsigned direct route exists.
+            assert query_direction_counters(
+                binary, backend[1]["api"], f"xmesh-u{USER_A}--vless-main") == {
+                    "uplink": 16384, "downlink": 16384,
+                }
+            assert all(
+                x["streamSettings"]["security"] == "tls"
+                for x in frontend["inbounds"]
+            )
+            print("PASS: real CI-only VLESS+TLS -> private signed metered Xray; "
+                  "two users accounted, unsigned clients denied. "
+                  "NOT a production certificate/expiry or public-network proof.")
+            return
 
         # A clean second Xray can run concurrently; its per-user WAL and
         # private authenticated inbound cannot touch B's in-flight stream.
@@ -510,8 +599,11 @@ def run(binary, root, echo_port, processes, netns=None):
 def main():
     assert os.environ.get("GITHUB_ACTIONS") == "true"
     assert os.environ.get("XMESH_DISPOSABLE_XRAY_PATCH_EXPERIMENT") == "1"
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: test_xray_live_ingress_cutover.py PINNED_XRAY_BINARY")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--tls"):
+        raise SystemExit("usage: test_xray_live_ingress_cutover.py PINNED_XRAY_BINARY [--tls]")
+    public_tls = len(sys.argv) == 3
+    if public_tls and os.environ.get("XMESH_QUOTA_V2_TLS_DISPOSABLE") != "1":
+        raise SystemExit("TLS test requires explicitly disposable CI context")
     with tempfile.TemporaryDirectory(prefix="xmesh-live-ingress-") as tmp, EchoServer(("127.0.0.1",0), EchoHandler) as echo:
         root = Path(tmp)
         thread = threading.Thread(target=echo.serve_forever, daemon=True)
@@ -524,7 +616,8 @@ def main():
                 subprocess.run(["sudo", "ip", "netns", "add", netns], check=True)
                 subprocess.run(["sudo", "ip", "-n", netns, "link",
                                 "set", "lo", "up"], check=True)
-            run(sys.argv[1], root, echo.server_address[1], processes, netns)
+            run(sys.argv[1], root, echo.server_address[1], processes, netns,
+                public_tls=public_tls)
         except BaseException:
             for log in root.glob("*.log"):
                 print(f"{log.name}:\\n{log.read_text(errors='replace')[-6000:]}",
