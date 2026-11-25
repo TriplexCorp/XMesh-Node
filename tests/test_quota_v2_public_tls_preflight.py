@@ -240,7 +240,7 @@ class PublicTlsEvidenceTests(unittest.TestCase):
                 "xmesh-u99--vless-main")
             with self.assertRaisesRegex(ValueError, "signed Genesis user UUID"):
                 check(wrong)
-            for bad in ("INVALID", UUID_99, UUID_91.upper(), None):
+            for bad in ("INVALID", UUID_99, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".upper(), None):
                 candidate = copy.deepcopy(original)
                 candidate["reply"]["policy"]["users"][0]["xrayId"] = bad
                 with self.subTest(xrayId=bad), self.assertRaises(ValueError):
