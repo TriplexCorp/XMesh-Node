@@ -29,6 +29,7 @@ PIN_PATH = "/api/v1/node/quota-v2/policy-pin"
 LEASE_PATH = "/api/v1/node/quota-v2/genesis-reservation"
 CAP_DELIVERY_PATH = "/api/v1/node/quota-v2/genesis-cap-delivery"
 TLS_PREFLIGHT_PATH = "/api/v1/node/quota-v2/public-tls-preflight"
+TLS_REVOCATION_PATH = "/api/v1/node/quota-v2/public-tls-revocation"
 MAX_REPLY = 262144
 PREVIEW_FILE = "genesis-config-preview.json"
 INTENT_FILE = "genesis-prepare-intent.json"
@@ -202,19 +203,25 @@ def _post_quarantined_desired(request, state, path=PATH):
     No curl, raw HTTP, Ed25519 legacy fallback, insecure TLS or alternate host
     is reachable from this operation.
     """
-    if path not in (PATH,PIN_PATH,LEASE_PATH,CAP_DELIVERY_PATH,TLS_PREFLIGHT_PATH):
+    if path not in (PATH,PIN_PATH,LEASE_PATH,CAP_DELIVERY_PATH,TLS_PREFLIGHT_PATH,TLS_REVOCATION_PATH):
         raise ValueError("unregistered XSP/2 product operation")
     with tempfile.TemporaryDirectory(prefix="xmesh-quarantine-",dir=state) as root:
         root=Path(root)
         body,reply,status=(root/n for n in ("request.json","response.json","status.txt"))
         body.write_bytes(wal_transport.observed.canonical(request))
+        # A TLS monitor must stop rather than wait the ordinary 30s RPC budget.
+        timeout = 2.8 if path == TLS_REVOCATION_PATH else 30
+        maximum = 4096 if path == TLS_REVOCATION_PATH else MAX_REPLY
         subprocess.run([PRODUCT,"request","--path",path,
             "--body-file",str(body),"--output-file",str(reply),
-            "--status-file",str(status)],timeout=30,check=True)
+            "--status-file",str(status)],timeout=timeout,check=True)
         if status.read_text(encoding="ascii").strip()!="200":
             raise ValueError("Nexus did not accept strict quarantined desired policy")
         with reply.open("rb") as stream:
-            return stream.read(MAX_REPLY+1)
+            raw = stream.read(maximum+1)
+            if len(raw)>maximum:
+                raise ValueError("oversized strict-PQ response")
+            return raw
 
 
 def _enrolled_activation(panel,node):
