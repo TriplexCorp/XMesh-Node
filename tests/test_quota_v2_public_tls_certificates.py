@@ -83,11 +83,11 @@ class CertificateTests(unittest.TestCase):
         leaf = archive / "leaf.pem"
         extensions = archive / "tls-server.ext"
         extensions.write_text(
-            "[server_cert]\\n"
-            "basicConstraints=critical,CA:FALSE\\n"
-            "keyUsage=critical,digitalSignature\\n"
-            "extendedKeyUsage=serverAuth\\n"
-            "subjectAltName=DNS:" + (subject or domain) + "\\n"
+            "[server_cert]\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature\n"
+            "extendedKeyUsage=serverAuth\n"
+            "subjectAltName=DNS:" + (subject or domain) + "\n"
         )
         subprocess.run([
             "/usr/bin/openssl", "req", "-new", "-newkey", "ec",
