@@ -9,25 +9,34 @@ installed Xray metering, a WAL proof or a trusted TLS certificate.
 import argparse
 import json
 import os
+import re
 import sys
+import time
+
+import public_tls_cap_watch
 
 import genesis_reservation
 import quarantine_policy as quarantine
 import wal_transport
 
 MAX_REPLY = 1536
+MAX_PROBE_NS = 9_000_000_000
+CAP_FILE = re.compile(r"genesis-positive-cap-u([1-9][0-9]{0,18})\.json\Z")
+RENEW_FILE = re.compile(r"genesis-renewal-u[1-9][0-9]*-r[1-9][0-9]*\.json\Z")
+SOCKET = "/var/lib/xmesh-first-meter/runtime/drain.sock"
 MAX_LIFETIME_MS = 120_000
 STATUS = "candidate_only_not_authorized"
 KEYS = frozenset({
-    "status", "nodeId", "userId", "evidenceMatched",
+    "status", "nodeId", "userId", "evidenceMatched", "capRosterSha256",
     "canServePublic", "canStart", "canResume", "canSpend",
     "authorizedBytes", "signedEnvelope", "liveMeterVerified",
     "certificateVerified", "revocationWatchInstalled",
 })
 
 
-def verify_zero_authority(raw, *, node, user):
-    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_REPLY:
+def verify_zero_authority(raw, *, node, user, roster_sha256):
+    if (not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_REPLY
+            or not wal_transport._hex(roster_sha256, 64)):
         raise ValueError("public TLS evidence response size invalid")
     response = wal_transport.observed.strict_json(raw)
     if (not isinstance(response, dict) or set(response) != KEYS
@@ -35,6 +44,9 @@ def verify_zero_authority(raw, *, node, user):
             or type(response["nodeId"]) is not int or response["nodeId"] != node
             or type(response["userId"]) is not int or response["userId"] != user
             or type(response["evidenceMatched"]) is not bool
+            or (response["capRosterSha256"] != roster_sha256
+                if response["evidenceMatched"] else
+                response["capRosterSha256"] is not None)
             or any(response[key] is not False for key in (
                 "canServePublic", "canStart", "canResume", "canSpend",
                 "liveMeterVerified", "certificateVerified",
@@ -48,11 +60,59 @@ def verify_zero_authority(raw, *, node, user):
         "nodeId": node,
         "userId": user,
         "evidenceMatched": response["evidenceMatched"],
+        "capRosterSha256": (roster_sha256 if response["evidenceMatched"] else None),
         "canServePublic": False,
         "canStart": False,
         "canResume": False,
         "authorizedBytes": 0,
     }
+
+
+def _full_signed_roster(fd, original, node, activation, pinned, measured):
+    """Derive all grants from root-private files; never trust caller roster IDs."""
+    policy = original["reply"]["policy"]
+    users = policy["users"]
+    if not isinstance(users, list) or not 1 <= len(users) <= 2048:
+        raise ValueError("missing bounded original TLS user roster")
+    expected = set()
+    for record in users:
+        uid = record.get("userId") if isinstance(record, dict) else None
+        if (type(uid) is not int or not 0 < uid <= 2**63-1
+                or uid in expected or record.get("onHold") is not True
+                or type(record.get("offlineBudgetBytes")) is not int
+                or record["offlineBudgetBytes"] != 0):
+            raise ValueError("malformed, repeated or unquarantined TLS user")
+        expected.add(uid)
+    names = os.listdir(fd)
+    if any(RENEW_FILE.fullmatch(name) for name in names):
+        raise ValueError("a later signed cap generation requires a new TLS admission protocol")
+    stored = {}
+    for name in names:
+        match = CAP_FILE.fullmatch(name)
+        if match is None:
+            continue
+        uid = int(match.group(1))
+        if uid not in expected or uid in stored:
+            raise ValueError("foreign historical signed TLS-cap file")
+        envelope = genesis_reservation._identity_file(fd, name, 16384)
+        if (not isinstance(envelope, dict)
+                or set(envelope) != {"status", "nodeId", "userId", "signedEnvelope"}
+                or envelope["status"] != "committed_first_cap"
+                or type(envelope["nodeId"]) is not int or envelope["nodeId"] != node
+                or type(envelope["userId"]) is not int or envelope["userId"] != uid
+                or not isinstance(envelope["signedEnvelope"], str)):
+            raise ValueError("foreign or noncanonical root-owned signed TLS cap")
+        stored[uid] = envelope["signedEnvelope"].encode("utf-8")
+    if set(stored) != expected:
+        raise ValueError("missing initial cap for one or more signed TLS users")
+    profile = original["reply"]["config"]
+    if (not isinstance(profile, dict) or
+            wal_transport.observed.canonical(profile) is None):
+        raise ValueError("missing original Genesis measured VLESS profile")
+    return public_tls_cap_watch.SignedCapRosterWatch(
+        profile=profile, signed_grants=stored, pinned=pinned, node=node,
+        activation=activation, genesis_sha=original["reply"]["policySha256"],
+        runtime_id=measured[3], trusted_pid=measured[2], socket_path=SOCKET)
 
 
 def probe(panel, node, user, state, required_lifetime_ms=30_000):
@@ -64,6 +124,7 @@ def probe(panel, node, user, state, required_lifetime_ms=30_000):
             or not 1_000 <= required_lifetime_ms <= MAX_LIFETIME_MS):
         raise ValueError("strict enrolled root Quota V2 TLS probe required")
 
+    started = time.monotonic_ns()
     state_fd, lock = quarantine._locked_private_state(state)
     try:
         pinned = wal_transport._panel_pin()
@@ -76,6 +137,13 @@ def probe(panel, node, user, state, required_lifetime_ms=30_000):
         measured_before = wal_transport._measure_quarantined_runtime(pins)
         if measured_before[3] != original["prepared"]["payload"]["candidateRuntimeId"]:
             raise ValueError("original signed meter runtime has changed")
+        full_roster = _full_signed_roster(
+            state_fd, original, node, activation, pinned, measured_before)
+        if full_roster.check() is not None:
+            raise ValueError("local Xray roster witness tried to grant TLS authority")
+        if (full_roster.profile_sha256 != original["reply"]["revision"]
+                or user not in full_roster._grants):
+            raise ValueError("local installed Xray TLS roster differs from Genesis")
 
         request = {
             "nodeId": node,
@@ -84,15 +152,19 @@ def probe(panel, node, user, state, required_lifetime_ms=30_000):
             "genesisPolicySha256": original["reply"]["policySha256"],
             "runtimeId": measured_before[3],
             "profileRevision": original["reply"]["revision"],
+            "capRosterSha256": full_roster.roster_sha256,
             "requiredLifetimeMs": required_lifetime_ms,
         }
         raw = quarantine._post_quarantined_desired(
             request, state, quarantine.TLS_PREFLIGHT_PATH)
-        result = verify_zero_authority(raw, node=node, user=user)
+        result = verify_zero_authority(
+            raw, node=node, user=user, roster_sha256=full_roster.roster_sha256)
 
         if (before_activation != quarantine._enrolled_activation(panel, node)
-                or measured_before != wal_transport._measure_quarantined_runtime(pins)):
-            raise ValueError("strict-PQ activation or metered Xray changed during TLS probe")
+                or measured_before != wal_transport._measure_quarantined_runtime(pins)
+                or full_roster.check() is not None
+                or time.monotonic_ns() - started >= MAX_PROBE_NS):
+            raise ValueError("strict-PQ activation, live cap roster or Xray changed during TLS probe")
         # No permit, no durable "eligible" state, no traffic, no state write.
         return result
     finally:
