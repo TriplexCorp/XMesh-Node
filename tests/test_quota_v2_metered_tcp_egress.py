@@ -106,7 +106,11 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     async def close_writer(writer):
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except (ConnectionError, OSError):
+            # A rejected credential can reset an unconsumed Unix request.
+            pass
 
     @staticmethod
     async def assert_denied(reader):
@@ -130,6 +134,8 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     writer.write(await reader.readexactly(4))
                     await writer.drain()
+                except (ConnectionError, OSError, asyncio.IncompleteReadError):
+                    pass
                 finally:
                     writer.close()
             server = await asyncio.start_server(echo, "127.0.0.1", 0)
