@@ -91,6 +91,7 @@ class StopOnlyTests(unittest.TestCase):
         self.cap_watch.node = self.node
         self.cap_watch.activation = self.activation
         self.cap_watch.runtime_id = self.runtime
+        self.cap_watch.genesis_sha = self.genesis
         self.cap_watch.pinned = self.pinned
         self.cap_watch.check.return_value = None
 
@@ -222,6 +223,7 @@ class StopOnlyTests(unittest.TestCase):
             {"profile_sha256": "f" * 64},
             {"node": self.node + 1},
             {"runtime_id": "f" * 64},
+            {"genesis_sha": "f" * 64},
             {"pinned": "f" * 64},
         )):
             if index:
@@ -232,7 +234,7 @@ class StopOnlyTests(unittest.TestCase):
                 altered = mock.Mock(
                     spec=stop.public_tls_cap_watch.SignedCapRosterWatch)
                 for field in ("profile_sha256", "node", "activation",
-                              "runtime_id", "pinned"):
+                              "runtime_id", "genesis_sha", "pinned"):
                     setattr(altered, field, getattr(self.cap_watch, field))
                 setattr(altered, next(iter(changes)), next(iter(changes.values())))
             with self.subTest(changes=changes), self.assertRaisesRegex(
