@@ -16,6 +16,8 @@ import public_tls_preflight as probe
 
 NODE = 47
 USER = 91
+UUID_91 = "00000000-0000-4000-8000-000000000091"
+UUID_99 = "00000000-0000-4000-8000-000000000099"
 
 
 def reply(matched=True):
@@ -143,10 +145,17 @@ class PublicTlsEvidenceTests(unittest.TestCase):
         original = {
             "reply": {
                 "policySha256": "b"*64,
-                "config": {"inbounds": []},
+                "config": {"inbounds": [{
+                    "tag": "vless-main", "settings": {"clients": [
+                        {"id": UUID_99, "email": "xmesh-u99--vless-main"},
+                        {"id": UUID_91, "email": "xmesh-u91--vless-main"},
+                    ]},
+                }]},
                 "policy": {"users": [
-                    {"userId": 99, "onHold": True, "offlineBudgetBytes": 0},
-                    {"userId": USER, "onHold": True, "offlineBudgetBytes": 0},
+                    {"userId": 99, "onHold": True, "offlineBudgetBytes": 0,
+                     "xrayId": UUID_99},
+                    {"userId": USER, "onHold": True, "offlineBudgetBytes": 0,
+                     "xrayId": UUID_91},
                 ]},
             },
         }
@@ -184,11 +193,72 @@ class PublicTlsEvidenceTests(unittest.TestCase):
         self.assertEqual(args["trusted_pid"], 1234)
         self.assertEqual(args["socket_path"], probe.SOCKET)
 
+    def test_original_signed_policy_uuid_must_match_each_xray_vless_client(self):
+        original = {
+            "reply": {
+                "policySha256": "b"*64,
+                "config": {"inbounds": [
+                    {"tag": "vless-main", "settings": {"clients": [
+                        {"id": UUID_91, "email": "xmesh-u91--vless-main"},
+                    ]}},
+                    {"tag": "vless-cdn", "settings": {"clients": [
+                        {"id": UUID_91, "email": "xmesh-u91--vless-cdn"},
+                    ]}},
+                ]},
+                "policy": {"users": [
+                    {"userId": USER, "onHold": True, "offlineBudgetBytes": 0,
+                     "xrayId": UUID_91},
+                ]},
+            }
+        }
+        signed = wire({
+            "algorithm": "Ed25519",
+            "payload": {"kind": "xmesh.quota-v2.xray-cap-admission"},
+            "signature": "1"*128,
+        }).decode()
+        receipt = {"status": "committed_first_cap", "nodeId": NODE,
+                   "userId": USER, "signedEnvelope": signed}
+        with (mock.patch.object(probe.os, "listdir",
+                                return_value=[f"genesis-positive-cap-u{USER}.json"]),
+              mock.patch.object(probe.genesis_reservation, "_identity_file",
+                                return_value=receipt),
+              mock.patch.object(probe.public_tls_cap_watch,
+                                "SignedCapRosterWatch") as watcher):
+            def check(profile):
+                candidate = copy.deepcopy(original)
+                candidate["reply"]["config"] = profile
+                return probe._full_signed_roster(
+                    17, candidate, NODE, "a"*64, "f"*64,
+                    ("container", "image", 1234, "c"*64))
+            self.assertIs(check(original["reply"]["config"]), watcher.return_value)
+            wrong = copy.deepcopy(original["reply"]["config"])
+            wrong["inbounds"][1]["settings"]["clients"][0]["id"] = UUID_99
+            with self.assertRaisesRegex(ValueError, "signed Genesis user UUID"):
+                check(wrong)
+            wrong = copy.deepcopy(original["reply"]["config"])
+            wrong["inbounds"][0]["settings"]["clients"][0]["email"] = (
+                "xmesh-u99--vless-main")
+            with self.assertRaisesRegex(ValueError, "signed Genesis user UUID"):
+                check(wrong)
+            for bad in ("INVALID", UUID_99, UUID_91.upper(), None):
+                candidate = copy.deepcopy(original)
+                candidate["reply"]["policy"]["users"][0]["xrayId"] = bad
+                with self.subTest(xrayId=bad), self.assertRaises(ValueError):
+                    probe._full_signed_roster(
+                        17, candidate, NODE, "a"*64, "f"*64,
+                        ("container", "image", 1234, "c"*64))
+        # A signed cap is never permission to open a public listener.
+        self.assertFalse(hasattr(probe, "launch_public_listener"))
+
     def test_missing_foreign_duplicate_or_renewed_root_cap_fails_before_network(self):
         original = {"reply": {
             "policy": {"users": [{"userId": USER, "onHold": True,
-                                   "offlineBudgetBytes": 0}]},
-            "config": {"inbounds": []}, "policySha256": "b"*64,
+                                   "offlineBudgetBytes": 0, "xrayId": UUID_91}]},
+            "config": {"inbounds": [{
+                "tag": "vless-main", "settings": {"clients": [
+                    {"id": UUID_91, "email": "xmesh-u91--vless-main"},
+                ]},
+            }]}, "policySha256": "b"*64,
         }}
         measured = ("container", "image", 1234, "c"*64)
         variants = [
