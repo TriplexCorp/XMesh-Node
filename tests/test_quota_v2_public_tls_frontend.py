@@ -5,7 +5,6 @@ from pathlib import Path
 import sys
 import unittest
 import json
-import hashlib
 import subprocess
 import tempfile
 
@@ -165,10 +164,10 @@ class PublicTlsCompilerTests(unittest.TestCase):
                 {"now_ms": now - 1}, {"now_ms": now + 60_000},
             ):
                 with self.subTest(override=override), self.assertRaises(ValueError):
-                    tls.verify_signed_public_tls(
-                        valid, **dict(node=node, activation=activation,
-                                     genesis_sha=genesis_sha, pinned=pub,
-                                     now_ms=now, **override))
+                    args = dict(node=node, activation=activation,
+                                genesis_sha=genesis_sha, pinned=pub, now_ms=now)
+                    args.update(override)
+                    tls.verify_signed_public_tls(valid, **args)
             tampered = json.loads(valid)
             tampered["payload"]["bindings"][0]["port"] = 9999
             with self.assertRaises(ValueError):
