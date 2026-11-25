@@ -98,8 +98,13 @@ def verify_certificate_lineage(config):
         cert_record = tls_settings["certificates"][0]
         if not isinstance(cert_record, dict) or set(cert_record) != {"certificateFile", "keyFile"}:
             raise ValueError("unexpected TLS certificate configuration")
-        if (cert_record.get("certificateFile") != str(cert)
-                or cert_record.get("keyFile") != str(key)):
+        # Signed Xray JSON must always contain the immutable production
+        # /etc/letsencrypt paths, never a testing or runtime-redirected root.
+        # LIVE_ROOT/ARCHIVE_ROOT are replaceable only by isolated unit tests
+        # to simulate filesystem ownership and symlink invariants.
+        expected = "/etc/letsencrypt/live/" + name
+        if (cert_record.get("certificateFile") != expected + "/fullchain.pem"
+                or cert_record.get("keyFile") != expected + "/privkey.pem"):
             raise ValueError("TLS config key paths diverged from signed hostname")
         _openssl("x509", "-in", cert, "-noout", "-checkend", str(RENEWAL_MARGIN_SECONDS))
         alt = _openssl("x509", "-in", cert, "-noout", "-ext", "subjectAltName").decode("ascii")
