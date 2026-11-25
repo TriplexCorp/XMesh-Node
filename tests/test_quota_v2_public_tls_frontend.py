@@ -38,7 +38,7 @@ class PublicTlsCompilerTests(unittest.TestCase):
     def test_tls_is_only_on_isolated_ingress_and_never_changes_meter(self):
         original = profile()
         previous = copy.deepcopy(original)
-        out = tls.compile_public_tls(original, bindings())
+        out = tls._compile_verified_tls_config(original, bindings())
         self.assertEqual(original, previous)
         self.assertEqual(len(out["inbounds"]), 2)
         for inbound, binding in zip(out["inbounds"], bindings()):
@@ -77,7 +77,7 @@ class PublicTlsCompilerTests(unittest.TestCase):
         ]
         for bad in malformed:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                tls.compile_public_tls(profile(), bad)
+                tls._compile_verified_tls_config(profile(), bad)
 
     def test_domain_canonical_and_cert_paths_not_caller_supplied(self):
         for domain in ("UPPER.example.com", "*.example.com", "../example.com",
@@ -86,13 +86,13 @@ class PublicTlsCompilerTests(unittest.TestCase):
                        "test..example.com", "éxample.com",
                        "foo/bar.example.com", "x" * 64 + ".example.com"):
             with self.subTest(domain=domain), self.assertRaises(ValueError):
-                tls.compile_public_tls(
+                tls._compile_verified_tls_config(
                     profile(), [bindings()[0], dict(bindings()[1], domain=domain)])
         for extra in ({"certificateFile": "/etc/ssl/unsafe"},
                       {"fallback": True}, {"listen": "127.0.0.1"},
                       {"tlsSettings": {}}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
-                tls.compile_public_tls(
+                tls._compile_verified_tls_config(
                     profile(), [dict(bindings()[0], **extra), bindings()[1]])
 
     def test_untrusted_meter_and_unsupported_transport_refused(self):
@@ -110,7 +110,7 @@ class PublicTlsCompilerTests(unittest.TestCase):
                     (ValueError, TypeError, KeyError)):
                 p = profile()
                 mutate(p)
-                tls.compile_public_tls(p, bindings())
+                tls._compile_verified_tls_config(p, bindings())
 
 
     def test_real_ed25519_public_authority_is_scoped_and_short_lived(self):
@@ -155,8 +155,14 @@ class PublicTlsCompilerTests(unittest.TestCase):
                 valid, node=node, activation=activation,
                 genesis_sha=genesis_sha, pinned=pub, now_ms=now)
             self.assertEqual(
-                tls.compile_public_tls(profile(), approved)["inbounds"][0]["listen"],
-                "0.0.0.0")
+                tls.compile_signed_public_tls(
+                    profile(), valid, node=node, activation=activation,
+                    genesis_sha=genesis_sha, pinned=pub,
+                    now_ms=now)["inbounds"][0]["listen"], "0.0.0.0")
+            with self.assertRaises((TypeError, ValueError)):
+                tls.compile_signed_public_tls(
+                    profile(), b"{}", node=node, activation=activation,
+                    genesis_sha=genesis_sha, pinned=pub, now_ms=now)
 
             for override in (
                 {"node": node + 1}, {"activation": "c" * 64},
