@@ -73,7 +73,23 @@ def verify_signed_public_tls(raw, *, node, activation, genesis_sha, pinned,
 
 
 
-def compile_public_tls(profile, bindings):
+
+def compile_signed_public_tls(profile, signed_envelope, *, node, activation,
+                              genesis_sha, pinned, now_ms=None):
+    """Only supported public compiler entry: fail closed without Ed25519 proof.
+
+    Caller still must check current per-user caps, trusted meter process,
+    certificate lineage and online revocation throughout the listener life.
+    Production wiring is intentionally absent until those gates exist.
+    """
+    bindings = verify_signed_public_tls(
+        signed_envelope, node=node, activation=activation,
+        genesis_sha=genesis_sha, pinned=pinned, now_ms=now_ms)
+    return _compile_verified_tls_config(profile, bindings)
+
+
+
+def _compile_verified_tls_config(profile, bindings):
     """Produce an isolated TLS frontend, never a metered Xray configuration.
 
     The caller, not this pure compiler, must cryptographically authenticate
