@@ -157,8 +157,11 @@ class PublicTlsEvidenceTests(unittest.TestCase):
         def read_receipt(_fd, name, max_size):
             self.assertEqual(max_size, 16384)
             user = int(name.split("-u")[1].split(".")[0])
+            cap = wire({"algorithm": "Ed25519",
+                        "payload": {"kind": "xmesh.quota-v2.xray-cap-admission"},
+                        "signature": "1"*128}).decode()
             return dict(status="committed_first_cap", nodeId=NODE,
-                        userId=user, signedEnvelope=f"signed-{user}")
+                        userId=user, signedEnvelope=cap)
         with (mock.patch.object(probe.os, "listdir", return_value=files),
               mock.patch.object(probe.genesis_reservation, "_identity_file",
                                 side_effect=read_receipt),
@@ -170,8 +173,14 @@ class PublicTlsEvidenceTests(unittest.TestCase):
         self.assertIs(result, witness.return_value)
         args = witness.call_args.kwargs
         self.assertEqual(set(args["signed_grants"]), {99, USER})
-        self.assertEqual(args["signed_grants"][99], b"signed-99")
-        self.assertEqual(args["signed_grants"][USER], b"signed-91")
+        self.assertEqual(args["signed_grants"][99],
+                         wire({"algorithm": "Ed25519",
+                               "payload": {"kind": "xmesh.quota-v2.xray-cap-admission"},
+                               "signature": "1"*128}))
+        self.assertEqual(args["signed_grants"][USER],
+                         wire({"algorithm": "Ed25519",
+                               "payload": {"kind": "xmesh.quota-v2.xray-cap-admission"},
+                               "signature": "1"*128}))
         self.assertEqual(args["trusted_pid"], 1234)
         self.assertEqual(args["socket_path"], probe.SOCKET)
 
@@ -184,6 +193,8 @@ class PublicTlsEvidenceTests(unittest.TestCase):
         measured = ("container", "image", 1234, "c"*64)
         variants = [
             [], ["genesis-positive-cap-u92.json"],
+            ["genesis-positive-cap-u091.json",
+             "genesis-positive-cap-u91.json"],
             ["genesis-renewal-u91-r2.json",
              "genesis-positive-cap-u91.json"],
         ]
