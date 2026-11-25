@@ -81,6 +81,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_frontend.py tests/test_quota_v2_public_tls_frontend.py
           python3 tests/test_quota_v2_public_tls_frontend.py -v
+      - name: Root-owned public TLS lineage and certificate safety tests
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_certificates.py tests/test_quota_v2_public_tls_certificates.py
+          sudo python3 tests/test_quota_v2_public_tls_certificates.py -v
       - run: sudo python3 tests/test_quota_v2_charge_worker.py
       - run: bash -n bootstrap.sh deploy/install-v6-strict-operational-agents.sh deploy/install-metered-services.sh
       - run: python3 deploy/test-xmesh-policy-independent-credentials.py
