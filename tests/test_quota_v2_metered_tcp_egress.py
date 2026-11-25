@@ -77,9 +77,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await reader.readexactly(1), b"\x01")
 
     async def test_valid_peer_has_bounded_frame_and_public_dns(self):
-        with mock.patch.object(egress, "require_qualified_peer"), \
-             mock.patch.object(egress, "public_tcp_addresses",
-                    side_effect=self.public_fixture):
+        with mock.patch.object(egress, "require_qualified_peer"):
             async def echo(reader, writer):
                 try:
                     writer.write(await reader.readexactly(4))

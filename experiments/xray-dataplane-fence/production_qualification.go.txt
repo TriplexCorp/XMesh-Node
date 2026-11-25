@@ -92,6 +92,7 @@ func validateProductionRole(role string, env func(string) string) error {
             env("XMESH_QUOTA_PRIVATE_VLESS") != "1" ||
             env("XMESH_EXPERIMENTAL_OBSERVED_DIR") == "" ||
             env("XMESH_EXPERIMENTAL_DRAIN_SOCKET") == "" ||
+            env("XMESH_QUOTA_EGRESS_SOCKET") != meteredEgressSocket ||
             env("XMESH_QUOTA_INGRESS_STATE") != "" {
             return errors.New("production meter requires signed cap binding, private listeners and WAL")
         }

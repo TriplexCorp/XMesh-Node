@@ -1,0 +1,130 @@
+// Production-only TCP egress from the metered Xray to the root-owned host
+// bridge. The Xray itself retains network=none, signed cap admission and WAL.
+package xmeshdrain
+
+import (
+    "context"
+    "encoding/binary"
+    "errors"
+    "io"
+    "net"
+    "regexp"
+    "strings"
+    "time"
+
+    xnet "github.com/xtls/xray-core/common/net"
+    "github.com/xtls/xray-core/common/session"
+)
+
+const meteredEgressSocket = "/run/xmesh-quota-egress/egress.sock"
+const egressMagic = "XME1"
+var egressDomain = regexp.MustCompile(`(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$`)
+
+func IsProductionMeter() bool { return productionRole == "meter" }
+
+func meterEgressRequest(destination xnet.Destination) ([]byte, error) {
+    if destination.Network != xnet.Network_TCP || destination.Address == nil ||
+        destination.Port == 0 {
+        return nil, errors.New("metered egress only supports TCP destinations")
+    }
+    host := destination.Address.String()
+    if len(host) == 0 || len(host) > 253 {
+        return nil, errors.New("invalid metered TCP hostname size")
+    }
+    if net.ParseIP(host) == nil && (!egressDomain.MatchString(host) ||
+        strings.HasSuffix(host, "..")) {
+        return nil, errors.New("invalid metered TCP hostname")
+    }
+    for i := 0; i < len(host); i++ {
+        if host[i] < 33 || host[i] > 126 {
+            return nil, errors.New("invalid metered TCP hostname encoding")
+        }
+    }
+    frame := make([]byte, 8+len(host))
+    copy(frame, egressMagic)
+    binary.BigEndian.PutUint16(frame[4:6], uint16(len(host)))
+    binary.BigEndian.PutUint16(frame[6:8], uint16(destination.Port))
+    copy(frame[8:], host)
+    return frame, nil
+}
+
+func meteredEgressReply(raw []byte) (*net.TCPAddr, error) {
+    if len(raw) != 20 || raw[0] != 0 {
+        return nil, errors.New("metered egress denied or truncated")
+    }
+    var ip net.IP
+    switch raw[1] {
+    case 4:
+        for _, b := range raw[6:18] {
+            if b != 0 { return nil, errors.New("invalid IPv4 metered peer") }
+        }
+        ip = net.IPv4(raw[2],raw[3],raw[4],raw[5])
+    case 6:
+        ip = append(net.IP(nil), raw[2:18]...)
+    default:
+        return nil, errors.New("invalid metered TCP address family")
+    }
+    port := binary.BigEndian.Uint16(raw[18:20])
+    if port == 0 || ip.IsUnspecified() {
+        return nil, errors.New("invalid metered egress peer identity")
+    }
+    return &net.TCPAddr{IP:ip, Port:int(port)}, nil
+}
+
+type meteredEgressConn struct {
+    net.Conn
+    remote *net.TCPAddr
+}
+
+func (c *meteredEgressConn) RemoteAddr() net.Addr { return c.remote }
+
+// Only a signed, attributed VLESS stream may initiate a TCP socket. The host
+// additionally verifies the real Docker PID/qualifier and refuses local IPs.
+func DialMeterEgress(ctx context.Context, destination xnet.Destination) (net.Conn, error) {
+    if !IsProductionMeter() || !enabled || capControl == nil {
+        return nil, errors.New("unauthorized metered TCP egress role")
+    }
+    ib := session.InboundFromContext(ctx)
+    if ib == nil || ib.User == nil || ib.User.Email == "" ||
+        !IsTrackedInbound(ctx) || RequireInboundCoverage(ctx) != nil {
+        return nil, errors.New("unattributed metered TCP egress")
+    }
+    frame, err := meterEgressRequest(destination)
+    if err != nil { return nil, err }
+    var dial net.Dialer
+    dial.Timeout = 8*time.Second
+    conn, err := dial.DialContext(ctx, "unix", meteredEgressSocket)
+    if err != nil { return nil, err }
+    if err := conn.SetDeadline(time.Now().Add(12*time.Second)); err != nil {
+        conn.Close()
+        return nil, err
+    }
+    if _, err := conn.Write(frame); err != nil {
+        conn.Close()
+        return nil, err
+    }
+    var status [1]byte
+    if _, err := io.ReadFull(conn, status[:]); err != nil {
+        conn.Close()
+        return nil, err
+    }
+    if status[0] != 0 {
+        conn.Close()
+        return nil, errors.New("host metered TCP bridge refused destination")
+    }
+    var detail [19]byte
+    if _, err := io.ReadFull(conn, detail[:]); err != nil {
+        conn.Close()
+        return nil, err
+    }
+    peer, err := meteredEgressReply(append(status[:],detail[:]...))
+    if err != nil {
+        conn.Close()
+        return nil, err
+    }
+    if err := conn.SetDeadline(time.Time{}); err != nil {
+        conn.Close()
+        return nil, err
+    }
+    return &meteredEgressConn{Conn:conn, remote:peer}, nil
+}

@@ -44,7 +44,7 @@ def parse_target(raw, port):
         if not parsed.is_global:
             raise ValueError("private, special or local TCP destination denied")
         return str(parsed), port
-    if not DOMAIN.fullmatch(name) or name.endswith(".."):
+    if (not DOMAIN.fullmatch(name) or name.endswith("..") or name.rstrip(".").endswith(\n            (".local", ".localhost", ".internal", ".home.arpa", ".test", ".invalid", ".example"))):
         raise ValueError("invalid outbound hostname")
     # Literal IP address representations must never fall through to a resolver
     # under a different spelling (octal, integer IP, IPv6 zone ID, etc).
@@ -110,11 +110,14 @@ def require_qualified_peer(pid):
         if not wal_transport.runtime_identity.managed_container_name(name):
             raise ValueError("untrusted managed container name")
         try:
-            cid, started, running_pid, runtime = wal_transport._measure_quarantined_runtime(
-                (record["artifactSha256"], digest), container_name=name)
+            inspected = wal_transport.runtime_identity.inspect_managed_xray(name)
         except (ValueError, OSError, subprocess.SubprocessError):
             continue
-        if running_pid == pid and runtime:
+        if inspected[2] != pid:
+            continue
+        cid, started, running_pid, runtime = wal_transport._measure_quarantined_runtime(
+            (record["artifactSha256"], digest), container_name=name)
+        if (cid, started, running_pid) == inspected and runtime:
             return
     raise ValueError("egress peer is not a live qualified metering process")
 
