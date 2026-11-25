@@ -22,6 +22,10 @@ import wal_transport
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 EMAIL = re.compile(r"xmesh-u([1-9][0-9]{0,18})--vless-(main|cdn)\Z")
 MAX_USERS = 2048
+# A full-roster snapshot must finish strictly before the TLS monitor's 10s
+# watchdog gap. If a fleet is too large for serial probes, FAIL CLOSED until
+# a dedicated bounded batched-Xray witness exists. Never silently extend it.
+MAX_ROSTER_PROBE_NS = 5_000_000_000
 
 
 class SignedCapRosterWatch:
@@ -128,14 +132,25 @@ class SignedCapRosterWatch:
         self._grants = grants
 
     def check(self):
-        """Fresh proof for EVERY signed alias; return no authorization."""
+        """Fresh proof for EVERY signed alias within a hard 5s budget."""
+        started_ns = time.monotonic_ns()
+
+        def check_deadline():
+            now_ns = time.monotonic_ns()
+            if (now_ns < started_ns
+                    or now_ns - started_ns >= MAX_ROSTER_PROBE_NS):
+                raise ValueError(
+                    "full signed-cap roster missed TLS stop watchdog deadline")
+
         for user, (raw, scope, aliases) in sorted(self._grants.items()):
             for email in aliases:
+                check_deadline()
                 result = cap_install.observe_installed_cap_in_xray(
                     self._socket, self._pid, self.runtime_id, self.node,
                     self.activation, raw, scope, email)
                 # The lower layer checks nonce/digest, permit and consumption.
                 # Independently ensure this never becomes public authority.
+                check_deadline()  # a slow/blocked Unix peer is not safe
                 if (not isinstance(result, dict)
                         or result.get("userId") != user
                         or result.get("email") != email
@@ -144,4 +159,5 @@ class SignedCapRosterWatch:
                         or result.get("canStart") is not False
                         or result.get("canResume") is not False):
                     raise ValueError("local Xray witness is foreign or claims TLS authority")
+        check_deadline()
         return None
