@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Stop-only signed public TLS lifetime negatives (never open a port)."""
 import hashlib
+import os
+import signal
 import json
 from pathlib import Path
 import subprocess
@@ -350,6 +352,21 @@ class StopOnlyTests(unittest.TestCase):
             self.assertIsNone(monitor.check_stop_only())
         self.assertEqual(self.revocation_watch.check.call_count, 3)
         self.assertEqual(self.revocation_watch.ensure_fresh.call_count, 3)
+
+    def test_independent_guardian_is_armed_only_after_signed_checks(self):
+        monitor = self.monitor()
+        self.assertIsNone(self.child.poll())
+        self.assertIsNone(monitor._deadman._guardian.poll())
+        self.assertIsNotNone(monitor._deadman._guardian.pid)
+        self.assertNotEqual(monitor._deadman._guardian.pid, self.child.pid)
+        self.tick(wall_ms=100, monotonic_ms=100)
+        self.assertIsNone(monitor.check_stop_only())
+
+    def test_killed_independent_guardian_stops_owned_child_fail_closed(self):
+        monitor = self.monitor()
+        os.kill(monitor._deadman._guardian.pid, signal.SIGKILL)
+        monitor._deadman._guardian.wait(timeout=3)
+        self.assert_stopped(monitor)
 
     def test_invalid_initial_pid_and_expired_policy_kill_child(self):
         with self.assertRaisesRegex(
