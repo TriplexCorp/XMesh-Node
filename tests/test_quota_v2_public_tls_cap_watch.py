@@ -11,12 +11,12 @@ sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import public_tls_cap_watch as watch
-from test_quota_v2_first_cap_handoff import FirstCapHandoffTests
+import test_quota_v2_first_cap_handoff as cap_fixture
 
 
 class SignedCapRosterWatchTests(unittest.TestCase):
     def setUp(self):
-        source = FirstCapHandoffTests(
+        source = cap_fixture.FirstCapHandoffTests(
             "test_original_nexus_signer_and_real_assigned_vless_scope")
         source.setUp()
         self.addCleanup(source.doCleanups)
