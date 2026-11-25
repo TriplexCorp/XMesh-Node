@@ -220,6 +220,49 @@ class LocalCapObservationTests(unittest.TestCase):
                 self.assertEqual(result["chargedBytes"], 15)
                 self.assertIs(result["canServePublic"], False)
 
+    def test_real_private_unix_peer_stall_fails_before_tls_watchdog_window(self):
+        raw, _, scope = fixture()
+        with tempfile.TemporaryDirectory(prefix="xmesh-observe-hang-") as temp:
+            root = Path(temp)
+            os.chmod(root, 0o700)
+            endpoint = root / "meter.sock"
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(endpoint))
+                os.chmod(endpoint, 0o600)
+                listener.listen(1)
+                accepted = threading.Event()
+                release = threading.Event()
+                errors = []
+
+                def hang():
+                    try:
+                        with listener.accept()[0]:
+                            accepted.set()
+                            release.wait(timeout=5)
+                    except Exception as exc:
+                        errors.append(exc)
+
+                worker = threading.Thread(target=hang, daemon=True)
+                worker.start()
+                started = time.monotonic()
+                try:
+                    with mock.patch.object(
+                            observed.wal_transport.runtime_identity,
+                            "trusted_runtime_identity", return_value=RUNTIME):
+                        with self.assertRaises(TimeoutError):
+                            observed.observe_installed_cap_in_xray(
+                                endpoint, os.getpid(), RUNTIME, NODE,
+                                ACTIVATION, raw, scope, MAIN)
+                finally:
+                    release.set()
+                    worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(accepted.is_set())
+                self.assertEqual(errors, [])
+                self.assertLess(
+                    time.monotonic() - started, 4,
+                    "hung private cap IPC outlived safe TLS watchdog window")
+
     def test_same_uid_socket_with_foreign_live_pid_is_denied(self):
         raw, _, scope = fixture()
         with tempfile.TemporaryDirectory(prefix="xmesh-observe-pid-") as tmp:
