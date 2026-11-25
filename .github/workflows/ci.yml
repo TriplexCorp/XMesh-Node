@@ -89,6 +89,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_certificates.py tests/test_quota_v2_public_tls_certificates.py
           sudo python3 tests/test_quota_v2_public_tls_certificates.py -v
+      - name: Signed TLS revocation witness requires fresh nonce and pinned Nexus Ed25519 signature
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_revocation_watch.py tests/test_quota_v2_public_tls_revocation_watch.py
+          python3 tests/test_quota_v2_public_tls_revocation_watch.py -v
       - name: Signed TLS stop-only monitor cannot outlive expiry, revocation or Xray runtime
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_stop_monitor.py tests/test_quota_v2_public_tls_stop_monitor.py
