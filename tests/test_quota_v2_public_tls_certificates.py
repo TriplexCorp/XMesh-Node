@@ -150,6 +150,54 @@ class CertificateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             certs.verify_certificate_lineage(signed_compiled_config())
 
+    def test_self_signed_or_untrusted_server_certificate_is_denied(self):
+        archive = self.archive / DOMAIN_A
+        cert, key = archive / "fullchain1.pem", archive / "privkey1.pem"
+        subprocess.run([
+            "/usr/bin/openssl", "req", "-x509", "-newkey", "ec",
+            "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+            "-days", "7", "-out", str(cert), "-keyout", str(key),
+            "-subj", "/CN=" + DOMAIN_A,
+            "-addext", "subjectAltName=DNS:" + DOMAIN_A,
+            "-addext", "extendedKeyUsage=serverAuth",
+        ], check=True, stdout=subprocess.DEVNULL,
+           stderr=subprocess.PIPE, timeout=15)
+        key.chmod(0o600)
+        cert.chmod(0o644)
+        with self.assertRaises(ValueError):
+            certs.verify_certificate_lineage(signed_compiled_config())
+
+    def test_root_ca_bundle_must_be_root_owned_and_not_writable(self):
+        self.ca_cert.chmod(0o666)
+        with self.assertRaises(ValueError):
+            certs.verify_certificate_lineage(signed_compiled_config())
+        self.ca_cert.chmod(0o644)
+        certs.verify_certificate_lineage(signed_compiled_config())
+
+    def test_certificate_without_tls_server_eku_is_denied(self):
+        archive = self.archive / DOMAIN_A
+        extensions = archive / "tls-server.ext"
+        extensions.write_text(
+            "[bad_client_cert]\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature\n"
+            "extendedKeyUsage=clientAuth\n"
+            "subjectAltName=DNS:" + DOMAIN_A + "\n"
+        )
+        leaf = archive / "leaf.pem"
+        subprocess.run([
+            "/usr/bin/openssl", "x509", "-req",
+            "-in", str(archive / "request.csr"),
+            "-CA", str(self.ca_cert), "-CAkey", str(self.ca_key),
+            "-CAcreateserial", "-days", "7", "-out", str(leaf),
+            "-extensions", "bad_client_cert", "-extfile", str(extensions),
+        ], check=True, stdout=subprocess.DEVNULL,
+           stderr=subprocess.PIPE, timeout=15)
+        cert = archive / "fullchain1.pem"
+        cert.write_bytes(leaf.read_bytes() + self.ca_cert.read_bytes())
+        with self.assertRaises(ValueError):
+            certs.verify_certificate_lineage(signed_compiled_config())
+
     def test_cannot_bypass_signed_tls_config_shape(self):
         original = signed_compiled_config()
         changes = [
