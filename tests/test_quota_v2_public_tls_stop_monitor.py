@@ -129,9 +129,9 @@ class StopOnlyTests(unittest.TestCase):
         self.wall_ns += wall_ms * 1_000_000
         self.mono_ns += monotonic_ms * 1_000_000
 
-    def assert_stopped(self, monitor, **kwargs):
+    def assert_stopped(self, monitor):
         with self.assertRaises(ValueError):
-            monitor.check_stop_only(, **kwargs)
+            monitor.check_stop_only()
         self.assertTrue(monitor.stopped)
         self.assertIsNotNone(self.child.poll())
         with self.assertRaises(ValueError):
