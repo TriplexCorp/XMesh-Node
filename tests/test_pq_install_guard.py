@@ -276,7 +276,7 @@ exit 77
         installer = (ROOT / 'deploy/install-metered-services.sh').read_text()
         # Even a partial first installation must not leave the metered
         # frontend or bridge running during an unverified new enrollment.
-        disable = bootstrap[bootstrap.index('for unit in \\\n'):bootstrap.index('systemctl disable --now "$unit"')]
+        disable = bootstrap[bootstrap.index('for unit in '):bootstrap.index('systemctl disable --now "$unit"')]
         for name in ('xmesh-quota-v2-ingress.service', 'xmesh-quota-v2-meter.service',
                      'xmesh-quota-v2-egress.service', 'xmesh-quota-v2-renewal.service'):
             self.assertIn(name, disable)
