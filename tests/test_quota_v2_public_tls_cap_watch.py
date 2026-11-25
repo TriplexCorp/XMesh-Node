@@ -117,6 +117,35 @@ class SignedCapRosterWatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.watcher(profile=public)
 
+    def test_full_roster_probe_must_finish_inside_five_second_watchdog_budget(self):
+        watcher = self.watcher()
+        recorded = []
+        def probe(_socket, _pid, _runtime, _node, _activation,
+                  _raw, _scope, email):
+            recorded.append(email)
+            return dict(userId=100, email=email, installedLocalCap=True,
+                        canServePublic=False, canStart=False, canResume=False)
+        # The first alias replied, but the overall signed roster is late.
+        # Reject rather than letting a healthy alias mask stalled others.
+        with (mock.patch.object(
+                watch.cap_install, "observe_installed_cap_in_xray",
+                side_effect=probe),
+              mock.patch.object(watch.time, "monotonic_ns",
+                                side_effect=[0, 0, 5_000_000_001])):
+            with self.assertRaisesRegex(ValueError, "watchdog deadline"):
+                watcher.check()
+        self.assertEqual(len(recorded), 1)
+
+    def test_cap_probe_refuses_rolled_back_monotonic_clock(self):
+        watcher = self.watcher()
+        with (mock.patch.object(
+                watch.cap_install, "observe_installed_cap_in_xray") as probe,
+              mock.patch.object(watch.time, "monotonic_ns",
+                                side_effect=[1000, 900])):
+            with self.assertRaisesRegex(ValueError, "watchdog deadline"):
+                watcher.check()
+            probe.assert_not_called()
+
     def test_a_single_missing_exhausted_or_authorizing_xray_observation_denies_all(self):
         valid = self.watcher()
         for failure in ("missing", "exhausted", "authority", "foreign", "replaced"):
