@@ -53,6 +53,22 @@ class CertificateTests(unittest.TestCase):
         self.patch_archive.start()
         self.addCleanup(self.patch_live.stop)
         self.addCleanup(self.patch_archive.stop)
+        self.ca_cert = base / "trusted-root.pem"
+        self.ca_key = base / "trusted-root.key"
+        subprocess.run([
+            "/usr/bin/openssl", "req", "-x509", "-newkey", "ec",
+            "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+            "-days", "30", "-keyout", str(self.ca_key),
+            "-out", str(self.ca_cert), "-subj", "/CN=XMesh disposable CA",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+        ], check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, timeout=15)
+        self.ca_key.chmod(0o600)
+        self.ca_cert.chmod(0o644)
+        self.patch_ca = mock.patch.object(certs, "SYSTEM_CA_FILE", self.ca_cert)
+        self.patch_ca.start()
+        self.addCleanup(self.patch_ca.stop)
         for domain in (DOMAIN_A, DOMAIN_B):
             self.make_lineage(domain)
 
@@ -63,15 +79,31 @@ class CertificateTests(unittest.TestCase):
         archive.mkdir(mode=0o700, exist_ok=True)
         cert = archive / "fullchain1.pem"
         key = archive / "privkey1.pem"
-        command = [
-            "/usr/bin/openssl", "req", "-x509", "-newkey", "ec",
-            "-pkeyopt", "ec_paramgen_curve:prime256v1",
-            "-nodes", "-days", str(days), "-out", str(cert),
-            "-keyout", str(key), "-subj", "/CN=" + domain,
-            "-addext", "subjectAltName=DNS:" + (subject or domain),
-        ]
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.PIPE, timeout=15)
+        csr = archive / "request.csr"
+        leaf = archive / "leaf.pem"
+        extensions = archive / "tls-server.ext"
+        extensions.write_text(
+            "[server_cert]\\n"
+            "basicConstraints=critical,CA:FALSE\\n"
+            "keyUsage=critical,digitalSignature\\n"
+            "extendedKeyUsage=serverAuth\\n"
+            "subjectAltName=DNS:" + (subject or domain) + "\\n"
+        )
+        subprocess.run([
+            "/usr/bin/openssl", "req", "-new", "-newkey", "ec",
+            "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+            "-out", str(csr), "-keyout", str(key),
+            "-subj", "/CN=" + domain,
+        ], check=True, stdout=subprocess.DEVNULL,
+           stderr=subprocess.PIPE, timeout=15)
+        subprocess.run([
+            "/usr/bin/openssl", "x509", "-req", "-in", str(csr),
+            "-CA", str(self.ca_cert), "-CAkey", str(self.ca_key),
+            "-CAcreateserial", "-days", str(days), "-out", str(leaf),
+            "-extensions", "server_cert", "-extfile", str(extensions),
+        ], check=True, stdout=subprocess.DEVNULL,
+           stderr=subprocess.PIPE, timeout=15)
+        cert.write_bytes(leaf.read_bytes() + self.ca_cert.read_bytes())
         key.chmod(0o600)
         cert.chmod(0o644)
         for kind in ("fullchain", "privkey"):
