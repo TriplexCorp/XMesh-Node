@@ -268,6 +268,14 @@ class StopOnlyTests(unittest.TestCase):
         self.assertIsNone(monitor.check_stop_only(revoked=False))
         self.assertEqual(self.cap_watch.check.call_count, 3)
 
+    def test_cap_probe_crossing_monitor_gap_fails_closed_after_return(self):
+        monitor = self.monitor()
+        def slow_probe():
+            self.tick(wall_ms=10_050, monotonic_ms=10_050)
+            return None
+        self.cap_watch.check.side_effect = slow_probe
+        self.assert_stopped(monitor)
+
     def test_invalid_initial_pid_and_expired_policy_kill_child(self):
         with self.assertRaisesRegex(
                 ValueError, "initial TLS supervision preflight failed"):
