@@ -74,6 +74,49 @@ class SignedRevocationWitnessTests(unittest.TestCase):
         args.update(changes)
         return watch.SignedTlsRevocationWatch(**args)
 
+    def test_enrolled_fetch_uses_exact_scope_and_fresh_nonce(self):
+        nonce = "7"*64
+        with (mock.patch("os.geteuid", return_value=0),
+              mock.patch.object(quarantine_policy, "_post_quarantined_desired",
+                                return_value=self.signed(self.payload(nonce))) as send):
+            args = dict(self.args)
+            args.pop("pinned")
+            fetch = watch.enrolled_fetch(state=str(self.root), user=91, **args)
+            observer = self.observer(fetch=fetch)
+            with mock.patch.object(watch.secrets, "token_hex", return_value=nonce):
+                self.assertIsNone(observer.check())
+            send.assert_called_once_with({
+                "scope": {
+                    "nodeId": 47, "userId": 91,
+                    "activationReceiptSha256": "a"*64,
+                    "genesisPolicySha256": "b"*64,
+                    "runtimeId": "c"*64, "profileRevision": "d"*64,
+                    "capRosterSha256": "f"*64, "requiredLifetimeMs": 7000,
+                },
+                "authoritySha256": "e"*64, "challenge": nonce,
+            }, str(self.root), quarantine_policy.TLS_REVOCATION_PATH)
+            with self.assertRaises(ValueError):
+                fetch("wrong")
+            self.assertEqual(send.call_count, 1)
+
+    def test_revocation_rpc_timeout_and_wire_limit_are_independent(self):
+        def reply(cmd, *, timeout, check):
+            self.assertEqual(cmd[0], quarantine_policy.PRODUCT)
+            self.assertEqual(cmd[3], quarantine_policy.TLS_REVOCATION_PATH)
+            self.assertEqual(timeout, 2.8)
+            self.assertTrue(check)
+            Path(cmd[cmd.index("--status-file")+1]).write_text("200")
+            Path(cmd[cmd.index("--output-file")+1]).write_bytes(b"x"*4097)
+        with mock.patch.object(quarantine_policy.subprocess, "run", side_effect=reply):
+            with self.assertRaises(ValueError):
+                quarantine_policy._post_quarantined_desired(
+                    {}, str(self.root), quarantine_policy.TLS_REVOCATION_PATH)
+        with mock.patch.object(quarantine_policy.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("product", 2.8)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                quarantine_policy._post_quarantined_desired(
+                    {}, str(self.root), quarantine_policy.TLS_REVOCATION_PATH)
+
     def test_two_independent_fresh_signed_witnesses_have_no_authority(self):
         w = self.observer()
         self.assertIsNone(w.check())
