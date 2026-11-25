@@ -15,6 +15,62 @@ import vless_ingress
 DOMAIN = re.compile(r"(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
                     r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 TAGS = {"vless-main", "vless-cdn"}
+HEX64 = re.compile(r"[a-f0-9]{64}\Z")
+HEX128 = re.compile(r"[a-f0-9]{128}\Z")
+
+
+def verify_signed_public_tls(raw, *, node, activation, genesis_sha, pinned,
+                             now_ms=None):
+    """Authenticate a short-lived independent Nexus Ed25519 TLS authority.
+
+    This is a public-listener CONFIG approval, not a traffic grant. The
+    installed worker must still require the original metered Genesis policy,
+    active per-user signed spending caps, and the trusted runtime identity.
+    Runtime expiry/revocation must be enforced by the eventual supervisor;
+    checking validity only at initial startup is insufficient for promotion.
+    """
+    import time
+    import quarantine_policy as quarantine
+    import wal_transport
+
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 8192:
+        raise ValueError("invalid signed public TLS envelope size")
+    doc = wal_transport.observed.strict_json(raw)
+    if (not isinstance(doc, dict)
+            or set(doc) != {"algorithm", "payload", "signature"}
+            or doc["algorithm"] != "Ed25519"
+            or not isinstance(doc["signature"], str)
+            or not HEX128.fullmatch(doc["signature"])):
+        raise ValueError("invalid signed public TLS envelope")
+    policy = doc["payload"]
+    expected = {
+        "schemaVersion": 1, "kind": "xmesh.quota-v2.public-tls-ingress",
+        "nodeId": node, "activationReceiptSha256": activation,
+        "genesisPolicySha256": genesis_sha, "canServePublic": True,
+    }
+    if (not isinstance(policy, dict)
+            or set(policy) != set(expected) | {"issuedAtMs", "validUntilMs", "bindings"}
+            or any(type(policy[k]) is not type(v) or policy[k] != v
+                   for k, v in expected.items())
+            or type(node) is not int or node <= 0
+            or any(not isinstance(item, str) or not HEX64.fullmatch(item)
+                   for item in (activation, genesis_sha, pinned))
+            or type(policy["issuedAtMs"]) is not int
+            or type(policy["validUntilMs"]) is not int):
+        raise ValueError("foreign or malformed signed public TLS authority")
+    now = time.time_ns() // 1_000_000 if now_ms is None else now_ms
+    if (type(now) is not int or now < policy["issuedAtMs"]
+            or policy["validUntilMs"] <= now
+            or policy["validUntilMs"] - policy["issuedAtMs"] > 120_000):
+        raise ValueError("expired or overlong public TLS authorization")
+    quarantine._guard().check_signature(policy, doc["signature"], pinned)
+    bindings = policy["bindings"]
+    if not isinstance(bindings, list):
+        raise ValueError("signed public TLS bindings must be a list")
+    # Reuse exact compiler grammar; caller must independently bind it to the
+    # signed VLESS roster and only then publish a public listener.
+    return deepcopy(bindings)
+
 
 
 def compile_public_tls(profile, bindings):
