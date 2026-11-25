@@ -44,7 +44,8 @@ def parse_target(raw, port):
         if not parsed.is_global:
             raise ValueError("private, special or local TCP destination denied")
         return str(parsed), port
-    if (not DOMAIN.fullmatch(name) or name.endswith("..") or name.rstrip(".").endswith(\n            (".local", ".localhost", ".internal", ".home.arpa", ".test", ".invalid", ".example"))):
+    if (not DOMAIN.fullmatch(name) or name.endswith("..") or name.rstrip(".").endswith(
+            (".local", ".localhost", ".internal", ".home.arpa", ".test", ".invalid", ".example"))):
         raise ValueError("invalid outbound hostname")
     # Literal IP address representations must never fall through to a resolver
     # under a different spelling (octal, integer IP, IPv6 zone ID, etc).
