@@ -89,6 +89,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_stop_monitor.py tests/test_quota_v2_public_tls_stop_monitor.py
           python3 tests/test_quota_v2_public_tls_stop_monitor.py -v
+      - name: Strict-PQ TLS candidate probe returns zero authority even when SQL evidence matches
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_preflight.py tests/test_quota_v2_public_tls_preflight.py
+          python3 tests/test_quota_v2_public_tls_preflight.py -v
       - run: sudo python3 tests/test_quota_v2_charge_worker.py
       - run: bash -n bootstrap.sh deploy/install-v6-strict-operational-agents.sh deploy/install-metered-services.sh
       - run: python3 deploy/test-xmesh-policy-independent-credentials.py
