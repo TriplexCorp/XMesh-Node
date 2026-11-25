@@ -56,15 +56,14 @@ def install_in_xray(path, trusted_pid, runtime, genesis, grant, scope):
 
         check_runtime()
         with socket.socket(socket.AF_UNIX) as conn:
-            conn.settimeout(CAP_OBSERVE_SOCKET_TIMEOUT_S)
+            conn.settimeout(12)
             conn.connect(str(path))
             peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
             peer_pid, peer_uid, _ = struct.unpack("3i", peer)
             if peer_pid != trusted_pid or peer_uid != uid:
                 raise ValueError("Unix peer is not the measured Xray process")
             check_runtime()
-            client = http.client.HTTPConnection(
-                "localhost", timeout=CAP_OBSERVE_SOCKET_TIMEOUT_S)
+            client = http.client.HTTPConnection("localhost", timeout=12)
             # Never reconnect by TCP if the checked Unix peer disconnects.
             client.auto_open = False
             client.sock = conn
@@ -446,7 +445,7 @@ def observe_installed_cap_in_xray(path, trusted_pid, runtime, node,
 
         check_live_runtime()
         with socket.socket(socket.AF_UNIX) as conn:
-            conn.settimeout(12)
+            conn.settimeout(CAP_OBSERVE_SOCKET_TIMEOUT_S)
             conn.connect(str(path))
             raw_peer = conn.getsockopt(
                 socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
@@ -454,7 +453,8 @@ def observe_installed_cap_in_xray(path, trusted_pid, runtime, node,
             if peer_pid != trusted_pid or peer_uid != uid:
                 raise ValueError("cap observation Unix peer is not the measured Xray")
             check_live_runtime()
-            client = http.client.HTTPConnection("localhost", timeout=12)
+            client = http.client.HTTPConnection(
+                "localhost", timeout=CAP_OBSERVE_SOCKET_TIMEOUT_S)
             client.auto_open = False
             client.sock = conn
             try:
