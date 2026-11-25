@@ -352,7 +352,7 @@ class StopOnlyTests(unittest.TestCase):
             self.tick(wall_ms=300, monotonic_ms=300)
             self.assertIsNone(monitor.check_stop_only())
         self.assertEqual(self.revocation_watch.check.call_count, 3)
-        self.assertEqual(self.revocation_watch.ensure_fresh.call_count, 3)
+        self.assertEqual(self.revocation_watch.ensure_fresh.call_count, 6)
 
     def test_independent_guardian_is_armed_only_after_signed_checks(self):
         monitor = self.monitor()
@@ -533,6 +533,45 @@ class StopOnlyTests(unittest.TestCase):
         self.assert_stopped(monitor)
         self.assertEqual(calls, 2)
 
+    def test_startup_ack_crossing_signed_expiry_kills_child(self):
+        def slow_ack():
+            self.tick(wall_ms=60_001, monotonic_ms=60_001)
+            return None
+        with mock.patch.object(
+                stop.public_tls_deadman.StopOnlyDeadman, "pulse",
+                side_effect=slow_ack):
+            with self.assertRaisesRegex(
+                    ValueError, "initial TLS supervision preflight failed"):
+                self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_periodic_ack_crossing_watchdog_gap_stops_child(self):
+        monitor = self.monitor()
+        def slow_ack():
+            self.tick(wall_ms=10_050, monotonic_ms=10_050)
+            return None
+        with mock.patch.object(monitor._deadman, "pulse", side_effect=slow_ack):
+            self.assert_stopped(monitor)
+
+    def test_periodic_ack_must_not_outlive_signed_revocation_witness(self):
+        monitor = self.monitor()
+        self.revocation_watch.ensure_fresh.side_effect = [
+            None, ValueError("Nexus witness expired during ACK")]
+        self.assert_stopped(monitor)
+
+    def test_post_ack_verified_clock_becomes_next_monitor_anchor(self):
+        monitor = self.monitor()
+        def bounded_ack():
+            self.tick(wall_ms=100, monotonic_ms=100)
+            return None
+        with mock.patch.object(monitor._deadman, "pulse",
+                               side_effect=bounded_ack):
+            self.assertIsNone(monitor.check_stop_only())
+        self.assertEqual(monitor._wall_ms, self.wall_ns // 1_000_000)
+        self.assertEqual(monitor._mono_ns, self.mono_ns)
+        self.assertFalse(monitor.stopped)
+        self.assertIsNone(self.child.poll())
+
     def test_good_startup_checks_certificate_and_meter_before_first_poll(self):
         monitor = self.monitor()
         self.assertFalse(monitor.stopped)
@@ -541,7 +580,7 @@ class StopOnlyTests(unittest.TestCase):
         self.assertEqual(self.certificate_mock.call_count, 1)
         self.cap_watch.check.assert_called_once_with()
         self.revocation_watch.check.assert_called_once_with()
-        self.revocation_watch.ensure_fresh.assert_called_once_with()
+        self.assertEqual(self.revocation_watch.ensure_fresh.call_count, 2)
 
 
 if __name__ == "__main__":
