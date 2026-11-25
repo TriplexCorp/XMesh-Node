@@ -19,8 +19,8 @@ HEX64 = re.compile(r"[a-f0-9]{64}\Z")
 HEX128 = re.compile(r"[a-f0-9]{128}\Z")
 
 
-def verify_signed_public_tls(raw, *, node, activation, genesis_sha, pinned,
-                             now_ms=None):
+def verify_signed_public_tls(raw, *, node, activation, genesis_sha,
+                             runtime_id, profile_revision, pinned, now_ms=None):
     """Authenticate a short-lived independent Nexus Ed25519 TLS authority.
 
     This is a public-listener CONFIG approval, not a traffic grant. The
@@ -46,7 +46,9 @@ def verify_signed_public_tls(raw, *, node, activation, genesis_sha, pinned,
     expected = {
         "schemaVersion": 1, "kind": "xmesh.quota-v2.public-tls-ingress",
         "nodeId": node, "activationReceiptSha256": activation,
-        "genesisPolicySha256": genesis_sha, "canServePublic": True,
+        "genesisPolicySha256": genesis_sha,
+        "runtimeId": runtime_id, "profileRevision": profile_revision,
+        "canServePublic": True,
     }
     if (not isinstance(policy, dict)
             or set(policy) != set(expected) | {"issuedAtMs", "validUntilMs", "bindings"}
@@ -54,7 +56,7 @@ def verify_signed_public_tls(raw, *, node, activation, genesis_sha, pinned,
                    for k, v in expected.items())
             or type(node) is not int or node <= 0
             or any(not isinstance(item, str) or not HEX64.fullmatch(item)
-                   for item in (activation, genesis_sha, pinned))
+                   for item in (activation, genesis_sha, runtime_id, profile_revision, pinned))
             or type(policy["issuedAtMs"]) is not int
             or type(policy["validUntilMs"]) is not int):
         raise ValueError("foreign or malformed signed public TLS authority")
@@ -75,16 +77,26 @@ def verify_signed_public_tls(raw, *, node, activation, genesis_sha, pinned,
 
 
 def compile_signed_public_tls(profile, signed_envelope, *, node, activation,
-                              genesis_sha, pinned, now_ms=None):
+                              genesis_sha, runtime_id, pinned, now_ms=None):
     """Only supported public compiler entry: fail closed without Ed25519 proof.
 
     Caller still must check current per-user caps, trusted meter process,
     certificate lineage and online revocation throughout the listener life.
     Production wiring is intentionally absent until those gates exist.
     """
+    import hashlib
+    import wal_transport
+
+    # The revision is calculated from the original signed, QUARANTINED raw
+    # VLESS configuration. Do not accept a caller-supplied revision that could
+    # point at a different roster or transport after admission was signed.
+    if not isinstance(profile, dict):
+        raise ValueError("missing measured Genesis profile")
+    profile_revision = hashlib.sha256(wal_transport.observed.canonical(profile)).hexdigest()
     bindings = verify_signed_public_tls(
-        signed_envelope, node=node, activation=activation,
-        genesis_sha=genesis_sha, pinned=pinned, now_ms=now_ms)
+        signed_envelope, node=node, activation=activation, genesis_sha=genesis_sha,
+        runtime_id=runtime_id, profile_revision=profile_revision, pinned=pinned,
+        now_ms=now_ms)
     return _compile_verified_tls_config(profile, bindings)
 
 
