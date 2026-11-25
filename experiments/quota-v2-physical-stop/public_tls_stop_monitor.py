@@ -108,6 +108,12 @@ class StopOnlyTlsMonitor:
                 raise ValueError("revocation watcher attempted to issue authorization")
             if self._revocation_watch.ensure_fresh() is not None:
                 raise ValueError("revocation watcher attempted to issue authorization")
+            # The trusted meter might be replaced while ACME, cap and
+            # revocation witnesses are being collected. Re-probe its actual
+            # kernel identity immediately before the final time/deadman gate.
+            if (wal_transport.runtime_identity.trusted_runtime_identity(
+                    self._runtime_pid) != self._runtime_id):
+                raise ValueError("metered Xray replaced during TLS startup")
             # The startup checks themselves consume time. Never signal the
             # independent guardian after expiry, a missed 10s deadline or
             # a wall/monotonic divergence, even if each individual witness
@@ -214,13 +220,31 @@ class StopOnlyTlsMonitor:
         except Exception:
             self._stop("signed revocation witness expired during cap probe")
         try:
+            final_runtime = wal_transport.runtime_identity.trusted_runtime_identity(
+                self._runtime_pid)
+        except Exception:
+            self._stop("metered Xray runtime lost after cap/revocation proof")
+        if final_runtime != self._runtime_id:
+            self._stop("metered Xray replaced after cap/revocation proof")
+        # Final PID verification may itself block. A stale signed lease must
+        # not pulse the independent guardian even when earlier probes passed.
+        final_wall = time.time_ns() // 1_000_000
+        final_mono = time.monotonic_ns()
+        if (final_wall < end_wall or final_mono < end_mono
+                or final_wall >= self._expires_ms
+                or final_mono >= self._deadline_ns
+                or final_mono - self._mono_ns >= MAX_CHECK_GAP_NS
+                or abs((final_wall - self._wall_ms) * 1_000_000
+                       - (final_mono - self._mono_ns)) > MAX_DIVERGENCE_NS):
+            self._stop("metered Xray postcheck exceeded TLS lifetime or clock bounds")
+        try:
             if self._deadman.pulse() is not None:
                 raise ValueError("deadman attempted to issue traffic permission")
         except Exception:
             self._stop("independent TLS deadman unavailable or unresponsive")
         if self._child.poll() is not None:
             self._stop("independent TLS deadman stopped the owned child")
-        self._wall_ms, self._mono_ns = end_wall, end_mono
+        self._wall_ms, self._mono_ns = final_wall, final_mono
         # Deliberately no boolean "allowed" return. A successful stop-only
         # poll cannot issue permits, refresh caps or open an ingress.
         return None

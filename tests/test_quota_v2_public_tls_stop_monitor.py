@@ -439,7 +439,8 @@ class StopOnlyTests(unittest.TestCase):
     def test_pre_spawn_checks_all_live_proofs_without_starting_or_authorizing(self):
         self.assertIsNone(self.pre_spawn_check())
         self.assertIsNone(self.child.poll())
-        self.identity_mock.assert_called_once_with(1234)
+        self.assertEqual(self.identity_mock.call_count, 2)
+        self.identity_mock.assert_has_calls([mock.call(1234), mock.call(1234)])
         self.certificate_mock.assert_called_once()
         self.cap_watch.check.assert_called_once_with()
         self.revocation_watch.check.assert_called_once_with()
@@ -497,11 +498,46 @@ class StopOnlyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pre-spawn proofs expired"):
             self.pre_spawn_check()
 
+    def test_pre_spawn_rechecks_meter_after_slow_witnesses(self):
+        self.identity_mock.side_effect = [self.runtime, "f" * 64]
+        with self.assertRaisesRegex(ValueError, "changed during TLS pre-spawn"):
+            self.pre_spawn_check()
+        self.assertEqual(self.identity_mock.call_count, 2)
+        self.assertIsNone(self.child.poll())
+
+    def test_startup_rechecks_meter_after_signed_revocation(self):
+        # Signed checks can succeed just as the metered PID is replaced.
+        self.identity_mock.side_effect = [self.runtime, "f" * 64]
+        with self.assertRaisesRegex(
+                ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertEqual(self.identity_mock.call_count, 2)
+        self.assertIsNotNone(self.child.poll())
+
+    def test_poll_rechecks_meter_after_cap_and_revocation(self):
+        monitor = self.monitor()
+        self.identity_mock.side_effect = [self.runtime, "f" * 64]
+        self.assert_stopped(monitor)
+        self.assertEqual(self.identity_mock.call_count, 4)
+
+    def test_slow_final_runtime_probe_cannot_refresh_expired_deadman(self):
+        monitor = self.monitor()
+        calls = 0
+        def runtime_after_delay(_pid):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.tick(wall_ms=10_050, monotonic_ms=10_050)
+            return self.runtime
+        self.identity_mock.side_effect = runtime_after_delay
+        self.assert_stopped(monitor)
+        self.assertEqual(calls, 2)
+
     def test_good_startup_checks_certificate_and_meter_before_first_poll(self):
         monitor = self.monitor()
         self.assertFalse(monitor.stopped)
         self.assertIsNone(self.child.poll())
-        self.assertEqual(self.identity_mock.call_count, 1)
+        self.assertEqual(self.identity_mock.call_count, 2)
         self.assertEqual(self.certificate_mock.call_count, 1)
         self.cap_watch.check.assert_called_once_with()
         self.revocation_watch.check.assert_called_once_with()
