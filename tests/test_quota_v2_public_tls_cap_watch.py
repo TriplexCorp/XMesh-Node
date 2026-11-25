@@ -27,6 +27,7 @@ class SignedCapRosterWatchTests(unittest.TestCase):
             profile=self.profile, signed_grants=self.grants,
             pinned=source.pub, node=source.node,
             activation=source.fixture.activation,
+            genesis_sha=source.reply["policySha256"],
             runtime_id=source.runtime, trusted_pid=12345,
             socket_path="/var/lib/xmesh-first-meter/runtime/drain.sock",
         )
@@ -64,6 +65,7 @@ class SignedCapRosterWatchTests(unittest.TestCase):
             {"signed_grants": {200: self.grants[100]}},
             {"runtime_id": "f" * 64},
             {"activation": "f" * 64},
+            {"genesis_sha": "f" * 64},
             {"pinned": "f" * 64},
             {"node": self.source.node + 1},
         )
@@ -85,6 +87,11 @@ class SignedCapRosterWatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.watcher(signed_grants={100: self.source.signed_grant(wrong)})
         wrong = dict(self.source.claims, runtimeId="f" * 64)
+        with self.assertRaises(ValueError):
+            self.watcher(signed_grants={100: self.source.signed_grant(wrong)})
+        # A REAL signature over another policy is insufficient even when
+        # the Node, process, VLESS UUID, aliases and other fields all match.
+        wrong = dict(self.source.claims, policySha256="f" * 64)
         with self.assertRaises(ValueError):
             self.watcher(signed_grants={100: self.source.signed_grant(wrong)})
 
