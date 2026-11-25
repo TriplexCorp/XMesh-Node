@@ -307,5 +307,19 @@ exit 77
 
 
 
+    def test_metered_xray_provenance_requalifies_exact_agent_release(self):
+        source = (ROOT / '.github/workflows/xray-dataplane-fence-experiment.yml').read_text()
+        self.assertIn("name: Verify signed main-branch candidate provenance", source)
+        for trigger in ('pull_request:', 'push:'):
+            block = source.split('  ' + trigger, 1)[1]
+            # GitHub's path-filtered workflow must run when a release's
+            # source identity changes, even if its Xray patch tree is identical.
+            self.assertIn("      - 'AGENT_VERSION'", block)
+        self.assertEqual(source.count("      - 'AGENT_VERSION'"), 2)
+        self.assertIn("--source-digest \"$GITHUB_SHA\"", source)
+        self.assertIn("github.ref == 'refs/heads/main'", source)
+
+
+
 if __name__ == '__main__':
     unittest.main()
