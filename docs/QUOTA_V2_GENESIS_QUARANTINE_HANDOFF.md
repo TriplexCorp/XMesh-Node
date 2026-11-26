@@ -504,3 +504,27 @@ single fail-closed systemd control group, authenticate the actual
 release Xray executable, prove off-host WAL floors and cap ownership,
 and qualify installed MAIN/CDN TLS end to end. Production Quota V2
 remains OFF.
+
+### Real systemd containment qualification (disposable CI only)
+
+A control-group kill policy alone does not detect a simultaneously frozen
+supervisor and frozen guardian while the service main PID still exists.
+The dedicated hosted-Linux CI test creates a uniquely named transient
+systemd service with `Type=notify`, `NotifyAccess=main`,
+`KillMode=control-group`, `WatchdogSec=2s`, `WatchdogSignal=SIGKILL`,
+`SendSIGKILL=yes` and `Restart=no`. It verifies that the owner, guardian
+and gated TLS 1.3 loopback child really share its PID1-managed cgroup.
+The test fixture pings PID1 only after the guardian ACKs a fixed short
+artificial stop deadline. It tests guardian SIGKILL and simultaneous
+SIGSTOP of both owners; the latter specifically requires PID1 to
+report `Result=watchdog`, close the live encrypted connection, refuse a
+new connection, and reap all three exact PIDFD identities.
+
+This is a containment experiment, not a production service or proof of
+a signed policy's exact stopping deadline under simultaneous failures.
+No installer, release runtime, certificate lineage, WAL state, signed
+authority or public bind is touched. The test fails rather than skips
+when actual hosted PID1 systemd is unavailable. A future installed
+service must fit its watchdog interval and proof refresh scheduling
+within the shortest real authority/witness expiry and independently
+qualify its actual Xray process and metering evidence.
