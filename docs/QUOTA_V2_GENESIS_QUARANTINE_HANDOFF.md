@@ -627,3 +627,29 @@ replace signed cap, WAL or revocation verification. Hosted CI requires
 genuine Unix listeners and peer PID/UID verification; the structural tests
 exercise actual detached Linux mounts and process inheritance. No public bind,
 authority issuance, systemd installation or Agent version change occurs.
+
+## Exact pinned local input bundle for pre-spawn and stop-only monitoring
+
+`PinnedTlsInputs` compiles the exact signed TLS authority over the original
+Genesis profile and independently verified cap roster, assembles the sealed
+certificate/key/config inputs and the original detached read-only route
+capsule, and binds them to the exact authority digest, compiled config digest,
+roster object/hash and meter PID. Its child FD list contains only the config,
+certificate/key memfds and read-only route descriptor, not the verified CA,
+writable owner directory, meter pidfd or enrolled Agent state.
+
+The dormant pre-spawn and periodic stop-only checks now require this same
+bundle, rather than a fresh diagnostic returning mutable Certbot pathnames.
+A missing, foreign, changed, expired or authorizing input witness fails; a
+monitor already owning a subprocess must stop that exact child. The bundle
+checks immutable descriptor identities and current source lineage/route
+state on each invocation. Real signed test inputs, real sealed memfds and
+detached mounts are combined in root-only tests, with a genuine kernel Unix
+peer mandatory in hosted CI. A fixture signature is NOT a production issuer.
+
+No code here execs or listens publicly. The future launcher must keep the
+bundle open until the owned child is stopped and reaped, isolate other
+writable paths and capabilities, verify qualified executable identity,
+complete installed WAL evidence and independently establish the signed
+revocation/systemd deadman stop chain. This assembly does not provide
+positive authority or replace the separate WAL proof.

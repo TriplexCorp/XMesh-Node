@@ -16,7 +16,7 @@ import time
 
 import public_tls_cap_watch
 import public_tls_deadman
-import public_tls_certificates
+import public_tls_pinned_inputs
 import public_tls_frontend
 import public_tls_revocation_watch
 import wal_transport
@@ -28,7 +28,7 @@ MAX_DIVERGENCE_NS = 5_000_000_000
 class StopOnlyTlsMonitor:
     def __init__(self, *, child, profile, authority, node, activation,
                  genesis_sha, runtime_id, pinned, runtime_pid, cap_watch,
-                 revocation_watch):
+                 revocation_watch, pinned_inputs=None):
         if not isinstance(child, subprocess.Popen):
             raise ValueError("only a directly-owned child process is monitorable")
         # A caller may already have started the child. Never leave that
@@ -77,6 +77,10 @@ class StopOnlyTlsMonitor:
             self._config = public_tls_frontend.compile_signed_public_tls(
                 profile, authority, node=node, activation=activation,
                 genesis_sha=genesis_sha, runtime_id=runtime_id, pinned=pinned)
+            if not isinstance(pinned_inputs, public_tls_pinned_inputs.PinnedTlsInputs):
+                raise ValueError("missing exact sealed TLS material and read-only original route inputs")
+            self._inputs = pinned_inputs
+            self._authority = authority
             self._runtime_pid = runtime_pid
             self._runtime_id = runtime_id
             self._wall_ms = time.time_ns() // 1_000_000
@@ -114,7 +118,7 @@ class StopOnlyTlsMonitor:
                 self._runtime_pid)
             if measured != self._runtime_id:
                 raise ValueError("metered Xray changed before TLS supervision")
-            public_tls_certificates.verify_certificate_lineage(self._config)
+            self._check_pinned_inputs()
             # The check is read-only, nonce/PID-bound and intentionally returns
             # no positive public-TLS authorization. Missing *any* user dies.
             if self._cap_watch.check() is not None:
@@ -172,6 +176,12 @@ class StopOnlyTlsMonitor:
             self._wall_ms, self._mono_ns = ack_wall_ms, ack_mono_ns
         except Exception:
             self._stop("initial TLS supervision preflight failed")
+
+    def _check_pinned_inputs(self):
+        if self._inputs.ensure_current(
+                config=self._config, authority=self._authority,
+                cap_watch=self._cap_watch, runtime_pid=self._runtime_pid) is not None:
+            raise ValueError("local TLS input check cannot grant public ingress")
 
     def _pulse_deadman(self):
         # Read the verified watch's exact signed deadline, calculated from
@@ -251,9 +261,9 @@ class StopOnlyTlsMonitor:
         if observed_runtime != self._runtime_id:
             self._stop("metered Xray runtime replaced")
         try:
-            public_tls_certificates.verify_certificate_lineage(self._config)
+            self._check_pinned_inputs()
         except Exception:
-            self._stop("trusted TLS certificate unavailable")
+            self._stop("original sealed TLS material or read-only routes unavailable")
         try:
             if self._cap_watch.check() is not None:
                 raise ValueError("cap witness cannot authorize public TLS")

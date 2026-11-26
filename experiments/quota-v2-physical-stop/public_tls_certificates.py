@@ -7,6 +7,7 @@ A valid certificate alone never makes a Node eligible to serve traffic.
 """
 from copy import deepcopy
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -186,6 +187,7 @@ class FrozenTlsInputs:
         self._verified_at = None
         self._wall_at = None
         self.config_fd = None
+        self.source_config_sha256 = None
         self.material_fds = ()
         self.lineages = {}
 
@@ -244,10 +246,14 @@ def freeze_certificate_lineage(config):
     if os.geteuid() != 0 or not isinstance(config, dict):
         raise ValueError("certificate checks require root and a signed TLS configuration")
     config = deepcopy(config)
+    original_sha = hashlib.sha256(json.dumps(
+        config, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        allow_nan=False).encode("utf-8")).hexdigest()
     inbounds = config.get("inbounds")
     if not isinstance(inbounds, list) or not 1 <= len(inbounds) <= 2:
         raise ValueError("signed public TLS inbounds are missing")
     frozen = FrozenTlsInputs()
+    frozen.source_config_sha256 = original_sha
     try:
         # Anchor the entire proof; even slow OpenSSL verification may not
         # make the snapshot look newly verified after the signed time budget.
@@ -294,10 +300,9 @@ def freeze_certificate_lineage(config):
 def verify_certificate_lineage(config):
     """Validate exact sealed bytes and return diagnostic lineage paths only.
 
-    The legacy preflight/stop-only monitors inspect the live lineages, but
-    must not use the returned mutable paths to create a TLS child. A future
-    launcher must retain a separate FrozenTlsInputs instance through exec,
-    and check its lineage as part of continuous stop supervision.
+    This legacy diagnostic returns paths for inspection only. The dormant
+    preflight and stop-only monitor require the separate pinned input
+    bundle and never accept these mutable paths as child launch inputs.
     """
     with freeze_certificate_lineage(config) as frozen:
         return dict(frozen.lineages)
