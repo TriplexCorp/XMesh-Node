@@ -121,6 +121,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_route_mount.py experiments/quota-v2-physical-stop/public_tls_routes.py tests/test_quota_v2_public_tls_routes.py
           sudo env PATH="$PATH" python3 tests/test_quota_v2_public_tls_routes.py -v
+      - name: Actual capless private PID namespace proves original Unix meter by pidfs identity
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_peer_identity.py tests/test_quota_v2_public_tls_peer_identity.py
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" PATH="$PATH" python3 tests/test_quota_v2_public_tls_peer_identity.py -v
       - name: Signed TLS input bundle joins actual sealed certificates and original read-only routes
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_pinned_inputs.py experiments/quota-v2-physical-stop/public_tls_spawn_preflight.py tests/test_quota_v2_public_tls_pinned_inputs.py
