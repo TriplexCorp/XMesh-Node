@@ -2,6 +2,8 @@
 """Exercise cold-install guards with disposable state, never real /var/lib."""
 import hashlib
 import os
+import shutil
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -207,7 +209,7 @@ exit 77
         self.assertLess(source.index('systemctl enable xmesh-pq-activation-recovery.service'),
                         source.index('systemctl start xmesh-node-metrics.service'))
         # Reboot recovery is mandatory for the current signed 6.0.35 product, not only the historical 6.0.33.
-        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.35 ]]; then', source)
+        self.assertIn('if [[ "$AGENT_VERSION" == control-v6.0.36 ]]; then', source)
         self.assertIn('WAL staging requires a fresh test node', source)
 
     def test_bound_artifact_preflight_precedes_destructive_entry_points(self):
@@ -306,6 +308,37 @@ exit 77
         self.assertNotIn('--restart=always', installer)
 
 
+
+    def test_installed_public_tls_preflight_imports_without_source_checkout(self):
+        installer = (ROOT / 'deploy/install-v6-strict-operational-agents.sh').read_text()
+        # Expand the actual install manifest, not a duplicate module list.
+        manifest = next(line for line in installer.splitlines()
+                        if line.startswith('for helper in quota-v2-physical-stop/'))
+        helpers = subprocess.check_output(
+            ['bash', '-c', manifest + '\n  printf "%s\\n" "$helper"\ndone'],
+            text=True).splitlines()
+        with tempfile.TemporaryDirectory() as td:
+            installed = Path(td) / 'libexec'
+            for helper in helpers:
+                relative = Path(helper + '.py')
+                target = installed / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / 'experiments' / relative, target)
+            # sign_observation resolves the policy guard relative to this
+            # relocated sandbox; on the real install it uses /usr/local/libexec.
+            guard = Path(td) / 'deploy/xmesh-policy-guard-base.py'
+            guard.parent.mkdir()
+            shutil.copyfile(ROOT / 'deploy/xmesh-policy-guard-base.py', guard)
+            command = Path(td) / 'xmesh-quota-public-tls-preflight'
+            command.symlink_to(installed / 'quota-v2-physical-stop/public_tls_preflight.py')
+            result = subprocess.run([sys.executable, '-E', str(command), '--help'],
+                                    cwd=td, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--required-lifetime-ms', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-E', '-c', 'import public_tls_revocation_watch'],
+                cwd=installed / 'quota-v2-physical-stop', capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_metered_xray_provenance_requalifies_exact_agent_release(self):
         source = (ROOT / '.github/workflows/xray-dataplane-fence-experiment.yml').read_text()

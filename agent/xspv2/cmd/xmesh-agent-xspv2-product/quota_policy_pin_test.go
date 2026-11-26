@@ -14,6 +14,7 @@ func TestOnlyExactRegisteredProductOperationPaths(t *testing.T) {
 		"/api/v1/node/quota-v2/genesis-reservation",
 		"/api/v1/node/quota-v2/genesis-cap-delivery",
 		"/api/v1/node/quota-v2/public-tls-preflight",
+		"/api/v1/node/quota-v2/public-tls-revocation",
 	}
 	for _, path := range allowed {
 		if !allowedProductTunnelPath(path) {
@@ -33,6 +34,9 @@ func TestOnlyExactRegisteredProductOperationPaths(t *testing.T) {
 		"/api/v1/node/quota-v2/public-tls-preflight/",
 		"/api/v1/node/quota-v2/public-tls-preflight?userId=1",
 		"/api/v1/node/quota-v2/public-tls-preflight/../grant",
+		"/api/v1/node/quota-v2/public-tls-revocation/",
+		"/api/v1/node/quota-v2/public-tls-revocation?userId=1",
+		"/api/v1/node/quota-v2/public-tls-revocation/../grant",
 		"http://evil.invalid/api/v1/node/quota-v2/policy-pin",
 		"/api/v1/node/desired-config/unsafe",
 	} {

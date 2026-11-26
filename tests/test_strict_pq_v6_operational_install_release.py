@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source-only first-install strict-PQ control-v6.0.35 regression tests."""
+"""Source-only first-install strict-PQ control-v6.0.36 regression tests."""
 from pathlib import Path
 import subprocess
 import unittest
@@ -16,12 +16,13 @@ class FirstInstall(unittest.TestCase):
         cls.xray = (ROOT / "deploy/xmesh-xray-update.py").read_text(encoding="utf-8")
 
     def test_fresh_version_and_zero_stale_recovery_gates(self):
-        self.assertEqual(CANONICAL, "control-v6.0.35")
+        self.assertEqual(CANONICAL, "control-v6.0.36")
         for label, source in (("bootstrap", self.bootstrap),
                               ("installer", self.installer), ("Xray updater", self.xray)):
             with self.subTest(label=label):
                 self.assertNotIn("control-v6.0.33", source)
                 self.assertNotIn("control-v6.0.34", source)
+                self.assertNotIn("control-v6.0.35", source)
                 self.assertIn(CANONICAL, source)
         self.assertIn('AGENT_VERSION = "' + CANONICAL + '"', self.xray)
 
@@ -50,7 +51,7 @@ class FirstInstall(unittest.TestCase):
     def test_new_tls_probe_is_installed_only_as_inert_root_command(self):
         source = self.installer
         self.assertIn(
-            "quarantine_policy,genesis_reservation,public_tls_preflight,first_cap_handoff",
+            "quarantine_policy,genesis_reservation,public_tls_preflight,public_tls_cap_watch,public_tls_revocation_watch,first_cap_handoff",
             source,
         )
         self.assertIn(
