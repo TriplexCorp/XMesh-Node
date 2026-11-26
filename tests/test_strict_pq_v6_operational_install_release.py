@@ -51,7 +51,7 @@ class FirstInstall(unittest.TestCase):
     def test_new_tls_probe_is_installed_only_as_inert_root_command(self):
         source = self.installer
         self.assertIn(
-            "quarantine_policy,genesis_reservation,public_tls_preflight,first_cap_handoff",
+            "quarantine_policy,genesis_reservation,public_tls_preflight,public_tls_cap_watch,public_tls_revocation_watch,first_cap_handoff",
             source,
         )
         self.assertIn(

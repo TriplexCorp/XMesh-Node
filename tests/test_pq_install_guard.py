@@ -335,6 +335,10 @@ exit 77
                                     cwd=td, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('--required-lifetime-ms', result.stdout)
+            result = subprocess.run(
+                [sys.executable, '-E', '-c', 'import public_tls_revocation_watch'],
+                cwd=installed / 'quota-v2-physical-stop', capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_metered_xray_provenance_requalifies_exact_agent_release(self):
         source = (ROOT / '.github/workflows/xray-dataplane-fence-experiment.yml').read_text()
