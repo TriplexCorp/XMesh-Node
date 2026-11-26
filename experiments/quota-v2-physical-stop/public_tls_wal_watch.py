@@ -29,6 +29,73 @@ MAX_CHECK_NS = 9_000_000_000
 MAX_AGE_MS = 2000
 MAX_VALIDITY_MS = 7000
 WAL_NAME = re.compile(r"meter-[0-9a-f]{64}\.jsonl\Z")
+INSTANCE_LOCK = "xray-instance.lock"
+MAX_METER_FDS = 4096
+MAX_FDINFO = 8192
+
+
+def _instance_lock(directory_fd, pid, deadline):
+    """Read the measured Xray's real lifetime flock; never take it ourselves."""
+    fd = os.open(INSTANCE_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+                 | os.O_NONBLOCK, dir_fd=directory_fd)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1 or info.st_size != 0):
+            raise ValueError("unsafe Xray instance lock inode")
+        identity = (info.st_dev, info.st_ino)
+        # Inspect only the exact measured process's kernel descriptors.
+        # /proc/locks can report a backing-filesystem inode for overlayfs
+        # flock; fdinfo belongs to the actual open file description. Match
+        # the stat of that descriptor to the journal pathname instead of
+        # guessing the overlay filesystem's internal device numbering.
+        proc = f"/proc/{pid}"
+        matches = []
+        with os.scandir(proc + "/fd") as descriptors:
+            for number, item in enumerate(descriptors, 1):
+                deadline()
+                if number > MAX_METER_FDS or not item.name.isascii() or not item.name.isdecimal():
+                    raise ValueError("meter instance descriptor scan exceeded bound")
+                try:
+                    actual = os.stat(item.path)
+                    if (actual.st_dev, actual.st_ino) != identity:
+                        continue
+                    with open(proc + "/fdinfo/" + item.name, "rb") as evidence:
+                        raw = evidence.read(MAX_FDINFO + 1)
+                    if len(raw) > MAX_FDINFO:
+                        raise ValueError("instance lock fdinfo exceeded bound")
+                    locks = [line.split()[2:] for line in raw.splitlines()
+                             if line.startswith(b"lock:")]
+                    final = os.stat(item.path)
+                    if (final.st_dev, final.st_ino) != identity:
+                        raise ValueError("meter instance descriptor changed")
+                except FileNotFoundError:
+                    # Unrelated descriptors of the live process may close;
+                    # a missing lock descriptor cannot produce a match.
+                    continue
+                if not locks:
+                    continue
+                # The per-FD kernel line binds the held flock to the open
+                # file, exact host PID, exclusive write and whole file.
+                if (len(locks) != 1 or len(locks[0]) != 7
+                        or locks[0][:4] != [b"FLOCK", b"ADVISORY", b"WRITE",
+                                           str(pid).encode("ascii")]
+                        or locks[0][5:] != [b"0", b"EOF"]):
+                    raise ValueError("foreign kernel lock on measured instance")
+                matches.append(item.name)
+        if len(matches) != 1:
+            raise ValueError("instance lock not exclusively held by measured Xray PID")
+        current = os.stat(INSTANCE_LOCK, dir_fd=directory_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino, current.st_nlink, current.st_size,
+                current.st_uid, current.st_mode) != (
+                info.st_dev, info.st_ino, info.st_nlink, info.st_size,
+                info.st_uid, info.st_mode):
+            raise ValueError("Xray instance lock changed during verification")
+        deadline()
+        return identity + (matches[0],)
+    finally:
+        os.close(fd)
 
 
 def _snapshot(directory, roster, deadline):
@@ -40,14 +107,15 @@ def _snapshot(directory, roster, deadline):
         caps = {f"positive-cap-u{user}.json": raw
                 for user, (raw, _, _) in roster._grants.items()}
         streams = sorted(n for n in names if WAL_NAME.fullmatch(n))
-        if (not set(caps) <= names
-                or names - set(caps) - set(streams) - {wal.registry.NAME}
+        if (not (set(caps) | {INSTANCE_LOCK}) <= names
+                or names - set(caps) - set(streams) - {wal.registry.NAME, INSTANCE_LOCK}
                 or len(streams) > wal.registry.MAX_ENTRIES):
             raise ValueError("foreign, incomplete or later first-Genesis ledger")
+        instance = _instance_lock(fd, roster._pid, deadline)
         # Bind the bytes persisted inside Xray, not only Agent's root copies.
         # Bound work before opening any file, and reject unsafe inodes.
         total = 0
-        for name in names:
+        for name in names - {INSTANCE_LOCK}:
             deadline()
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             limit = (len(caps[name]) if name in caps else
@@ -104,9 +172,12 @@ def _snapshot(directory, roster, deadline):
         current = os.stat(directory, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (anchor.st_dev, anchor.st_ino):
             raise ValueError("first-Genesis journal directory was replaced")
+        if _instance_lock(fd, roster._pid, deadline) != instance:
+            raise ValueError("Xray instance lock was replaced during snapshot")
         deadline()
         return {
             "identity": (anchor.st_dev, anchor.st_ino),
+            "instanceLock": instance,
             "sequence": len(entries),
             "sha256": hashlib.sha256(index).hexdigest(),
             "tail": next(reversed(entries.values()))["digest"] if entries else "0"*64,

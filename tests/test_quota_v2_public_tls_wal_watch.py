@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Literal signed Nexus wire, actual private Go-format WAL, no ingress permit."""
 import hashlib
+import fcntl
 import os
 from pathlib import Path
 import sys
 import stat
+import subprocess
 from contextlib import ExitStack
 from types import SimpleNamespace
 import tempfile
@@ -32,14 +34,19 @@ class PublicTlsWalWatchTests(unittest.TestCase):
             profile=source.reply["config"], signed_grants={100: raw}, pinned=source.pub,
             node=source.node, activation=source.fixture.activation,
             genesis_sha=source.reply["policySha256"], runtime_id=source.runtime,
-            trusted_pid=12345, socket_path="/var/lib/xmesh-first-meter/runtime/drain.sock")
+            trusted_pid=os.getpid(), socket_path="/var/lib/xmesh-first-meter/runtime/drain.sock")
         tmp = tempfile.TemporaryDirectory(prefix="xmesh-tls-wal-test-")
         self.addCleanup(tmp.cleanup)
         self.directory = Path(tmp.name)
         cap = self.directory / "positive-cap-u100.json"
         cap.write_bytes(raw)
         cap.chmod(0o600)
-        self.measured = ("a"*64, "2026-11-26T19:30:01.012345678Z", 12345, source.runtime)
+        self.instance = os.open(self.directory / watch.INSTANCE_LOCK,
+                                os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        self.addCleanup(os.close, self.instance)
+        fcntl.flock(self.instance, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.measured = ("a"*64, "2026-11-26T19:30:01.012345678Z",
+                         os.getpid(), source.runtime)
         self.counters = (0, 0)
         self.requests = []
 
@@ -133,7 +140,7 @@ class PublicTlsWalWatchTests(unittest.TestCase):
         snapshot = self.snapshot()
         for field, value in (
             ("challenge", "f"*64), ("nodeId", self.roster.node+1),
-            ("userId", True), ("hostPid", 12346), ("containerId", "f"*64),
+            ("userId", True), ("hostPid", os.getpid()+1), ("containerId", "f"*64),
             ("startedAt", "2026-11-26T19:30:02Z"), ("runtimeId", "f"*64),
             ("profileRevision", "f"*64), ("capRosterSha256", "f"*64),
             ("activationReceiptSha256", "f"*64), ("genesisPolicySha256", "f"*64),
@@ -189,6 +196,66 @@ class PublicTlsWalWatchTests(unittest.TestCase):
         self.create_wal(alias="xmesh-u999--vless-main")
         with self.assertRaisesRegex(ValueError, "outside original"):
             self.snapshot()
+
+    def test_real_kernel_instance_lock_cannot_be_replaced_or_faked(self):
+        snapshot = self.snapshot()
+        info = os.fstat(self.instance)
+        self.assertEqual(snapshot["instanceLock"],
+                         (info.st_dev, info.st_ino, str(self.instance)))
+        # An independently running child is not the process named by the
+        # original roster and does not own its lock.
+        with subprocess.Popen([sys.executable, "-c", "import sys; print('ready', flush=True); sys.stdin.read()"],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE) as foreign:
+            try:
+                self.assertEqual(foreign.stdout.readline(), b"ready\n")
+                with mock.patch.object(self.roster, "_pid", foreign.pid):
+                    with self.assertRaisesRegex(ValueError, "not exclusively held"):
+                        self.snapshot()
+                # Move the actual lock to a foreign process, keeping the
+                # original measured PID alive. It must not masquerade as
+                # an original lifetime lock merely via the pathname.
+                fcntl.flock(self.instance, fcntl.LOCK_UN)
+                code = ("import fcntl,sys; f=open(sys.argv[1], 'r+b'); "
+                        "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print('locked', flush=True); sys.stdin.read()")
+                with subprocess.Popen([sys.executable, "-c", code, str(self.directory / watch.INSTANCE_LOCK)],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE) as owner:
+                    try:
+                        self.assertEqual(owner.stdout.readline(), b"locked\n")
+                        with self.assertRaisesRegex(ValueError, "not exclusively held"):
+                            self.snapshot()
+                    finally:
+                        owner.terminate()
+                fcntl.flock(self.instance, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                foreign.terminate()
+        fcntl.flock(self.instance, fcntl.LOCK_UN)
+        with self.assertRaisesRegex(ValueError, "not exclusively held"):
+            self.snapshot()
+        fcntl.flock(self.instance, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        path = self.directory / watch.INSTANCE_LOCK
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, "later first-Genesis"):
+            self.snapshot()
+        path.touch(mode=0o600)
+        with self.assertRaisesRegex(ValueError, "not exclusively held"):
+            self.snapshot()
+        path.unlink()
+        path.symlink_to("/dev/null")
+        with self.assertRaises(OSError):
+            self.snapshot()
+
+    def test_nonempty_or_linked_instance_lock_refused(self):
+        os.write(self.instance, b"x")
+        with self.assertRaisesRegex(ValueError, "unsafe Xray instance"):
+            self.snapshot()
+        os.ftruncate(self.instance, 0)
+        path = self.directory / watch.INSTANCE_LOCK
+        # Link from outside the scanned WAL root so the inode itself is
+        # rejected, not merely an unexpected filename.
+        with tempfile.TemporaryDirectory() as outside:
+            os.link(path, Path(outside) / "alias")
+            with self.assertRaisesRegex(ValueError, "unsafe Xray instance"):
+                self.snapshot()
 
     def test_cap_bytes_and_unexpected_later_ledger_denied(self):
         cap = self.directory / "positive-cap-u100.json"
