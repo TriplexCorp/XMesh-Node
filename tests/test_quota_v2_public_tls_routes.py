@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real kernel private route/peer checks; disposable, no public listener."""
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -42,6 +43,7 @@ class RouteFixture(unittest.TestCase):
         child_code = """
 import os, select, socket, sys, time
 from pathlib import Path
+print('identity-ready', flush=True)
 path = Path(sys.stdin.readline().strip())
 path.mkdir(mode=0o700)
 sockets = []
@@ -65,11 +67,19 @@ finally:
     for sock in sockets:
         sock.close()
 """
-        self.child = subprocess.Popen([sys.executable, "-c", child_code,
-                                       "real" if self.real_sockets else "structure"],
-                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, text=True)
+        # The real installed Docker meter has no added capabilities. Keep
+        # the test peer root-owned but capless as well, and take identity
+        # only after setpriv has exec'd the final Python executable.
+        self.child = subprocess.Popen([
+            "setpriv", "--no-new-privs", "--bounding-set=-all",
+            "--inh-caps=-all", "--ambient-caps=-all", sys.executable, "-c",
+            child_code, "real" if self.real_sockets else "structure",
+        ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop_child)
+        import select
+        self.assertTrue(select.select([self.child.stdout], [], [], 5)[0],
+                        "kernel fixture did not exec")
+        self.assertEqual(self.child.stdout.readline().strip(), "identity-ready")
         self.runtime = routes.wal.runtime_identity.trusted_runtime_identity(self.child.pid)
         self.meter = Path("/dev/shm/xmesh-" + self.runtime)
         # No pre-existing directory may be removed by this disposable test.
@@ -77,7 +87,6 @@ finally:
         self.addCleanup(shutil.rmtree, self.meter, True)
         self.child.stdin.write(str(self.meter) + "\n")
         self.child.stdin.flush()
-        import select
         self.assertTrue(select.select([self.child.stdout], [], [], 5)[0],
                         "kernel Unix fixture did not become ready")
         ready = self.child.stdout.readline().strip()
@@ -156,6 +165,73 @@ print(os.readlink(os.path.join(root, 'ingress-u100')))
         self.assertEqual(os.readlink(path / "ingress-u100"), "/proc/1/root/dev/shm/foreign")
         with self.assertRaises(OSError):
             os.fstat(fd)
+
+    def test_actual_readonly_mount_and_unprivileged_child_cannot_change_it(self):
+        with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
+            ro = capsule.directory_fd
+            writer = capsule._write_fd
+            self.assertNotEqual(routes.route_mount.mount_id(ro),
+                                routes.route_mount.mount_id(writer))
+            self.assertEqual(os.fstat(ro).st_ino, os.fstat(writer).st_ino)
+            self.assertTrue(os.fstatvfs(ro).f_flag & os.ST_RDONLY)
+            self.assertFalse(os.fstatvfs(writer).f_flag & os.ST_RDONLY)
+            with self.assertRaises(OSError) as failure:
+                os.unlink("ingress-u100", dir_fd=ro)
+            self.assertEqual(failure.exception.errno, errno.EROFS)
+            script = r"""
+import ctypes, errno, os, sys
+sys.path.insert(0, sys.argv[1])
+import public_tls_route_mount as m
+fd = int(sys.argv[2])
+writer = int(sys.argv[3])
+root = sys.argv[4]
+status = dict(line.split(':',1) for line in open('/proc/self/status') if ':' in line)
+assert int(status['CapEff'].strip(),16) == 0
+assert int(status['CapBnd'].strip(),16) == 0
+assert status['NoNewPrivs'].strip() == '1'
+# The actual pass_fds operation exposes no writable parent capsule fd.
+try:
+    os.fstat(writer)
+    raise AssertionError("writable parent directory FD inherited")
+except OSError as e:
+    assert e.errno == errno.EBADF
+assert os.fstatvfs(fd).f_flag & m.VFS_FLAGS == m.VFS_FLAGS
+assert os.readlink(root+'/ingress-u100') == sys.argv[5]
+for attempt in (lambda: os.unlink('ingress-u100',dir_fd=fd),
+                lambda: os.symlink('/foreign',root+'/foreign'),
+                lambda: os.mkdir('new',dir_fd=fd)):
+    try:
+        attempt()
+        raise AssertionError("route mount accepted child mutation")
+    except OSError as e:
+        assert e.errno == errno.EROFS, e
+# Root UID alone cannot undo mount attributes after losing CAP_SYS_ADMIN.
+attr = m.MountAttr(0,m.MOUNT_ATTR_RDONLY,0,0)
+assert m._libc().mount_setattr(fd,b'',m.AT_EMPTY_PATH,ctypes.byref(attr),ctypes.sizeof(attr)) == -1
+assert ctypes.get_errno() == errno.EPERM
+assert os.readlink(root+'/ingress-u100') == sys.argv[5]
+print('read-only child verified')
+"""
+            output = subprocess.check_output([
+                "setpriv", "--no-new-privs", "--bounding-set=-all",
+                "--inh-caps=-all", "--ambient-caps=-all", sys.executable,
+                "-c", script, str(ROOT / "experiments/quota-v2-physical-stop"),
+                str(ro), str(writer), capsule.ingress_state, self.target,
+            ], pass_fds=(ro,), timeout=5)
+            self.assertEqual(output.strip(), b"read-only child verified")
+            self.assertIsNone(capsule.ensure_current())
+
+    def test_writable_fd_substitution_and_unsupported_mount_fail_closed(self):
+        with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
+            os.dup2(capsule._write_fd, capsule.directory_fd, inheritable=False)
+            with self.assertRaisesRegex(ValueError, "pinned read-only mount"):
+                capsule.ensure_current()
+        self.assertEqual(list(self.root.iterdir()), [])
+        with mock.patch.object(routes.route_mount, "readonly_view",
+                               side_effect=OSError(errno.ENOSYS, "no detached mount support")):
+            with self.assertRaises(OSError):
+                routes.FirstGenesisRoutes(self.roster, self.fd)
+        self.assertEqual(list(self.root.iterdir()), [])
 
     def test_mutable_agent_route_retarget_is_detected_without_redirecting_capsule(self):
         with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
@@ -265,7 +341,9 @@ func main() {
         with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
             def read_child():
                 return subprocess.check_output(
-                    [str(binary), capsule.ingress_state, str(self.child.pid)],
+                    ["setpriv", "--no-new-privs", "--bounding-set=-all",
+                     "--inh-caps=-all", "--ambient-caps=-all", str(binary),
+                     capsule.ingress_state, str(self.child.pid)],
                     pass_fds=(capsule.directory_fd,), timeout=5).decode().strip()
             self.assertEqual(read_child(), self.target)
             ordinary = self.source / "ingress-u100"
