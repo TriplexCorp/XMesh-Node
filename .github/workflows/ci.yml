@@ -97,6 +97,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_deadman.py tests/test_quota_v2_public_tls_deadman.py
           python3 tests/test_quota_v2_public_tls_deadman.py -v
+      - name: Real PID1 watchdog contains frozen TLS supervisor and guardian
+        run: |
+          python3 -m py_compile tests/test_quota_v2_public_tls_systemd.py
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_TLS_SYSTEMD_TEST=1 python3 tests/test_quota_v2_public_tls_systemd.py -v
       - name: Signed TLS stop-only monitor cannot outlive expiry, revocation or Xray runtime
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_stop_monitor.py tests/test_quota_v2_public_tls_stop_monitor.py
