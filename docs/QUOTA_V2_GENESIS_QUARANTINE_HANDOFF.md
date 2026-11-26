@@ -721,3 +721,18 @@ listener. This is not a complete sandbox: unrelated runtime FDs are not
 certified safe, and a future launcher must isolate other namespaces and
 filesystem access, drop capabilities and obtain full signed/WAL authority
 before any public publication.
+
+
+### Actual capless child thread credentials (dormant)
+
+The post-exec child proof now reads every thread's actual kernel procfs
+status, not a launcher-supplied claim or only the main PID. It requires
+root UID/GID in all four credential slots, no extra supplementary groups,
+no tracer, no-new-privs and zero inherited/permitted/effective/bounding/
+ambient capabilities. Any missing, changing or privileged thread fails
+before and after the descriptor scan and independently bound PID checks.
+The bounded thread scans compare the exact live thread set. Tests use a
+real capless multithreaded process and an independently privileged process
+inheriting the exact same sealed inputs; only the former passes. This
+does not prove a complete mount, PID, seccomp, cgroup or network sandbox,
+and does not create a listener or a positive authority.

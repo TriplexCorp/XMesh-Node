@@ -39,7 +39,7 @@ class ChildInputTests(unittest.TestCase):
         return fd
 
     @contextmanager
-    def child(self, *, pass_fds=None, before="pass"):
+    def child(self, *, pass_fds=None, before="pass", capless=True):
         script = (
             "import os,sys\n" + before + "\n"
             "print('ready', flush=True)\n"
@@ -48,10 +48,9 @@ class ChildInputTests(unittest.TestCase):
             f"        os.close({self.config})\n"
             "    print('done', flush=True)\n"
         )
-        proc = subprocess.Popen([
-            "setpriv", "--no-new-privs", "--bounding-set=-all",
-            "--inh-caps=-all", "--ambient-caps=-all", sys.executable, "-c", script,
-        ], pass_fds=(
+        prefix = ["setpriv", "--no-new-privs", "--bounding-set=-all",
+                  "--inh-caps=-all", "--ambient-caps=-all"] if capless else []
+        proc = subprocess.Popen([*prefix, sys.executable, "-c", script], pass_fds=(
             self.expected if pass_fds is None else pass_fds),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -77,6 +76,23 @@ class ChildInputTests(unittest.TestCase):
             self.assertTrue(select.select([child.stdout], [], [], 5)[0])
             self.assertEqual(child.stdout.readline(), "done\n")
             with self.assertRaises((ValueError, OSError)):
+                self.check(child)
+
+    def test_real_multithreaded_capless_child_passes_kernel_credentials(self):
+        with self.child(before="import threading; event=threading.Event(); "
+                               "threading.Thread(target=event.wait, daemon=True).start()") as child:
+            threads = proof._capless_threads(child.pid, lambda: None)
+            self.assertGreaterEqual(len(threads), 2)
+            self.assertIsNone(self.check(child))
+
+    def test_same_exact_inputs_cannot_hide_privileged_child(self):
+        with self.child(capless=False) as child:
+            # Actual inherited kernel capabilities—not a mocked status.
+            raw = Path(f"/proc/{child.pid}/status").read_text()
+            self.assertTrue(any(int(line.split()[1], 16) for line in raw.splitlines()
+                                if line.startswith(("CapEff:", "CapPrm:", "CapBnd:"))),
+                            "real privileged fixture required")
+            with self.assertRaisesRegex(ValueError, "not untraced capless root"):
                 self.check(child)
 
     def test_owner_fd_replacement_after_assembly_is_refused(self):
