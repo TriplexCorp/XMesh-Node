@@ -12,6 +12,8 @@ import public_tls_route_mount as route_mount
 
 MAX_FDS = 16384
 MAX_FDINFO = 8192
+MAX_STATUS = 65536
+MAX_THREADS = 1024
 MAX_PROOF_NS = 2_000_000_000
 
 
@@ -54,6 +56,50 @@ def _alive(child, pidfd):
     if len(raw) > 8192 or len(fields) < 20 or int(fields[1]) != os.getpid():
         raise ValueError("descriptor proof requires an exact directly owned child")
     return fields[19]  # kernel starttime; not a caller's claimed PID
+
+
+def _capless_threads(pid, deadline):
+    """Require actual kernel credentials of every thread, not just TGID."""
+    required = {b"Pid", b"Tgid", b"TracerPid", b"Uid", b"Gid", b"Groups",
+                b"NoNewPrivs", b"CapInh", b"CapPrm", b"CapEff", b"CapBnd", b"CapAmb"}
+    proc = f"/proc/{pid}/task"
+    seen = set()
+    with os.scandir(proc) as threads:
+        for count, entry in enumerate(threads, 1):
+            deadline()
+            if (count > MAX_THREADS or not entry.name.isascii()
+                    or not entry.name.isdecimal()):
+                raise ValueError("TLS child thread credential scan exceeded bound")
+            tid = int(entry.name)
+            with open(entry.path + "/status", "rb") as source:
+                raw = source.read(MAX_STATUS + 1)
+            if len(raw) > MAX_STATUS:
+                raise ValueError("TLS child thread status exceeded bound")
+            values = {}
+            for line in raw.splitlines():
+                key, _, value = line.partition(b":")
+                if key in required:
+                    if key in values:
+                        raise ValueError("duplicate TLS child credential field")
+                    values[key] = value.split()
+            if (set(values) != required
+                    or values[b"Pid"] != [str(tid).encode("ascii")]
+                    or values[b"Tgid"] != [str(pid).encode("ascii")]
+                    or values[b"TracerPid"] != [b"0"]
+                    or values[b"Uid"] != [b"0"] * 4
+                    or values[b"Gid"] != [b"0"] * 4
+                    or set(values[b"Groups"]) - {b"0"}
+                    or values[b"NoNewPrivs"] != [b"1"]
+                    or any(len(values[key]) != 1
+                           or not values[key][0]
+                           or set(values[key][0]) != {ord("0")}
+                           for key in (b"CapInh", b"CapPrm", b"CapEff", b"CapBnd", b"CapAmb"))):
+                raise ValueError("TLS child thread is not untraced capless root with no-new-privs")
+            seen.add(tid)
+    if pid not in seen:
+        raise ValueError("missing TLS child main thread credential evidence")
+    deadline()
+    return frozenset(seen)
 
 
 def capture(*, expected, forbidden, route_fd):
@@ -99,6 +145,7 @@ def verify(child, *, expected, forbidden, route_fd, pinned):
     pidfd = os.pidfd_open(child.pid, 0)
     try:
         birth = _alive(child, pidfd)
+        threads = _capless_threads(child.pid, deadline)
         if capture(expected=expected, forbidden=forbidden, route_fd=route_fd) != pinned:
             raise ValueError("owner pinned input or protected descriptor changed")
         original = dict(pinned[0])
@@ -139,6 +186,8 @@ def verify(child, *, expected, forbidden, route_fd, pinned):
         if observed != set(expected):
             raise ValueError("child input descriptor inventory is incomplete")
         exact()
+        if threads != _capless_threads(child.pid, deadline):
+            raise ValueError("TLS child thread set changed during credential proof")
         if (birth != _alive(child, pidfd)
                 or capture(expected=expected, forbidden=forbidden, route_fd=route_fd) != pinned):
             raise ValueError("owner or child input identity changed")
