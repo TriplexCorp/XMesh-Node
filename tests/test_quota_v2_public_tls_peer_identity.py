@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import array
 import errno
+import hashlib
 import os
 from pathlib import Path
 import socket
@@ -21,10 +22,15 @@ import public_tls_route_mount as mount
 # An actual nested PID and mount namespace with a new procfs. The child
 # receives the expected token alone, not the supervisor's pinned pidfd.
 INNER = r"""
-import errno, os, signal, socket, struct, sys
-modules, parent, device, inode, view, inherited, verdict, name = sys.argv[1:]
+import errno, hashlib, os, signal, socket, struct, sys
+from pathlib import Path
+modules, digest, parent, device, inode, view, inherited, verdict, name = sys.argv[1:]
 sys.path.insert(0, modules)
 import public_tls_peer_identity as proof
+path = Path(proof.__file__)
+assert path == Path(modules) / "public_tls_peer_identity.py"
+assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+assert path.stat().st_uid == 0 and path.stat().st_mode & 0o777 == 0o600
 parent, view, inherited = map(int, (parent, view, inherited))
 token = proof.PidfdIdentity(int(device), int(inode))
 assert os.getpid() == 1 and os.geteuid() == os.getegid() == 0
@@ -96,6 +102,18 @@ class PeerIdentityTests(unittest.TestCase):
         self.own_pidfd = os.pidfd_open(os.getpid())
         self.addCleanup(os.close, self.own_pidfd)
         self.token = proof.capture_original(self.own_pidfd, os.getpid())
+        # A capless root child cannot traverse the runner's 0700 home
+        # (and must not acquire DAC_OVERRIDE to do so). Copy exact source
+        # bytes to its own root-private disposable directory instead.
+        source = (MODULES / "public_tls_peer_identity.py").read_bytes()
+        modules = tempfile.TemporaryDirectory(prefix="xmesh-pidfs-module-")
+        self.addCleanup(modules.cleanup)
+        self.modules = Path(modules.name)
+        path = self.modules / "public_tls_peer_identity.py"
+        with path.open("xb") as handle:
+            handle.write(source)
+        path.chmod(0o600)
+        self.digest = hashlib.sha256(source).hexdigest()
 
     @contextmanager
     def other_peer(self):
@@ -161,7 +179,7 @@ with control, one, two:
         cmd = ["unshare", "--pid", "--fork", "--kill-child=SIGKILL", "--mount-proc",
                "setpriv", "--no-new-privs", "--bounding-set=-all",
                "--inh-caps=-all", "--ambient-caps=-all", sys.executable,
-               "-I", "-B", "-c", INNER, str(MODULES), str(os.getpid()),
+               "-I", "-B", "-c", INNER, str(self.modules), self.digest, str(os.getpid()),
                str(self.token.device), str(self.token.inode), str(view),
                str(inherited), verdict, name]
         run = subprocess.run(cmd, pass_fds=pass_fds, capture_output=True, text=True, timeout=15)
