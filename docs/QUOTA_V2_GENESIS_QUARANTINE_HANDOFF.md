@@ -562,3 +562,30 @@ launch path, systemd unit, product release version or public listener uses this
 module. An installed two-node test, live lease/charge reconciliation and
 atomic fail-closed launch/stop integration are still required before public
 admission.
+
+## Sealed TLS material before any future public spawn
+
+The dormant certificate verifier now snapshots the root-owned Certbot
+archive files and installed CA trust bundle into anonymous Linux memfds.
+Every source inode is checked before/open/after copy; the complete chain,
+exact non-wildcard SNI, TLS server EKU and matching private key are
+verified by OpenSSL against the **sealed files** at the current time and
+at the 24-hour renewal margin. A future-dated leaf cannot pass merely
+because it would be valid tomorrow. The rewritten configuration differs
+from the signed compiler output only in its certificate/key paths, which
+identify the explicitly inherited sealed descriptors. The config is
+also sealed; the private key is never embedded in it or written into a
+temporary filesystem path.
+
+A future launcher must retain the exact snapshot through child exec,
+inherit only its listed material descriptors and check the original
+lineage, CA, descriptor identities and elapsed lifetime in the
+pre-bind and stop-monitor checks. A Certbot rotation requires a fresh
+complete proof; it cannot silently substitute different bytes. The
+legacy diagnostic returns paths for inspection only, not for launch.
+Tests exercise actual kernel seals, independent child reads, real TLS
+1.3 over a socketpair, swapped sealed descriptors, future-dated leaves,
+CA/source changes and descriptor cleanup on failure.
+
+No issuer, installer, systemd integration or public listener is enabled
+by this material snapshot. It is not authorization of traffic.
