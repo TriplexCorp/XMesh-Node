@@ -99,13 +99,25 @@ def docker(*args, timeout=90):
 
 
 def verify_image_config(config):
-    if (not isinstance(config, dict) or config.get("Entrypoint") != ["/xray"]
-            or config.get("Cmd") not in (None, []) or config.get("Volumes") not in (None, {})
-            or config.get("ExposedPorts") not in (None, {})
-            or config.get("Healthcheck") is not None
-            or config.get("OnBuild") not in (None, [])
-            or config.get("User") not in ("", "0", "0:0")):
-        raise ValueError("unexpected qualified image configuration")
+    if not isinstance(config, dict):
+        raise ValueError("qualified image configuration must be an object")
+    # BuildKit and the classic builder differ in how they serialize defaults.
+    # Emit an explicit numeric identity in the Dockerfile and accept only
+    # that identity. Name only the rejected field, never dump arbitrary
+    # Docker metadata or environment values into logs.
+    allowed = {
+        "Entrypoint": (["/xray"],),
+        "Cmd": (None, []),
+        "Volumes": (None, {}),
+        "ExposedPorts": (None, {}),
+        "Healthcheck": (None,),
+        "OnBuild": (None, []),
+        "User": ("0:0",),
+    }
+    for key, values in allowed.items():
+        if not any(type(config.get(key)) is type(value) and config.get(key) == value
+                   for value in values):
+            raise ValueError("unexpected qualified image configuration field: " + key)
 
 
 def build_image():
@@ -119,7 +131,7 @@ def build_image():
         context.mkdir(mode=0o700)
         stage_binary(EXECUTABLE, context / "xray", digest)
         (context / "Dockerfile").write_text(
-            'FROM scratch\nCOPY xray /xray\nENTRYPOINT ["/xray"]\n',
+            'FROM scratch\nCOPY xray /xray\nUSER 0:0\nENTRYPOINT ["/xray"]\n',
             encoding="ascii",
         )
         iid = root / "image-id"

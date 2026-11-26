@@ -22,14 +22,19 @@ class QualifiedImageTests(unittest.TestCase):
                 image.parse_identity(bad)
 
     def test_image_metadata_cannot_add_startup_or_volume(self):
-        config = {"Entrypoint": ["/xray"], "User": ""}
+        config = {"Entrypoint": ["/xray"], "User": "0:0"}
         image.verify_image_config(config)
         for change in ({"Entrypoint": ["/bin/sh"]}, {"Volumes": {"/xray": {}}},
                        {"Cmd": ["run"]}, {"ExposedPorts": {"443/tcp": {}}},
                        {"Healthcheck": {"Test": ["CMD", "/xray"]}},
-                       {"OnBuild": ["RUN unexpected"]}, {"User": "1000"}):
-            with self.assertRaises(ValueError):
+                       {"OnBuild": ["RUN unexpected"]}, {"User": "1000"}, {"User": ""},
+                       {"User": None}, {"User": "0"}, {"User": "root"}, {"User": False}):
+            with self.assertRaisesRegex(ValueError, "field: " + next(iter(change))):
                 image.verify_image_config(dict(config, **change))
+
+    def test_absent_user_is_not_an_explicit_numeric_identity(self):
+        with self.assertRaisesRegex(ValueError, "field: User"):
+            image.verify_image_config({"Entrypoint": ["/xray"]})
 
     @unittest.skipUnless(os.geteuid() == 0, "installed release files belong to root")
     def test_stage_rejects_changed_bytes_and_links(self):
