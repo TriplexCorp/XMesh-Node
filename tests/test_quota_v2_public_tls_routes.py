@@ -212,10 +212,18 @@ assert ctypes.get_errno() == errno.EPERM
 assert os.readlink(root+'/ingress-u100') == sys.argv[5]
 print('read-only child verified')
 """
+            # Hosted checkout may sit under /home/runner (0700). A
+            # capless UID-0 child cannot traverse it. Copy the exact helper
+            # to the fixture's own root-private temporary directory; do not
+            # grant DAC override or alter checkout permissions.
+            isolated_module = self.root.parent / "public_tls_route_mount.py"
+            shutil.copyfile(ROOT / "experiments/quota-v2-physical-stop/public_tls_route_mount.py",
+                            isolated_module)
+            isolated_module.chmod(0o600)
             output = subprocess.check_output([
                 "setpriv", "--no-new-privs", "--bounding-set=-all",
                 "--inh-caps=-all", "--ambient-caps=-all", sys.executable,
-                "-c", script, str(ROOT / "experiments/quota-v2-physical-stop"),
+                "-c", script, str(isolated_module.parent),
                 str(ro), str(writer), capsule.ingress_state, self.target,
             ], pass_fds=(ro,), timeout=5)
             self.assertEqual(output.strip(), b"read-only child verified")
