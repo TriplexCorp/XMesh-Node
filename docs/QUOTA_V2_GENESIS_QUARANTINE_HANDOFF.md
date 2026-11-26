@@ -589,3 +589,31 @@ CA/source changes and descriptor cleanup on failure.
 
 No issuer, installer, systemd integration or public listener is enabled
 by this material snapshot. It is not authorization of traffic.
+
+## First-Genesis private route capsule (dormant)
+
+The ordinary enrolled per-user ingress links are mutable by design during
+generation cutover. The future public TLS ingress must not follow that
+cutover while its signed authority still names the first Genesis runtime.
+The separate root-only route capsule verifies the full original first-cap
+roster, exact enrolled link set with no pending route, the original live
+PIDFD/runtime identity, root-private meter directory and each required
+VLESS Unix listener inode plus SO_PEERCRED. It creates a distinct private
+directory containing only the original routes. The child can inherit that
+one directory descriptor and use `/proc/self/fd/N/.` with the existing Go
+ingress directory/Readlink contract. Replacing a pathname cannot retarget
+the inherited descriptor. Any change in the enrolled routes, capsule
+contents, meter identity, socket inodes, signed roster or either cap
+expiry clock fails the proof. Cleanup never recursively removes substituted
+paths or foreign state.
+
+This is an inode pin, **not** a kernel seal of directory contents. Before
+any real spawn, the future launcher must prove write denial on the exact
+directory as seen by its child (including inherited mount descriptors),
+isolate mutable enrolled state, keep the capsule live, and stop/reap the
+child before releasing it. A read-only remount of an unrelated pathname is
+insufficient. These checks do not replace signed cap, WAL or revocation
+verification. Hosted CI requires genuine Unix listeners and peer PID/UID
+verification; the structural tests also exercise the actual Go directory
+and symlink lookup primitives using a separate process. No public bind,
+authority issuance, systemd installation or Agent version change occurs.
