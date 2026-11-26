@@ -125,6 +125,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_pinned_inputs.py experiments/quota-v2-physical-stop/public_tls_spawn_preflight.py tests/test_quota_v2_public_tls_pinned_inputs.py
           sudo env PATH="$PATH" python3 tests/test_quota_v2_public_tls_pinned_inputs.py -v
+      - name: Kernel child input proof requires exact inherited sealed FDs and original detached read-only route
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_child_inputs.py tests/test_quota_v2_public_tls_child_inputs.py
+          sudo env PATH="$PATH" python3 tests/test_quota_v2_public_tls_child_inputs.py -v
       - name: Kernel executable seals bind the exact qualified original meter bytes to the owned exec inode
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_executable.py tests/test_quota_v2_public_tls_executable.py

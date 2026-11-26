@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import select
 from pathlib import Path
 import subprocess
 import sys
@@ -74,12 +75,24 @@ for inbound in config['inbounds']:
                               for x in ('certificateFile','keyFile')]
 assert os.readlink(sys.argv[2]+'/ingress-u100') == sys.argv[3]
 assert os.statvfs(sys.argv[2]).f_flag & os.ST_RDONLY
-print(json.dumps(result))
+print(json.dumps(result), flush=True)
+sys.stdin.read()
 """
-        raw = subprocess.check_output(
-            [sys.executable, "-c", child_code, inputs.config_path,
-             inputs.ingress_state, self.target], pass_fds=inputs.child_fds, timeout=8)
-        actual = json.loads(raw)
+        child = subprocess.Popen([
+            "setpriv", "--no-new-privs", "--bounding-set=-all",
+            "--inh-caps=-all", "--ambient-caps=-all", sys.executable, "-c",
+            child_code, inputs.config_path, inputs.ingress_state, self.target,
+        ], pass_fds=inputs.child_fds, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertTrue(select.select([child.stdout], [], [], 8)[0],
+                            "sealed input child did not become ready")
+            actual = json.loads(child.stdout.readline())
+            self.assertIsNone(inputs.verify_child(child))
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
         expected = {tag: [hashlib.sha256((self.certs.archive/domain/name).read_bytes()).hexdigest()
                           for name in ("fullchain1.pem", "privkey1.pem")]
                     for tag, domain in (("vless-main", DOMAIN_B), ("vless-cdn", DOMAIN_A))}
