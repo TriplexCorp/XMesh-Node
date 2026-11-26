@@ -653,3 +653,24 @@ writable paths and capabilities, verify qualified executable identity,
 complete installed WAL evidence and independently establish the signed
 revocation/systemd deadman stop chain. This assembly does not provide
 positive authority or replace the separate WAL proof.
+
+### Immutable qualified executable for the dormant TLS launch boundary
+
+`PinnedTlsExecutable` independently hashes the root-owned installed release
+binary and the actual original meter's kernel `/proc/PID/exe` against the
+installed qualification digest; a pidfd and runtime identity fence both
+observations. A bounded copy is retained as a read-only executable memfd
+with write, grow, shrink, future-write, execute-bit and seal seals. No
+fallback to a mutable executable pathname is permitted. A later supervisor
+must exec this exact FD and verify the owned child's kernel executable inode
+and original meter before admission and on every stop-monitor check.
+Changing either source inode, release record, meter or sealed FD fails the
+proof. This primitive is not itself a launcher or a process sandbox.
+
+The real Linux tests execute only a disposable non-listening compiled fixture:
+same bytes executed by pathname fail the inode proof; modifying/truncating
+the memfd or changing its execute bits is denied by the kernel. The tests
+also reject missing/mismatched source bytes, meter exit, replacement source
+inode, descriptor substitution and expired assembly. Actual installed
+qualified Xray exec, full isolation, stop/reap, WAL qualification and a
+positive Nexus issuer remain mandatory; no public listener is enabled.
