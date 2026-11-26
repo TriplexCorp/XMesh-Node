@@ -674,3 +674,11 @@ also reject missing/mismatched source bytes, meter exit, replacement source
 inode, descriptor substitution and expired assembly. Actual installed
 qualified Xray exec, full isolation, stop/reap, WAL qualification and a
 positive Nexus issuer remain mandatory; no public listener is enabled.
+
+The nonauthorizing pre-spawn gate now requires the exact sealed executable
+bound to the original metered runtime twice: before other evidence and
+after external revocation/cap probes. The stop-only monitor checks the
+actual owned child's kernel exec inode before other proofs, before each
+deadman pulse and after the guardian ACK. Missing, foreign, replaced or
+authorizing proof kills the exact owned child. This is still NOT an exec,
+confinement, public authority or installed service.

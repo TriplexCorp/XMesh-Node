@@ -73,6 +73,12 @@ class ExecutableTests(unittest.TestCase):
     def test_real_sealed_exec_and_no_mutation(self):
         with self.snapshot() as proof:
             fd = proof.exec_fd
+            self.assertIsNone(proof.ensure_binding(runtime_pid=self.meter.pid,
+                                                   runtime_id=self.runtime))
+            for pid, runtime in ((self.meter.pid+1, self.runtime),
+                                 (self.meter.pid, "0"*64)):
+                with self.assertRaisesRegex(ValueError, "another original meter"):
+                    proof.ensure_binding(runtime_pid=pid, runtime_id=runtime)
             self.assertEqual(fcntl.fcntl(fd, fcntl.F_GET_SEALS), executable.SEALS)
             with self.assertRaises(OSError) as cm:
                 os.fchmod(fd, 0o400)
