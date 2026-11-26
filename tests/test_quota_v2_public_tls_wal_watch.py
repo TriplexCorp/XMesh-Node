@@ -4,6 +4,9 @@ import hashlib
 import os
 from pathlib import Path
 import sys
+import stat
+from contextlib import ExitStack
+from types import SimpleNamespace
 import tempfile
 import time
 import unittest
@@ -217,6 +220,76 @@ class PublicTlsWalWatchTests(unittest.TestCase):
         self.counters = (51, 7)
         with self.assertRaisesRegex(ValueError, "changed during readback"):
             self.check(remeasure=lambda: (("b"*64, *self.measured[1:]), self.directory))
+
+    def test_installed_probe_requires_existing_read_only_lock_and_kernel_mount(self):
+        directory = "/var/lib/xmesh-first-meter/runtime/ledger"
+        panel, node, user = "https://panel.example", self.roster.node, 100
+        state = "/var/lib/xmesh-xray-sync"
+        release = {"artifactSha256": "a"*64}
+        activation = {"activationReceiptSha256": self.roster.activation}
+        original = {
+            "prepared": {"payload": {"candidateRuntimeId": self.roster.runtime_id}},
+            "reply": {"revision": self.roster.profile_sha256,
+                      "policySha256": self.roster.genesis_sha},
+        }
+        cid, started, pid, _ = self.measured
+        docker = {"Id": cid, "State": {"StartedAt": started, "Pid": pid}}
+        host = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_dev=6, st_ino=42)
+        foreign = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_dev=6, st_ino=43)
+        for inside, rejected in ((host, False), (foreign, True)):
+            with self.subTest(rejected=rejected), ExitStack() as stack:
+                fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+                lock = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+
+                def patch(obj, name, **kwargs):
+                    return stack.enter_context(mock.patch.object(obj, name, **kwargs))
+
+                patch(watch.qualification, "installed_worker", return_value=True)
+                patch(watch.qualification, "read_identity", return_value=release)
+                locked = patch(watch.preflight.quarantine, "_locked_private_state",
+                               return_value=(fd, lock))
+                patch(watch.preflight.quarantine, "_enrolled_activation",
+                      return_value=activation)
+                patch(watch.genesis_reservation, "_staged_original", return_value=original)
+                patch(watch.genesis_reservation, "_original_measurement_pins",
+                      return_value=(release["artifactSha256"], self.roster.profile_sha256))
+                patch(watch.wal, "_panel_pin", return_value=self.roster.pinned)
+                patch(watch.wal, "_measure_quarantined_runtime", return_value=self.measured)
+                patch(watch.wal, "_bound_journal", return_value=(docker, directory))
+                patch(watch.preflight, "_full_signed_roster", return_value=self.roster)
+
+                def stat_mount(path, **kwargs):
+                    self.assertEqual(kwargs, {"follow_symlinks": False})
+                    if path == directory:
+                        return host
+                    self.assertEqual(path, f"/proc/{pid}/root/run/xmesh-quota-runtime/ledger")
+                    return inside
+
+                patch(watch.os, "stat", side_effect=stat_mount)
+                def check(roster, actual_user, measured, actual_directory, recheck, deadline):
+                    self.assertIs(roster, self.roster)
+                    self.assertEqual((actual_user, measured, actual_directory),
+                                     (user, self.measured, directory))
+                    self.assertEqual(recheck(), (self.measured, directory))
+                    deadline()
+
+                checked = patch(watch, "_check", side_effect=check)
+                if rejected:
+                    with self.assertRaisesRegex(ValueError, "kernel WAL mount differs"):
+                        watch.probe(panel, node, user, state)
+                    checked.assert_not_called()
+                else:
+                    self.assertIsNone(watch.probe(panel, node, user, state))
+                    checked.assert_called_once()
+                locked.assert_called_once_with(state, read_only=True)
+                for descriptor in (fd, lock):
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+        with (mock.patch.object(watch.qualification, "installed_worker", return_value=False),
+              mock.patch.object(watch.preflight.quarantine, "_locked_private_state") as locked):
+            with self.assertRaisesRegex(ValueError, "installed enrolled root"):
+                watch.probe(panel, node, user, state)
+            locked.assert_not_called()
 
     def test_transport_refuses_404_no_fallback(self):
         def run(command, **kwargs):
