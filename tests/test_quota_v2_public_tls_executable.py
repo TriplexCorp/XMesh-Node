@@ -27,9 +27,16 @@ class ExecutableTests(unittest.TestCase):
         self.meter_binary = self.root / "meter"
         self.qualification = self.root / "qualification"
         self.qualification.mkdir(mode=0o700)
-        for path in (self.installed, self.meter_binary):
-            shutil.copyfile("/usr/bin/sleep", path)
-            path.chmod(0o755)
+        # Do not copy coreutils: distributions may dispatch the applet
+        # by AT_EXECFN rather than argv[0]. Compile a tiny independent
+        # non-listening ELF whose behavior is invariant under FD exec.
+        subprocess.run(["/usr/bin/cc", "-x", "c", "-O2", "-Wall", "-Werror",
+                        "-o", str(self.installed), "-"],
+                       input=b"#include <unistd.h>\nint main(void) { for (;;) pause(); }\n",
+                       check=True, timeout=15)
+        self.installed.chmod(0o755)
+        shutil.copyfile(self.installed, self.meter_binary)
+        self.meter_binary.chmod(0o755)
         self.digest = hashlib.sha256(self.installed.read_bytes()).hexdigest()
         self.record = self.qualification / "identity"
         self.write_record(self.digest)
@@ -38,9 +45,7 @@ class ExecutableTests(unittest.TestCase):
             patch = mock.patch.object(executable.release, name, value)
             patch.start()
             self.addCleanup(patch.stop)
-        # Ubuntu may distribute coreutils as one multi-call ELF. Its
-        # argv[0] must remain "sleep" even when executing a different inode.
-        self.meter = self.child(["sleep", "60"], executable=str(self.meter_binary))
+        self.meter = self.child([str(self.meter_binary)])
         self.runtime = executable.wal_transport.runtime_identity.trusted_runtime_identity(
             self.meter.pid)
 
@@ -82,9 +87,9 @@ class ExecutableTests(unittest.TestCase):
                     self.assertEqual(cm.exception.errno, errno.EPERM)
             finally:
                 os.close(writer)
-            proc = self.child(["sleep", "60"], executable=f"/proc/self/fd/{fd}", pass_fds=(fd,))
+            proc = self.child([f"/proc/self/fd/{fd}"], pass_fds=(fd,))
             self.assertIsNone(proof.verify_child(proc))
-            wrong = self.child(["sleep", "60"], executable=str(self.installed))
+            wrong = self.child([str(self.installed)])
             with self.assertRaisesRegex(ValueError, "original sealed"):
                 proof.verify_child(wrong)
             self.stop(proc)

@@ -667,7 +667,7 @@ and original meter before admission and on every stop-monitor check.
 Changing either source inode, release record, meter or sealed FD fails the
 proof. This primitive is not itself a launcher or a process sandbox.
 
-The real Linux tests execute only a disposable non-listening sleep binary:
+The real Linux tests execute only a disposable non-listening compiled fixture:
 same bytes executed by pathname fail the inode proof; modifying/truncating
 the memfd or changing its execute bits is denied by the kernel. The tests
 also reject missing/mismatched source bytes, meter exit, replacement source
