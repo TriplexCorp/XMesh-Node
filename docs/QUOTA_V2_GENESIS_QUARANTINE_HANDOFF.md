@@ -607,13 +607,23 @@ contents, meter identity, socket inodes, signed roster or either cap
 expiry clock fails the proof. Cleanup never recursively removes substituted
 paths or foreign state.
 
-This is an inode pin, **not** a kernel seal of directory contents. Before
-any real spawn, the future launcher must prove write denial on the exact
-directory as seen by its child (including inherited mount descriptors),
-isolate mutable enrolled state, keep the capsule live, and stop/reap the
-child before releasing it. A read-only remount of an unrelated pathname is
-insufficient. These checks do not replace signed cap, WAL or revocation
-verification. Hosted CI requires genuine Unix listeners and peer PID/UID
-verification; the structural tests also exercise the actual Go directory
-and symlink lookup primitives using a separate process. No public bind,
+The capsule now uses Linux `open_tree(OPEN_TREE_CLONE|AT_EMPTY_PATH)`
+and `mount_setattr` on a **detached** mount of its exact inode. The child
+FD is reopened through that mount, checked for a distinct kernel mount ID,
+the same device/inode and read-only/nosuid/nodev/noexec flags; the writable
+owner descriptor is separate and never part of the child FD list. No mount
+is attached to the host namespace. The kernel read-only proof is mandatory;
+unsupported APIs and substituted writable descriptors fail closed. A real
+capless UID-0 child cannot unlink, create a directory, retarget a link or
+clear the read-only mount attribute through the passed FD. The hosted Go
+peer test also uses a capless root child and capless original Unix peer.
+
+This is mount write denial, **not** a kernel seal of directory contents.
+The future launcher must still prevent the child from obtaining writable
+references through other paths or other processes' descriptors, drop mount-
+changing capabilities, isolate mutable enrolled state, keep the capsule
+live, and stop/reap the child before releasing it. These checks do not
+replace signed cap, WAL or revocation verification. Hosted CI requires
+genuine Unix listeners and peer PID/UID verification; the structural tests
+exercise actual detached Linux mounts and process inheritance. No public bind,
 authority issuance, systemd installation or Agent version change occurs.

@@ -17,6 +17,7 @@ import struct
 import time
 
 import public_tls_cap_watch as cap_watch
+import public_tls_route_mount as route_mount
 import vless_ingress
 import wal_transport as wal
 
@@ -53,12 +54,13 @@ class FirstGenesisRoutes:
     dialer's Lstat directory check; replacing the ordinary state path or
     this capsule's pathname cannot redirect that child to a new directory.
 
-    An inherited directory fd pins the inode, NOT its contents or mount
-    permissions. A future launcher must prove effective write denial to the
-    child for that exact inode (not merely remount a different pathname
-    read-only), and isolate it from mutable state. The supervisor must call
-    ensure_current before exec and on stop-monitor ticks and stop/reap the
-    child BEFORE closing the capsule. This is not a runtime
+    The exposed FD is on a detached read-only, nosuid/nodev/noexec
+    kernel mount of the exact capsule inode. A future launcher must inherit
+    ONLY that FD, drop mount-changing capabilities, and prevent access to
+    other writable paths/descriptors including the parent's private state.
+    This is mount write denial, NOT a seal on directory contents. The
+    supervisor must call ensure_current before exec and on stop-monitor
+    ticks and stop/reap the child BEFORE closing the capsule. This is not a runtime
     authority, meter proof, systemd service, or positive listener gate.
     """
 
@@ -67,7 +69,8 @@ class FirstGenesisRoutes:
             raise ValueError("root and independently signed TLS roster required")
         self._fds = []
         self._root_fd = self._state_fd = self._meter_fd = self._pidfd = None
-        self.directory_fd = None
+        self.directory_fd = self._write_fd = None
+        self._view_mount = None
         self._name = None
         self._identity = None
         self._closed = False
@@ -119,13 +122,15 @@ class FirstGenesisRoutes:
             # runtime root, NOT the enrolled mutable user's route directory.
             self._name = "first-" + secrets.token_hex(16)
             os.mkdir(self._name, 0o700, dir_fd=self._root_fd)
-            self.directory_fd = self._own(os.open(self._name, DIR_FLAGS, dir_fd=self._root_fd))
-            self._identity = _dir_identity(os.fstat(self.directory_fd))
+            self._write_fd = self._own(os.open(self._name, DIR_FLAGS, dir_fd=self._root_fd))
+            self._identity = _dir_identity(os.fstat(self._write_fd))
             for name, target in self._links.items():
                 deadline()
-                os.symlink(target, name, dir_fd=self.directory_fd)
-            os.fsync(self.directory_fd)
+                os.symlink(target, name, dir_fd=self._write_fd)
+            os.fsync(self._write_fd)
             os.fsync(self._root_fd)
+            self.directory_fd, self._view_mount = route_mount.readonly_view(self._write_fd)
+            self._own(self.directory_fd)
             self._check(deadline)
         except BaseException:
             self.close()
@@ -227,6 +232,7 @@ class FirstGenesisRoutes:
                 or self._roster_identity() != self._grant_identity):
             raise ValueError("first-Genesis route capsule expired or changed")
         self._check_source()
+        route_mount.check_view(self._write_fd, self.directory_fd, self._view_mount)
         if (_dir_identity(os.fstat(self.directory_fd)) != self._identity
                 or _dir_identity(os.stat(self._name, dir_fd=self._root_fd,
                                          follow_symlinks=False)) != self._identity
@@ -241,6 +247,7 @@ class FirstGenesisRoutes:
                 or set(os.listdir(self.directory_fd)) != set(self._links)):
             raise ValueError("private TLS route capsule changed during proof")
         deadline()
+        route_mount.check_view(self._write_fd, self.directory_fd, self._view_mount)
         self._check_time()
 
     def ensure_current(self):
@@ -254,15 +261,15 @@ class FirstGenesisRoutes:
         self._closed = True
         # Never recurse into a substituted pathname or delete other state.
         # If corruption exists, leave that directory for inspection, not use.
-        if self.directory_fd is not None and self._identity is not None:
+        if self._write_fd is not None and self._identity is not None:
             try:
-                if _dir_identity(os.fstat(self.directory_fd)) == self._identity:
-                    names = set(os.listdir(self.directory_fd))
+                if _dir_identity(os.fstat(self._write_fd)) == self._identity:
+                    names = set(os.listdir(self._write_fd))
                     if names <= set(self._links):
-                        self._check_links(self.directory_fd, {n: self._links[n] for n in names})
+                        self._check_links(self._write_fd, {n: self._links[n] for n in names})
                         for name in names:
-                            os.unlink(name, dir_fd=self.directory_fd)
-                        os.fsync(self.directory_fd)
+                            os.unlink(name, dir_fd=self._write_fd)
+                        os.fsync(self._write_fd)
                         if _dir_identity(os.stat(self._name, dir_fd=self._root_fd,
                                                  follow_symlinks=False)) == self._identity:
                             os.rmdir(self._name, dir_fd=self._root_fd)
