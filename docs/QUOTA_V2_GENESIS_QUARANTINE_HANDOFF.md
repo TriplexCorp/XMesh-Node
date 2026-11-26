@@ -693,3 +693,31 @@ actual owned child's kernel exec inode before other proofs, before each
 deadman pulse and after the guardian ACK. Missing, foreign, replaced or
 authorizing proof kills the exact owned child. This is still NOT an exec,
 confinement, public authority or installed service.
+
+
+### Actual post-exec child descriptor proof (dormant)
+
+The local input bundle captures exact supervisor descriptor identities at
+assembly, and independently inspects the directly owned live child's
+kernel `/proc/PID/fd` and `fdinfo` before/after stop-only checks. Every
+original config/certificate/key/route FD must retain its inode, descriptor
+number, mount ID and access flags (apart from close-on-exec); the detached
+route must still be read-only/nosuid/nodev/noexec. Extra descriptors to the
+protected supervisor objects, including the writable route view, CA,
+enrolled Agent directory and original meter identity handles, fail the
+proof. The owner snapshots are compared again rather than accepting new
+objects at a reused FD number. The exact directly owned PID and start time
+are checked across a bounded scan.
+
+The stop-only monitor cannot refresh its independent guardian before and
+after the current child executable **and inherited input** proof. Wrong,
+lost, retargeted or authorizing proof stops the owned child. Real capless
+root Linux fixtures use genuine sealed memfds and a detached mount, reject
+same-number substitution, the same route inode on a writable mount, leaked
+CA/owner FDs, extra protected aliases and changed owner descriptors. The
+complete signed input-bundle test also verifies the independent capless
+child's actual descriptors while it is alive. No test opens a public
+listener. This is not a complete sandbox: unrelated runtime FDs are not
+certified safe, and a future launcher must isolate other namespaces and
+filesystem access, drop capabilities and obtain full signed/WAL authority
+before any public publication.

@@ -10,6 +10,7 @@ import time
 
 import public_tls_cap_watch
 import public_tls_certificates
+import public_tls_child_inputs
 import public_tls_frontend
 import public_tls_routes
 import wal_transport
@@ -66,6 +67,11 @@ class PinnedTlsInputs:
             self._routes = public_tls_routes.FirstGenesisRoutes(cap_watch, enrolled_fd)
             self._fds = (self._certificates.config_fd, *self._certificates.material_fds,
                          self._routes.directory_fd)
+            self._protected_fds = tuple(fd for fd in (
+                *self._certificates._fds, *self._routes._fds) if fd not in self._fds)
+            self._child_identity = public_tls_child_inputs.capture(
+                expected=self._fds, forbidden=self._protected_fds,
+                route_fd=self._routes.directory_fd)
             self.ensure_current(config=config, authority=authority,
                                 cap_watch=cap_watch, runtime_pid=runtime_pid)
             if time.monotonic_ns() - self._mono >= MAX_ASSEMBLY_NS:
@@ -101,6 +107,25 @@ class PinnedTlsInputs:
             raise ValueError("sealed TLS input check cannot authorize ingress")
         if self._routes.ensure_current() is not None:
             raise ValueError("pinned TLS route check cannot authorize ingress")
+        self._check_clock()
+        return None
+
+    def verify_child(self, child):
+        """Read back the actual inherited descriptors; never start or admit."""
+        if self._closed:
+            raise ValueError("pinned TLS inputs are closed")
+        self._check_clock()
+        # Capture was bound at assembly, not to whichever descriptors
+        # happen to occupy these numbers at the time of the child proof.
+        if (self._fds != (self._certificates.config_fd, *self._certificates.material_fds,
+                          self._routes.directory_fd)
+                or self._protected_fds != tuple(fd for fd in (
+                    *self._certificates._fds, *self._routes._fds) if fd not in self._fds)):
+            raise ValueError("pinned TLS descriptor set changed")
+        if public_tls_child_inputs.verify(
+                child, expected=self._fds, forbidden=self._protected_fds,
+                route_fd=self._routes.directory_fd, pinned=self._child_identity) is not None:
+            raise ValueError("child descriptor proof cannot authorize ingress")
         self._check_clock()
         return None
 

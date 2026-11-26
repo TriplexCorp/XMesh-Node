@@ -189,6 +189,8 @@ class StopOnlyTlsMonitor:
                                             runtime_id=self._runtime_id) is not None
                 or self._executable.verify_child(self._child) is not None):
             raise ValueError("qualified executable proof cannot grant public ingress")
+        if self._inputs.verify_child(self._child) is not None:
+            raise ValueError("qualified child input proof cannot grant public ingress")
 
     def _check_pinned_inputs(self):
         if self._inputs.ensure_current(
@@ -244,7 +246,7 @@ class StopOnlyTlsMonitor:
         try:
             self._check_executable()
         except Exception:
-            self._stop("owned child no longer runs the sealed qualified executable")
+            self._stop("owned child lost its sealed executable or exact inherited inputs")
         # Never accept a caller-supplied 'revoked=False'. Require a fresh
         # nonce-bound Nexus Ed25519 witness on EVERY explicit monitor tick.
         # This still needs an installed trusted polling supervisor and a
@@ -312,7 +314,7 @@ class StopOnlyTlsMonitor:
         try:
             self._check_executable()
         except Exception:
-            self._stop("owned child executable lost during proof")
+            self._stop("owned child executable or inherited inputs lost during proof")
         # Final PID verification may itself block. A stale signed lease must
         # not pulse the independent guardian even when earlier probes passed.
         final_wall = time.time_ns() // 1_000_000
@@ -339,7 +341,7 @@ class StopOnlyTlsMonitor:
         try:
             self._check_executable()
         except Exception:
-            self._stop("owned child executable lost during guardian ACK")
+            self._stop("owned child executable or inherited inputs lost during guardian ACK")
         ack_wall = time.time_ns() // 1_000_000
         ack_mono = time.monotonic_ns()
         if (ack_wall < final_wall or ack_mono < final_mono

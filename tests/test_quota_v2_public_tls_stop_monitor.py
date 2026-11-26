@@ -77,6 +77,7 @@ class StopOnlyTests(unittest.TestCase):
         self.addCleanup(patch2.stop)
         self.inputs = mock.Mock(spec=stop.public_tls_pinned_inputs.PinnedTlsInputs)
         self.inputs.ensure_current.return_value = None
+        self.inputs.verify_child.return_value = None
         self.executable = mock.Mock(spec=stop.public_tls_executable.PinnedTlsExecutable)
         self.executable.ensure_binding.return_value = None
         self.executable.verify_child.return_value = None
@@ -264,6 +265,22 @@ class StopOnlyTests(unittest.TestCase):
         self.assertEqual(self.executable.verify_child.call_count, 3)
         self.executable.verify_child.side_effect = [None, None, ValueError("child re-exec during ACK")]
         self.assert_stopped(monitor)
+
+    def test_actual_inherited_fd_proof_required_before_and_after_guardian_ack(self):
+        monitor = self.monitor()
+        self.assertEqual(self.inputs.verify_child.call_count, 3)
+        self.inputs.verify_child.assert_called_with(self.child)
+        self.inputs.verify_child.reset_mock()
+        self.assertIsNone(monitor.check_stop_only())
+        self.assertEqual(self.inputs.verify_child.call_count, 3)
+        self.inputs.verify_child.side_effect = [None, None, ValueError("FD retargeted during ACK")]
+        self.assert_stopped(monitor)
+        self.respawn_child()
+        self.inputs.verify_child.side_effect = None
+        self.inputs.verify_child.return_value = True
+        with self.assertRaisesRegex(ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
 
     def test_pre_spawn_requires_exact_meter_bound_executable(self):
         for value in (None, object()):
