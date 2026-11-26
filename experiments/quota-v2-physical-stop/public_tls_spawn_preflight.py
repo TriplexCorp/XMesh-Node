@@ -13,6 +13,7 @@ import hashlib
 import time
 
 import public_tls_cap_watch
+import public_tls_executable
 import public_tls_pinned_inputs
 import public_tls_frontend
 import public_tls_revocation_watch
@@ -26,7 +27,7 @@ MAX_DIVERGENCE_NS = 2_000_000_000
 
 def check_before_spawn(*, profile, authority, node, activation, genesis_sha,
                        runtime_id, pinned, runtime_pid, cap_watch,
-                       revocation_watch, pinned_inputs=None):
+                       revocation_watch, pinned_inputs=None, pinned_executable=None):
     """Perform all independent, read-only evidence checks BEFORE a TLS spawn.
 
     Return None, never config, a boolean permit, an FD or a subprocess.
@@ -74,6 +75,10 @@ def check_before_spawn(*, profile, authority, node, activation, genesis_sha,
     if wal_transport.runtime_identity.trusted_runtime_identity(
             runtime_pid) != runtime_id:
         raise ValueError("metered Xray changed before TLS spawn")
+    if not isinstance(pinned_executable, public_tls_executable.PinnedTlsExecutable):
+        raise ValueError("missing exact sealed qualified TLS executable")
+    if pinned_executable.ensure_binding(runtime_pid=runtime_pid, runtime_id=runtime_id) is not None:
+        raise ValueError("executable proof cannot authorize public ingress")
     if not isinstance(pinned_inputs, public_tls_pinned_inputs.PinnedTlsInputs):
         raise ValueError("missing exact sealed TLS material and read-only original route inputs")
     if pinned_inputs.ensure_current(config=config, authority=authority,
@@ -91,6 +96,8 @@ def check_before_spawn(*, profile, authority, node, activation, genesis_sha,
     if wal_transport.runtime_identity.trusted_runtime_identity(
             runtime_pid) != runtime_id:
         raise ValueError("metered Xray changed during TLS pre-spawn proof")
+    if pinned_executable.ensure_binding(runtime_pid=runtime_pid, runtime_id=runtime_id) is not None:
+        raise ValueError("executable proof cannot authorize public ingress")
     end_wall = time.time_ns() // 1_000_000
     end_mono = time.monotonic_ns()
     if (end_wall < start_wall or end_mono < start_mono

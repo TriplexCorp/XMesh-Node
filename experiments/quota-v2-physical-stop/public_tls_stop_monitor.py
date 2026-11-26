@@ -16,6 +16,7 @@ import time
 
 import public_tls_cap_watch
 import public_tls_deadman
+import public_tls_executable
 import public_tls_pinned_inputs
 import public_tls_frontend
 import public_tls_revocation_watch
@@ -28,7 +29,7 @@ MAX_DIVERGENCE_NS = 5_000_000_000
 class StopOnlyTlsMonitor:
     def __init__(self, *, child, profile, authority, node, activation,
                  genesis_sha, runtime_id, pinned, runtime_pid, cap_watch,
-                 revocation_watch, pinned_inputs=None):
+                 revocation_watch, pinned_inputs=None, pinned_executable=None):
         if not isinstance(child, subprocess.Popen):
             raise ValueError("only a directly-owned child process is monitorable")
         # A caller may already have started the child. Never leave that
@@ -79,6 +80,9 @@ class StopOnlyTlsMonitor:
                 genesis_sha=genesis_sha, runtime_id=runtime_id, pinned=pinned)
             if not isinstance(pinned_inputs, public_tls_pinned_inputs.PinnedTlsInputs):
                 raise ValueError("missing exact sealed TLS material and read-only original route inputs")
+            if not isinstance(pinned_executable, public_tls_executable.PinnedTlsExecutable):
+                raise ValueError("missing exact sealed qualified TLS executable")
+            self._executable = pinned_executable
             self._inputs = pinned_inputs
             self._authority = authority
             self._runtime_pid = runtime_pid
@@ -118,6 +122,7 @@ class StopOnlyTlsMonitor:
                 self._runtime_pid)
             if measured != self._runtime_id:
                 raise ValueError("metered Xray changed before TLS supervision")
+            self._check_executable()
             self._check_pinned_inputs()
             # The check is read-only, nonce/PID-bound and intentionally returns
             # no positive public-TLS authorization. Missing *any* user dies.
@@ -133,6 +138,7 @@ class StopOnlyTlsMonitor:
             if (wal_transport.runtime_identity.trusted_runtime_identity(
                     self._runtime_pid) != self._runtime_id):
                 raise ValueError("metered Xray replaced during TLS startup")
+            self._check_executable()
             # The startup checks themselves consume time. Never signal the
             # independent guardian after expiry, a missed 10s deadline or
             # a wall/monotonic divergence, even if each individual witness
@@ -161,6 +167,7 @@ class StopOnlyTlsMonitor:
             # An independent guardian may take up to 1s to acknowledge a
             # pulse. Validate the SIGNED expiry and the ORIGINAL watchdog
             # interval after ACK, not only before its blocking IPC wait.
+            self._check_executable()
             ack_wall_ms = time.time_ns() // 1_000_000
             ack_mono_ns = time.monotonic_ns()
             if (ack_wall_ms < checked_wall_ms or ack_mono_ns < checked_mono_ns
@@ -176,6 +183,12 @@ class StopOnlyTlsMonitor:
             self._wall_ms, self._mono_ns = ack_wall_ms, ack_mono_ns
         except Exception:
             self._stop("initial TLS supervision preflight failed")
+
+    def _check_executable(self):
+        if (self._executable.ensure_binding(runtime_pid=self._runtime_pid,
+                                            runtime_id=self._runtime_id) is not None
+                or self._executable.verify_child(self._child) is not None):
+            raise ValueError("qualified executable proof cannot grant public ingress")
 
     def _check_pinned_inputs(self):
         if self._inputs.ensure_current(
@@ -228,6 +241,10 @@ class StopOnlyTlsMonitor:
                 or time.monotonic_ns() >= min(self._deadline_ns, self._cap_deadline_ns)
                 or time.time_ns()//1_000_000 >= min(self._expires_ms, self._cap_expires_ms)):
             self._stop("owned TLS child or immutable signed deadline expired")
+        try:
+            self._check_executable()
+        except Exception:
+            self._stop("owned child no longer runs the sealed qualified executable")
         # Never accept a caller-supplied 'revoked=False'. Require a fresh
         # nonce-bound Nexus Ed25519 witness on EVERY explicit monitor tick.
         # This still needs an installed trusted polling supervisor and a
@@ -292,6 +309,10 @@ class StopOnlyTlsMonitor:
             self._stop("metered Xray runtime lost after cap/revocation proof")
         if final_runtime != self._runtime_id:
             self._stop("metered Xray replaced after cap/revocation proof")
+        try:
+            self._check_executable()
+        except Exception:
+            self._stop("owned child executable lost during proof")
         # Final PID verification may itself block. A stale signed lease must
         # not pulse the independent guardian even when earlier probes passed.
         final_wall = time.time_ns() // 1_000_000
@@ -315,6 +336,10 @@ class StopOnlyTlsMonitor:
                 raise ValueError("revocation witness cannot grant public TLS")
         except Exception:
             self._stop("signed revocation witness expired during guardian ACK")
+        try:
+            self._check_executable()
+        except Exception:
+            self._stop("owned child executable lost during guardian ACK")
         ack_wall = time.time_ns() // 1_000_000
         ack_mono = time.monotonic_ns()
         if (ack_wall < final_wall or ack_mono < final_mono

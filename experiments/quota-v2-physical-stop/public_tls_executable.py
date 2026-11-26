@@ -155,6 +155,12 @@ class PinnedTlsExecutable:
         self._check_meter()
         return None
 
+    def ensure_binding(self, *, runtime_pid, runtime_id):
+        if (type(runtime_pid) is not int or runtime_pid != self._runtime_pid
+                or runtime_id != self._runtime_id):
+            raise ValueError("sealed TLS executable belongs to another original meter")
+        return self.ensure_current()
+
     @property
     def exec_fd(self):
         self.ensure_current()

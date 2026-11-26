@@ -77,6 +77,9 @@ class StopOnlyTests(unittest.TestCase):
         self.addCleanup(patch2.stop)
         self.inputs = mock.Mock(spec=stop.public_tls_pinned_inputs.PinnedTlsInputs)
         self.inputs.ensure_current.return_value = None
+        self.executable = mock.Mock(spec=stop.public_tls_executable.PinnedTlsExecutable)
+        self.executable.ensure_binding.return_value = None
+        self.executable.verify_child.return_value = None
         self.certificate_mock = self.inputs.ensure_current
         self.identity = mock.patch.object(
             stop.wal_transport.runtime_identity, "trusted_runtime_identity",
@@ -131,7 +134,7 @@ class StopOnlyTests(unittest.TestCase):
             genesis_sha=self.genesis, runtime_id=self.runtime,
             pinned=self.pinned, runtime_pid=1234,
             cap_watch=self.cap_watch, revocation_watch=self.revocation_watch,
-            pinned_inputs=self.inputs,
+            pinned_inputs=self.inputs, pinned_executable=self.executable,
         )
         params.update(changes)
         return stop.StopOnlyTlsMonitor(**params)
@@ -230,6 +233,48 @@ class StopOnlyTests(unittest.TestCase):
             self.monitor()
         self.assertIsNotNone(self.child.poll())
         with self.assertRaisesRegex(ValueError, "local TLS input check cannot authorize"):
+            self.pre_spawn_check()
+
+    def test_executable_missing_or_foreign_kills_already_owned_child(self):
+        for index, changes in enumerate(({"pinned_executable": None}, {})):
+            if index:
+                self.respawn_child()
+                self.executable.ensure_binding.side_effect = ValueError("foreign meter")
+            with self.assertRaisesRegex(ValueError, "initial TLS supervision preflight failed"):
+                self.monitor(**changes)
+            self.assertIsNotNone(self.child.poll())
+
+    def test_loss_of_exact_exec_inode_or_positive_result_kills_child(self):
+        monitor = self.monitor()
+        self.executable.verify_child.side_effect = ValueError("child re-exec")
+        self.assert_stopped(monitor)
+        self.respawn_child()
+        self.executable.verify_child.side_effect = None
+        self.executable.verify_child.return_value = True
+        with self.assertRaisesRegex(ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+
+    def test_exec_inode_rechecked_after_blocking_revocation_and_each_guardian_ack(self):
+        monitor = self.monitor()
+        self.assertEqual(self.executable.verify_child.call_count, 3)
+        self.executable.verify_child.assert_called_with(self.child)
+        self.executable.verify_child.reset_mock()
+        self.assertIsNone(monitor.check_stop_only())
+        self.assertEqual(self.executable.verify_child.call_count, 3)
+        self.executable.verify_child.side_effect = [None, None, ValueError("child re-exec during ACK")]
+        self.assert_stopped(monitor)
+
+    def test_pre_spawn_requires_exact_meter_bound_executable(self):
+        for value in (None, object()):
+            with self.assertRaisesRegex(ValueError, "missing exact sealed qualified"):
+                self.pre_spawn_check(pinned_executable=value)
+        self.executable.ensure_binding.return_value = True
+        with self.assertRaisesRegex(ValueError, "executable proof cannot authorize"):
+            self.pre_spawn_check()
+        self.executable.ensure_binding.return_value = None
+        self.executable.ensure_binding.side_effect = [None, ValueError("qualified executable replaced")]
+        with self.assertRaisesRegex(ValueError, "qualified executable replaced"):
             self.pre_spawn_check()
 
     def test_missing_pinned_inputs_kills_already_owned_child(self):
@@ -459,7 +504,7 @@ class StopOnlyTests(unittest.TestCase):
             genesis_sha=self.genesis, runtime_id=self.runtime,
             pinned=self.pinned, runtime_pid=1234,
             cap_watch=self.cap_watch, revocation_watch=self.revocation_watch,
-            pinned_inputs=self.inputs,
+            pinned_inputs=self.inputs, pinned_executable=self.executable,
         )
         params.update(changes)
         return prespawn.check_before_spawn(**params)
