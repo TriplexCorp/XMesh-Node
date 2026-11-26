@@ -13,7 +13,7 @@ import hashlib
 import time
 
 import public_tls_cap_watch
-import public_tls_certificates
+import public_tls_pinned_inputs
 import public_tls_frontend
 import public_tls_revocation_watch
 import wal_transport
@@ -26,7 +26,7 @@ MAX_DIVERGENCE_NS = 2_000_000_000
 
 def check_before_spawn(*, profile, authority, node, activation, genesis_sha,
                        runtime_id, pinned, runtime_pid, cap_watch,
-                       revocation_watch):
+                       revocation_watch, pinned_inputs=None):
     """Perform all independent, read-only evidence checks BEFORE a TLS spawn.
 
     Return None, never config, a boolean permit, an FD or a subprocess.
@@ -74,7 +74,11 @@ def check_before_spawn(*, profile, authority, node, activation, genesis_sha,
     if wal_transport.runtime_identity.trusted_runtime_identity(
             runtime_pid) != runtime_id:
         raise ValueError("metered Xray changed before TLS spawn")
-    public_tls_certificates.verify_certificate_lineage(config)
+    if not isinstance(pinned_inputs, public_tls_pinned_inputs.PinnedTlsInputs):
+        raise ValueError("missing exact sealed TLS material and read-only original route inputs")
+    if pinned_inputs.ensure_current(config=config, authority=authority,
+                                    cap_watch=cap_watch, runtime_pid=runtime_pid) is not None:
+        raise ValueError("local TLS input check cannot authorize public ingress")
     if cap_watch.check() is not None:
         raise ValueError("cap watcher cannot issue public TLS permission")
     if revocation_watch.check() is not None:

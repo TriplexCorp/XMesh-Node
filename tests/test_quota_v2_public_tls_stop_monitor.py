@@ -75,11 +75,9 @@ class StopOnlyTests(unittest.TestCase):
         patch2.start()
         self.addCleanup(patch1.stop)
         self.addCleanup(patch2.stop)
-        self.certificate = mock.patch.object(
-            stop.public_tls_certificates, "verify_certificate_lineage",
-            return_value={"vless-main":"root-owned","vless-cdn":"root-owned"})
-        self.certificate_mock = self.certificate.start()
-        self.addCleanup(self.certificate.stop)
+        self.inputs = mock.Mock(spec=stop.public_tls_pinned_inputs.PinnedTlsInputs)
+        self.inputs.ensure_current.return_value = None
+        self.certificate_mock = self.inputs.ensure_current
         self.identity = mock.patch.object(
             stop.wal_transport.runtime_identity, "trusted_runtime_identity",
             return_value=self.runtime)
@@ -133,6 +131,7 @@ class StopOnlyTests(unittest.TestCase):
             genesis_sha=self.genesis, runtime_id=self.runtime,
             pinned=self.pinned, runtime_pid=1234,
             cap_watch=self.cap_watch, revocation_watch=self.revocation_watch,
+            pinned_inputs=self.inputs,
         )
         params.update(changes)
         return stop.StopOnlyTlsMonitor(**params)
@@ -197,7 +196,7 @@ class StopOnlyTests(unittest.TestCase):
     def test_changed_or_invalid_certificate_denied(self):
         monitor = self.monitor()
         with mock.patch.object(
-            stop.public_tls_certificates, "verify_certificate_lineage",
+            self.inputs, "ensure_current",
             side_effect=ValueError("bad lineage")):
             self.assert_stopped(monitor)
 
@@ -220,9 +219,27 @@ class StopOnlyTests(unittest.TestCase):
                 self.monitor(**changes)
             self.assertIsNotNone(self.child.poll())
 
+    def test_pinned_input_loss_or_positive_return_stops_owned_child(self):
+        monitor = self.monitor()
+        self.inputs.ensure_current.side_effect = ValueError("original route no longer current")
+        self.assert_stopped(monitor)
+        self.respawn_child()
+        self.inputs.ensure_current.side_effect = None
+        self.inputs.ensure_current.return_value = True
+        with self.assertRaisesRegex(ValueError, "initial TLS supervision preflight failed"):
+            self.monitor()
+        self.assertIsNotNone(self.child.poll())
+        with self.assertRaisesRegex(ValueError, "local TLS input check cannot authorize"):
+            self.pre_spawn_check()
+
+    def test_missing_pinned_inputs_kills_already_owned_child(self):
+        with self.assertRaisesRegex(ValueError, "initial TLS supervision preflight failed"):
+            self.monitor(pinned_inputs=None)
+        self.assertIsNotNone(self.child.poll())
+
     def test_unverified_certificate_kills_child_before_first_poll(self):
         with mock.patch.object(
-            stop.public_tls_certificates, "verify_certificate_lineage",
+            self.inputs, "ensure_current",
             side_effect=ValueError("wrong SAN or expired certificate")):
             with self.assertRaisesRegex(
                     ValueError, "initial TLS supervision preflight failed"):
@@ -442,6 +459,7 @@ class StopOnlyTests(unittest.TestCase):
             genesis_sha=self.genesis, runtime_id=self.runtime,
             pinned=self.pinned, runtime_pid=1234,
             cap_watch=self.cap_watch, revocation_watch=self.revocation_watch,
+            pinned_inputs=self.inputs,
         )
         params.update(changes)
         return prespawn.check_before_spawn(**params)
@@ -464,6 +482,7 @@ class StopOnlyTests(unittest.TestCase):
             {"pinned": "f" * 64},
             {"cap_watch": None},
             {"revocation_watch": None},
+            {"pinned_inputs": None},
             {"authority": self.signed.replace(b"Ed25519", b"Ed25719")},
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
