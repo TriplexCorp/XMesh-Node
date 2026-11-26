@@ -15,14 +15,20 @@ import os
 from pathlib import Path
 import select
 import signal
-import stat
 import subprocess
+import struct
 import sys
 import time
 
 MAX_SILENCE_MS = 10_000
 MIN_SILENCE_MS = 100
 READY_TIMEOUT_MS = 2_000
+# A heartbeat carries absolute STOP deadlines, never a duration or a
+# permission. The independent process must not outlive the signed witness,
+# even if the supervisor freezes between periodic checks.
+_STOP_FRAME = struct.Struct("!QQ")  # monotonic ns, Unix epoch ms
+_NS_PER_MS = 1_000_000
+_MAX_CLOCK_DIVERGENCE_NS = 2_000_000_000
 ACK_TIMEOUT_MS = 1_000  # A silent or SIGSTOPed guardian must fail closed.
 
 
@@ -47,7 +53,6 @@ def _kill_pidfd(pidfd):
 def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, ack_fd, timeout_ms):
     """Separate guardian process. Never accepts an 'allowed' wire message."""
     pinned_fd = None
-    ready = False
     try:
         if (type(timeout_ms) is not int
                 or not MIN_SILENCE_MS <= timeout_ms <= MAX_SILENCE_MS
@@ -64,35 +69,65 @@ def _serve(child_pid, expected_parent, heartbeat_fd, ready_fd, ack_fd, timeout_m
             return 2
         # All FDs were passed by our direct parent, not opened by path.
         # The parent must not consider supervision established until READY.
-        os.write(ready_fd, b"READY")
-        ready = True
-        last = time.monotonic_ns()
-        deadline_ns = timeout_ms * 1_000_000
+        # CLOCK_BOOTTIME counts suspend time, unlike CLOCK_MONOTONIC.
+        # A suspended host must not gain more watchdog time on resume.
+        now_boot = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+        now_mono = time.monotonic_ns()
+        now_wall = time.time_ns() // _NS_PER_MS
+        silence_ns = timeout_ms * _NS_PER_MS
+        boot_deadline = now_boot + silence_ns
+        mono_deadline = now_mono + silence_ns
+        wall_deadline = now_wall + timeout_ms
+        anchor_boot, anchor_wall = now_boot, now_wall
+        os.set_blocking(heartbeat_fd, False)
+        os.set_blocking(ack_fd, False)
         poller = select.poll()
         poller.register(heartbeat_fd, select.POLLIN | select.POLLHUP | select.POLLERR)
         poller.register(pinned_fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+
+        def remaining():
+            boot = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+            mono = time.monotonic_ns()
+            wall = time.time_ns() // _NS_PER_MS
+            if (os.getppid() != expected_parent or boot < anchor_boot
+                    or wall < anchor_wall
+                    or abs((wall-anchor_wall)*_NS_PER_MS
+                           - (boot-anchor_boot)) > _MAX_CLOCK_DIVERGENCE_NS):
+                return 0
+            return min(boot_deadline-boot, mono_deadline-mono,
+                       (wall_deadline-wall)*_NS_PER_MS)
+
+        os.write(ready_fd, b"READY")
         while True:
-            now = time.monotonic_ns()
-            if os.getppid() != expected_parent or now < last:
+            left = remaining()
+            if left <= 0:
                 return 1
-            if now - last >= deadline_ns:
+            # Recheck the OLD deadline after poll/read; a queued heartbeat
+            # cannot resurrect a process after any of its deadlines elapsed.
+            events = poller.poll(min(50, max(1, left//_NS_PER_MS)))
+            if remaining() <= 0:
                 return 1
-            # Poll at 100ms maximum so lost parents cannot hold public
-            # traffic open until the entire signed policy lifetime.
-            events = poller.poll(min(100, max(1, (deadline_ns-(now-last))//1_000_000)))
             for fd, _ in events:
-                if fd == pinned_fd:  # Already dead: no need to signal.
+                if fd == pinned_fd:
                     return 0
                 if fd == heartbeat_fd:
-                    data = os.read(heartbeat_fd, 4096)
-                    if not data:
+                    data = os.read(heartbeat_fd, _STOP_FRAME.size + 1)
+                    if len(data) != _STOP_FRAME.size or remaining() <= 0:
                         return 1
-                    if data != b"P":  # No permit channel or free-form wire.
+                    signed_mono, signed_wall = _STOP_FRAME.unpack(data)
+                    boot = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+                    mono = time.monotonic_ns()
+                    wall = time.time_ns() // _NS_PER_MS
+                    left = min(silence_ns, signed_mono-mono,
+                               (signed_wall-wall)*_NS_PER_MS)
+                    if left <= 0 or remaining() <= 0:
                         return 1
-                    last = time.monotonic_ns()
-                    # An ACK proves that this independent process is still
-                    # consuming heartbeat messages. An unwatched one-way pipe
-                    # may accept writes for hours after its reader SIGSTOPs.
+                    boot_deadline = boot + left
+                    mono_deadline = min(mono + silence_ns, signed_mono)
+                    wall_deadline = min(wall + timeout_ms, signed_wall)
+                    anchor_boot, anchor_wall = boot, wall
+                    if remaining() <= 0:
+                        return 1
                     os.write(ack_fd, b"A")
     except (OSError, ValueError, OverflowError):
         return 1
@@ -166,20 +201,29 @@ class StopOnlyDeadman:
                 if fd >= 0:
                     os.close(fd)
 
-    def pulse(self):
+    def pulse(self, *, deadline_ns, wall_deadline_ms):
+        """Report checked stop deadlines (absolute, never refresh by duration)."""
         try:
             if (self._writer is None or self._ack_reader is None
                     or self._guardian is None or self._guardian.poll() is not None
                     or self.child.poll() is not None):
                 raise ValueError("unavailable TLS deadman or already stopped child")
-            os.write(self._writer, b"P")
+            if (type(deadline_ns) is not int or type(wall_deadline_ms) is not int
+                    or not time.monotonic_ns() < deadline_ns < 2**64
+                    or not time.time_ns() // _NS_PER_MS < wall_deadline_ms < 2**64):
+                raise ValueError("missing or expired signed TLS stop deadline")
+            # Single atomic pipe write (< PIPE_BUF); the guardian rejects
+            # incomplete, duplicated or malformed frames, not just EOF.
+            os.write(self._writer, _STOP_FRAME.pack(deadline_ns, wall_deadline_ms))
             poller = select.poll()
             poller.register(self._ack_reader, select.POLLIN | select.POLLHUP |
                             select.POLLERR)
             if not poller.poll(ACK_TIMEOUT_MS) or os.read(self._ack_reader, 1) != b"A":
                 raise ValueError("independent guardian did not acknowledge heartbeat")
-            if self._guardian.poll() is not None or self.child.poll() is not None:
-                raise ValueError("deadman or TLS child exited during heartbeat")
+            if (self._guardian.poll() is not None or self.child.poll() is not None
+                    or time.monotonic_ns() >= deadline_ns
+                    or time.time_ns() // _NS_PER_MS >= wall_deadline_ms):
+                raise ValueError("deadman, child or signed deadline expired during heartbeat")
         except (OSError, ValueError):
             # A killed/failed guardian is not a reason to keep TLS alive.
             if self.child.poll() is None:
@@ -189,6 +233,11 @@ class StopOnlyDeadman:
         return None
 
     def close(self):
+        # Closing is an irrevocable stop, including when the guardian
+        # itself is SIGSTOPed. No graceful interval can outlive signed time.
+        if self.child.poll() is None:
+            self.child.kill()
+            self.child.wait(timeout=2)
         writer, self._writer = self._writer, None
         reader, self._ack_reader = self._ack_reader, None
         if writer is not None:
