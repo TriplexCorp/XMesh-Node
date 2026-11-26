@@ -114,11 +114,14 @@ class SignedCapRosterWatch:
         # A signed revocation witness must cover the exact active lease
         # snapshot, not just an unchanged VLESS roster. Any newer signed
         # renewal requires a NEW watcher and fresh Nexus revocation proof.
+        # Use the complete canonical {class,email} entries, not only the
+        # emails used for local probes. This is the exact Rust/PostgreSQL
+        # quota_v2_public_tls_sql_roster_digest wire contract.
         self.roster_sha256 = hashlib.sha256(
             wal_transport.observed.canonical([
                 {"userId": user, "grantSha256": hashlib.sha256(raw).hexdigest(),
-                 "aliases": list(aliases)}
-                for user, (raw, _scope, aliases) in sorted(grants.items())
+                 "aliases": scope["aliases"]}
+                for user, (raw, scope, _emails) in sorted(grants.items())
             ])).hexdigest()
         self.profile_sha256 = hashlib.sha256(
             wal_transport.observed.canonical(profile)).hexdigest()
