@@ -528,3 +528,37 @@ when actual hosted PID1 systemd is unavailable. A future installed
 service must fit its watchdog interval and proof refresh scheduling
 within the shortest real authority/witness expiry and independently
 qualify its actual Xray process and metering evidence.
+
+## First-Genesis strict-PQ WAL readback (dormant diagnostic)
+
+The separate `public_tls_wal_watch.py` experiment uses the installed product
+request to `/api/v1/node/quota-v2/wal` with operation `public_tls_head`. It
+requires the root-private enrolled state, original signed Genesis and full
+first-cap roster, independently qualified release executable/configuration,
+and the actual isolated Docker/Xray PID, start time and private ledger bind
+(including the process mount namespace's device/inode). It rejects later
+cap/renewal/fence/unknown ledger files, mismatched or absent persisted cap bytes,
+foreign WAL aliases/runtimes, corrupt or missing streams/inventory, oversized
+scans, stale/changing local counters, and untrusted responses.
+
+The exact pinned Nexus Ed25519 signature, domain, fresh challenge, activation,
+policy, profile, roster, measured process, seven-second maximum TTL,
+and canonical index sequence/hash/tail must all match. HTTP 404, missing
+history or a legacy fallback is NOT a signed empty history statement.
+The local birth index and complete WAL digests are re-read around the strict-PQ
+request, with every alias's nonce/PID-authenticated cumulative MAIN/CDN cap
+counters reconciled to local WAL sums. If anything changed or the signed time
+window expired, the check fails. For a nonempty index the readback proves
+equality of **birth history**, not equality of off-host charge byte counters.
+The signature cannot prove pre-bootstrap historical completeness, actual
+delivery of every recorded intent, future absence of revocation, or terminal
+meter finality. The check returns no permit even on success.
+
+The Node regression suite exercises actual Ed25519 signatures and private
+Go-format hash-chained test WAL files, including deletion and concurrent
+mutation; PID/Unix-socket and product request boundaries are mocked in these
+unit tests. It is not an installed end-to-end qualification. No installer,
+launch path, systemd unit, product release version or public listener uses this
+module. An installed two-node test, live lease/charge reconciliation and
+atomic fail-closed launch/stop integration are still required before public
+admission.
