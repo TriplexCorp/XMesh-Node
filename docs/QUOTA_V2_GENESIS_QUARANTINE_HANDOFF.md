@@ -736,3 +736,40 @@ real capless multithreaded process and an independently privileged process
 inheriting the exact same sealed inputs; only the former passes. This
 does not prove a complete mount, PID, seccomp, cgroup or network sandbox,
 and does not create a listener or a positive authority.
+
+### Namespace-independent original Unix peer identity (dormant)
+
+A future capless TLS child must not retain host PID/procfs access merely
+because the current ingress dialer compares `SO_PEERCRED.Pid` with a
+host numeric PID. In a real descendant PID namespace, an ancestor Unix
+peer has PID **0** in both credentials and the child's procfs pidfd
+metadata. The dormant `public_tls_peer_identity` primitive verifies the
+actual connected root stream via Linux `SO_PEERPIDFD`: the returned
+private CLOEXEC descriptor must be a live **pidfs** kernel object, with
+the exact device/inode token captured by the supervisor on the original
+measured PID's still-pinned pidfd. It independently checks the
+namespace-relative PID from kernel credentials and fdinfo, root UID/GID
+and liveness; it closes the fresh peer pidfd and never passes the
+supervisor's pidfd into the child. A missing API, old shared anon-inode
+pidfd implementation, different same-UID process, dead process,
+inheritable supervisor pidfd or corrupt token fails closed.
+
+Actual nested PID/mount namespace tests run with a new procfs,
+no-new-privs and all five capability masks zero. They verify an ancestor
+PID is invisible, the actual peer PID is zero, the pidfs object still
+matches, and another invisible root peer is refused. They also verify
+the detached directory remains read-only and a signal-zero attempt on
+the ancestor peer pidfd is denied. Hosted CI additionally requires a
+fresh Unix connection through a detached read-only directory descriptor
+in that namespace, without inheriting a connected socket, and a
+different root process's listener in the same directory must fail.
+
+This is a **kernel feasibility and refusal primitive only**. It does
+not change the existing Go dialer or Xray artifact, the pinned route or
+input bundle, Agent installation, authority, production flags, or
+listeners. A future reviewed dialer must bind this token to exact
+immutable inputs, use the isolated readonly meter directory instead of
+the host proc PID path, authenticate before forwarding any application
+bytes, and demonstrate its actual namespace, FD, seccomp and stop-chain
+requirements on the independently qualified executable. Do not weaken
+the original dialer's PID check or make unsupported kernels eligible.
