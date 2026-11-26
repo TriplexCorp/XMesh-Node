@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Real Ed25519 signed roster checks; stop-only; NEVER grants public TLS."""
 import copy
+import hashlib
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -57,6 +59,21 @@ class SignedCapRosterWatchTests(unittest.TestCase):
         self.assertTrue(all(v[-3] == self.grants[100] for v in observed))
         self.assertTrue(all(v[-2]["userId"] == 100 for v in observed))
         self.assertTrue(all(v[-2]["aliases"] == self.source.aliases for v in observed))
+
+    def test_roster_hash_matches_nexus_sql_exact_class_and_email_wire(self):
+        # Independently construct the SQL/Rust digest format from the signed
+        # envelope, including the full class/email objects and trailing LF
+        # of the original grant in its hash.
+        raw = self.grants[100]
+        doc = json.loads(raw)
+        expected = [{"userId": 100, "grantSha256": hashlib.sha256(raw).hexdigest(),
+                     "aliases": doc["payload"]["aliasScopes"]}]
+        wire = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+        self.assertEqual(self.watcher().roster_sha256, hashlib.sha256(wire).hexdigest())
+        # Explicitly reject the previous email-only digest contract.
+        expected[0]["aliases"] = [item["email"] for item in expected[0]["aliases"]]
+        old = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+        self.assertNotEqual(self.watcher().roster_sha256, hashlib.sha256(old).hexdigest())
 
     def test_missing_foreign_or_swapped_users_fail_closed(self):
         cases = (
