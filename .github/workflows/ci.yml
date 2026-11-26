@@ -64,7 +64,7 @@ jobs:
           go-version-file: go.mod
       - run: bash -n bootstrap.sh install.sh deploy/xmesh-xray-sync.sh deploy/xmesh-tls-renew-hook.sh deploy/install-xsp-v2-production-agent.sh
       - run: test "$(cat VERSION)" = "6.0.0"
-      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.37"
+      - run: test "$(cat AGENT_VERSION)" = "control-v6.0.38"
       - name: Strict-PQ fresh VPS installer must preserve activation recovery and root-only TLS preflight
         run: |
           python3 -m py_compile tests/test_strict_pq_v6_operational_install_release.py

@@ -15,6 +15,7 @@ on:
       - 'experiments/quota-v2-physical-stop/successor_meter.py'
       - 'tests/test_quota_v2_successor_meter.py'
       - 'tests/test_quota_v2_qualified_runtime_image.py'
+      - 'tests/test_quota_v2_classic_image.sh'
 permissions:
   contents: read
 jobs:
@@ -76,6 +77,10 @@ jobs:
           fi
           sudo mv "$target.saved" "$target"
           sudo python3 "$GITHUB_WORKSPACE"/tests/test_quota_v2_qualified_runtime_image.py
+          # The installed two-Node WAL scenario uses Ubuntu 24.04's
+          # distro Docker without the BuildKit plugin. Test the same classic
+          # builder, not just the hosted runner's current buildx.
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash "$GITHUB_WORKSPACE/tests/test_quota_v2_classic_image.sh" "$GITHUB_WORKSPACE"
           report="$(sudo python3 "$GITHUB_WORKSPACE"/experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
           IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="a6c4e6bb68cf88e38f85873d3adf8b68b49c79c125a79e8361d67f3ecfa22007"; assert r["productionActivationAuthorized"] is False'
           test -z "$(sudo docker ps -q --filter ancestor="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["imageId"])' "$report")")"
