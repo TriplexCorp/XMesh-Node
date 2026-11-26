@@ -474,3 +474,33 @@ are unfinished. The full two-Node SIGKILL and replay scenarios still need
 to exercise the running stack.
 Do NOT merge/enable production Quota V2 based on the signed install
 receipt alone. Keep draft, main/production untouched, feature flag 0.
+
+## Stop-only public TLS watchdog: absolute signed expiry
+
+The SQL-backed strict-PQ TLS revocation endpoint in Nexus #592 signs a
+short-lived, nonce-bound **zero-authority** witness. The dormant TLS
+monitor must not translate successful checks into an unconditional ten
+second extension of public ingress. The Linux pidfd guardian now takes
+the earliest of the independently verified TLS authority, every signed
+cap in the exact roster, and the most recent verified revocation
+witness as absolute monotonic and Unix-wall deadlines. Its independent
+watchdog also measures boot time (including suspend), rejects old or
+malformed queued heartbeat frames and refuses late renewal even after
+the guardian resumes. Losing a proof kills the owned child with SIGKILL
+rather than allowing a graceful shutdown interval.
+
+Tests use actual Linux pidfds, OpenSSL Ed25519 revocation signatures,
+and a disposable TLS 1.3 loopback listener gated on guardian startup.
+They verify closure of both an existing encrypted session and the
+listener when the supervisor is SIGSTOPed, earlier signed expiry than
+the watchdog gap, loss of the guardian, and malformed or late frames.
+The local TLS harness is not a production Xray or off-host WAL proof.
+
+No launcher, service, public binding, positive TLS authority issuer,
+or new deployed Agent version is introduced here. Before promotion,
+a real installed lifecycle must gate bind until fully verified evidence
+and guardian readiness, contain the public child and guardian in a
+single fail-closed systemd control group, authenticate the actual
+release Xray executable, prove off-host WAL floors and cap ownership,
+and qualify installed MAIN/CDN TLS end to end. Production Quota V2
+remains OFF.

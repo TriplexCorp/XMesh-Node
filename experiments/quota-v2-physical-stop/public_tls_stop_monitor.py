@@ -90,6 +90,21 @@ class StopOnlyTlsMonitor:
             self._deadline_ns = (
                 self._mono_ns + (self._expires_ms - self._wall_ms) * 1_000_000
             )
+            # The watcher retains the exact already-verified grant bytes.
+            # Read only their signed timestamps; do not accept a separate
+            # caller's deadline or mutable roster. This companion module is
+            # deliberately not installed yet, and shares the pinned watcher
+            # implementation's evidence format.
+            cap_expiries = [
+                wal_transport.observed.strict_json(raw)["payload"]["validUntilMs"]
+                for raw, _scope, _aliases in self._cap_watch._grants.values()
+            ]
+            if (not cap_expiries or any(type(t) is not int or t <= self._wall_ms
+                                        for t in cap_expiries)):
+                raise ValueError("missing or expired signed cap lifetime")
+            self._cap_expires_ms = min(cap_expiries)
+            self._cap_deadline_ns = (self._mono_ns
+                                     + (self._cap_expires_ms-self._wall_ms)*1_000_000)
             if self._child.poll() is not None:
                 raise ValueError("public TLS child exited before supervision")
             # A valid signature alone does not verify this host's actual
@@ -133,7 +148,7 @@ class StopOnlyTlsMonitor:
             # A heartbeat is a report that every independent cryptographic
             # and measured Xray check just succeeded. It is NEVER permission
             # for the guardian to open or continue traffic on its own.
-            if self._deadman.pulse() is not None:
+            if self._pulse_deadman() is not None:
                 raise ValueError("deadman attempted to issue traffic permission")
             if self._child.poll() is not None:
                 raise ValueError("TLS child died during startup supervision")
@@ -147,6 +162,8 @@ class StopOnlyTlsMonitor:
             if (ack_wall_ms < checked_wall_ms or ack_mono_ns < checked_mono_ns
                     or ack_wall_ms >= self._expires_ms
                     or ack_mono_ns >= self._deadline_ns
+                    or ack_wall_ms >= self._cap_expires_ms
+                    or ack_mono_ns >= self._cap_deadline_ns
                     or ack_mono_ns - self._mono_ns >= MAX_CHECK_GAP_NS
                     or abs((ack_wall_ms - self._wall_ms) * 1_000_000
                            - (ack_mono_ns - self._mono_ns))
@@ -156,15 +173,32 @@ class StopOnlyTlsMonitor:
         except Exception:
             self._stop("initial TLS supervision preflight failed")
 
+    def _pulse_deadman(self):
+        # Read the verified watch's exact signed deadline, calculated from
+        # its original reception anchors. Never issue "another 10 seconds"
+        # when a witness has only a few milliseconds left.
+        witness_mono = self._revocation_watch._deadline_ns
+        witness_anchor_mono = self._revocation_watch._mono_ns
+        witness_anchor_wall = self._revocation_watch._wall_ms
+        if (any(type(t) is not int for t in (
+                witness_mono, witness_anchor_mono, witness_anchor_wall))
+                or not 0 < witness_mono-witness_anchor_mono <=
+                    public_tls_revocation_watch.MAX_VALIDITY_MS*1_000_000):
+            raise ValueError("missing verified revocation stop deadline")
+        witness_wall = witness_anchor_wall + (
+            (witness_mono-witness_anchor_mono)//1_000_000)
+        return self._deadman.pulse(
+            deadline_ns=min(self._deadline_ns, self._cap_deadline_ns, witness_mono),
+            wall_deadline_ms=min(self._expires_ms, self._cap_expires_ms, witness_wall),
+        )
+
     def _stop(self, reason):
         self.stopped = True  # latch before any potentially failing I/O
         if self._child.poll() is None:
-            self._child.terminate()
-            try:
-                self._child.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._child.kill()
-                self._child.wait(timeout=2)
+            # A graceful TERM interval would be additional unauthorized
+            # lifetime precisely when a signed or measured proof is lost.
+            self._child.kill()
+            self._child.wait(timeout=2)
         if self._deadman is not None:
             self._deadman.close()
         raise ValueError("public TLS process stopped: " + reason)
@@ -178,10 +212,17 @@ class StopOnlyTlsMonitor:
         """
         if self.stopped:
             raise ValueError("public TLS stop latch is permanent")
+        # Do not initiate another network poll after the owned child or
+        # its immutable authority/cap have already expired.
+        if (self._child.poll() is not None
+                or time.monotonic_ns() >= min(self._deadline_ns, self._cap_deadline_ns)
+                or time.time_ns()//1_000_000 >= min(self._expires_ms, self._cap_expires_ms)):
+            self._stop("owned TLS child or immutable signed deadline expired")
         # Never accept a caller-supplied 'revoked=False'. Require a fresh
         # nonce-bound Nexus Ed25519 witness on EVERY explicit monitor tick.
         # This still needs an installed trusted polling supervisor and a
-        # database-backed issuer; no public ingress is enabled by this API.
+        # installed scheduler and positive authority issuer; no public ingress
+        # is enabled by this API.
         try:
             if self._revocation_watch.check() is not None:
                 raise ValueError("revocation witness cannot grant public TLS")
@@ -253,7 +294,7 @@ class StopOnlyTlsMonitor:
                        - (final_mono - self._mono_ns)) > MAX_DIVERGENCE_NS):
             self._stop("metered Xray postcheck exceeded TLS lifetime or clock bounds")
         try:
-            if self._deadman.pulse() is not None:
+            if self._pulse_deadman() is not None:
                 raise ValueError("deadman attempted to issue traffic permission")
         except Exception:
             self._stop("independent TLS deadman unavailable or unresponsive")
@@ -269,6 +310,8 @@ class StopOnlyTlsMonitor:
         if (ack_wall < final_wall or ack_mono < final_mono
                 or ack_wall >= self._expires_ms
                 or ack_mono >= self._deadline_ns
+                or ack_wall >= self._cap_expires_ms
+                or ack_mono >= self._cap_deadline_ns
                 or ack_mono - self._mono_ns >= MAX_CHECK_GAP_NS
                 or abs((ack_wall - self._wall_ms) * 1_000_000
                        - (ack_mono - self._mono_ns)) > MAX_DIVERGENCE_NS):

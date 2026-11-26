@@ -97,6 +97,10 @@ class StopOnlyTests(unittest.TestCase):
         self.cap_watch.genesis_sha = self.genesis
         self.cap_watch.pinned = self.pinned
         self.cap_watch.check.return_value = None
+        self.cap_watch._grants = {100: (
+            wal_transport.observed.canonical({"payload": {
+                "validUntilMs": now_ms+120_000}}), {}, ("fixture",))}
+
         self.revocation_watch = mock.Mock(
             spec=stop.public_tls_revocation_watch.SignedTlsRevocationWatch)
         self.revocation_watch.node = self.node
@@ -109,7 +113,12 @@ class StopOnlyTests(unittest.TestCase):
             self.signed).hexdigest()
         self.revocation_watch.pinned = self.pinned
         self.cap_watch.roster_sha256 = self.revocation_watch.roster_sha256
-        self.revocation_watch.check.return_value = None
+        def refresh_witness_clock():
+            self.revocation_watch._mono_ns = self.mono_ns
+            self.revocation_watch._wall_ms = self.wall_ns//1_000_000
+            self.revocation_watch._deadline_ns = self.mono_ns+7_000_000_000
+        refresh_witness_clock()
+        self.revocation_watch.check.side_effect = refresh_witness_clock
         self.revocation_watch.ensure_fresh.return_value = None
 
     def stop_child(self):
@@ -340,6 +349,7 @@ class StopOnlyTests(unittest.TestCase):
         self.assert_stopped(monitor)
 
     def test_revocation_witness_cannot_return_positive_authorization(self):
+        self.revocation_watch.check.side_effect = None
         self.revocation_watch.check.return_value = True
         with self.assertRaisesRegex(
                 ValueError, "initial TLS supervision preflight failed"):
@@ -465,6 +475,7 @@ class StopOnlyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cap watcher cannot issue"):
             self.pre_spawn_check()
         self.cap_watch.check.return_value = None
+        self.revocation_watch.check.side_effect = None
         self.revocation_watch.check.return_value = True
         with self.assertRaisesRegex(ValueError, "revocation watcher cannot issue"):
             self.pre_spawn_check()
@@ -534,7 +545,7 @@ class StopOnlyTests(unittest.TestCase):
         self.assertEqual(calls, 2)
 
     def test_startup_ack_crossing_signed_expiry_kills_child(self):
-        def slow_ack():
+        def slow_ack(**_deadlines):
             self.tick(wall_ms=60_001, monotonic_ms=60_001)
             return None
         with mock.patch.object(
@@ -547,7 +558,7 @@ class StopOnlyTests(unittest.TestCase):
 
     def test_periodic_ack_crossing_watchdog_gap_stops_child(self):
         monitor = self.monitor()
-        def slow_ack():
+        def slow_ack(**_deadlines):
             self.tick(wall_ms=10_050, monotonic_ms=10_050)
             return None
         with mock.patch.object(monitor._deadman, "pulse", side_effect=slow_ack):
@@ -561,7 +572,7 @@ class StopOnlyTests(unittest.TestCase):
 
     def test_post_ack_verified_clock_becomes_next_monitor_anchor(self):
         monitor = self.monitor()
-        def bounded_ack():
+        def bounded_ack(**_deadlines):
             self.tick(wall_ms=100, monotonic_ms=100)
             return None
         with mock.patch.object(monitor._deadman, "pulse",
@@ -571,6 +582,73 @@ class StopOnlyTests(unittest.TestCase):
         self.assertEqual(monitor._mono_ns, self.mono_ns)
         self.assertFalse(monitor.stopped)
         self.assertIsNone(self.child.poll())
+
+    def test_guardian_uses_earliest_verified_cap_and_revocation_deadline(self):
+        # Signature verification of cap bytes is performed at watcher
+        # construction. Here inspect the exact deadline passed to real IPC.
+        cap_expiry = self.wall_ns//1_000_000+2_500
+        self.cap_watch._grants[100] = (
+            wal_transport.observed.canonical({"payload": {"validUntilMs": cap_expiry}}),
+            {}, ("fixture",))
+        monitor = self.monitor()
+        self.assertEqual(monitor._cap_expires_ms, cap_expiry)
+        with mock.patch.object(monitor._deadman, "pulse",
+                               wraps=monitor._deadman.pulse) as pulse:
+            self.assertIsNone(monitor.check_stop_only())
+            pulse.assert_called_once_with(
+                deadline_ns=monitor._cap_deadline_ns, wall_deadline_ms=cap_expiry)
+        self.assertEqual(self.child.wait(timeout=4), -signal.SIGKILL)
+
+    def test_real_signed_revocation_expiry_stops_without_next_monitor_check(self):
+        # Use the real pinned Ed25519 watcher, not a synthetic boolean or
+        # deadline, to prove the independent guardian consumes its expiry.
+        guard = quarantine_policy._guard()
+        witness_expiry = self.wall_ns//1_000_000+1_300
+        def fetch(challenge):
+            payload = {
+                "schemaVersion": 1,
+                "kind": "xmesh.quota-v2.public-tls-revocation-witness",
+                "nodeId": self.node,
+                "activationReceiptSha256": self.activation,
+                "genesisPolicySha256": self.genesis,
+                "runtimeId": self.runtime,
+                "profileRevision": self.cap_watch.profile_sha256,
+                "authoritySha256": hashlib.sha256(self.signed).hexdigest(),
+                "capRosterSha256": self.cap_watch.roster_sha256,
+                "challenge": challenge, "revoked": False,
+                "canServePublic": False, "canStart": False, "canResume": False,
+                "issuedAtMs": self.wall_ns//1_000_000,
+                "validUntilMs": witness_expiry,
+            }
+            unsigned, signature = self.root/"witness.json", self.root/"witness.sig"
+            unsigned.write_bytes(guard.canonical(payload))
+            subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey",
+                            str(self.root/"nexus.pem"), "-rawin", "-in", str(unsigned),
+                            "-out", str(signature)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            return wal_transport.observed.canonical({
+                "algorithm": "Ed25519", "payload": payload,
+                "signature": signature.read_bytes().hex(),
+            }) + b"\n"
+        watcher = stop.public_tls_revocation_watch.SignedTlsRevocationWatch(
+            fetch=fetch, node=self.node, activation=self.activation,
+            genesis_sha=self.genesis, runtime_id=self.runtime,
+            profile_sha256=self.cap_watch.profile_sha256,
+            authority_sha256=hashlib.sha256(self.signed).hexdigest(),
+            roster_sha256=self.cap_watch.roster_sha256, pinned=self.pinned)
+        monitor = self.monitor(revocation_watch=watcher)
+        self.assertFalse(monitor.stopped)
+        self.assertEqual(self.child.wait(timeout=3), -signal.SIGKILL)
+        self.assertLessEqual(monitor._deadman._guardian.wait(timeout=2), 1)
+
+    def test_missing_or_malformed_verified_witness_deadline_fails_closed(self):
+        for value in (None, "not a deadline", True):
+            self.revocation_watch.check.side_effect = None
+            self.revocation_watch._deadline_ns = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.monitor()
+            self.assertEqual(self.child.poll(), -signal.SIGKILL)
+            self.respawn_child()
 
     def test_good_startup_checks_certificate_and_meter_before_first_poll(self):
         monitor = self.monitor()
