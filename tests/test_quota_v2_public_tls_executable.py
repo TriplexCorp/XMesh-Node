@@ -38,7 +38,9 @@ class ExecutableTests(unittest.TestCase):
             patch = mock.patch.object(executable.release, name, value)
             patch.start()
             self.addCleanup(patch.stop)
-        self.meter = self.child([str(self.meter_binary), "60"])
+        # Ubuntu may distribute coreutils as one multi-call ELF. Its
+        # argv[0] must remain "sleep" even when executing a different inode.
+        self.meter = self.child(["sleep", "60"], executable=str(self.meter_binary))
         self.runtime = executable.wal_transport.runtime_identity.trusted_runtime_identity(
             self.meter.pid)
 
@@ -80,9 +82,9 @@ class ExecutableTests(unittest.TestCase):
                     self.assertEqual(cm.exception.errno, errno.EPERM)
             finally:
                 os.close(writer)
-            proc = self.child([f"/proc/self/fd/{fd}", "60"], pass_fds=(fd,))
+            proc = self.child(["sleep", "60"], executable=f"/proc/self/fd/{fd}", pass_fds=(fd,))
             self.assertIsNone(proof.verify_child(proc))
-            wrong = self.child([str(self.installed), "60"])
+            wrong = self.child(["sleep", "60"], executable=str(self.installed))
             with self.assertRaisesRegex(ValueError, "original sealed"):
                 proof.verify_child(wrong)
             self.stop(proc)
@@ -95,7 +97,7 @@ class ExecutableTests(unittest.TestCase):
         self.installed.write_bytes(b"not qualified")
         with self.assertRaisesRegex(ValueError, "installed TLS executable"):
             self.snapshot()
-        shutil.copyfile("/usr/bin/true", self.installed)
+        self.installed.write_bytes(self.meter_binary.read_bytes() + b"changed")
         self.write_record(hashlib.sha256(self.installed.read_bytes()).hexdigest())
         with self.assertRaisesRegex(ValueError, "original meter executable"):
             self.snapshot()
