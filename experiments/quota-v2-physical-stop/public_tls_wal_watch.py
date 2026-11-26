@@ -262,7 +262,7 @@ def probe(panel, node, user, state):
         if not 0 <= elapsed < MAX_CHECK_NS:
             raise ValueError("first-Genesis WAL readback exceeded time budget")
 
-    fd, lock = preflight.quarantine._locked_private_state(state)
+    fd, lock = preflight.quarantine._locked_private_state(state, read_only=True)
     try:
         pinned = wal._panel_pin()
         identity = preflight.quarantine._enrolled_activation(panel, node)
