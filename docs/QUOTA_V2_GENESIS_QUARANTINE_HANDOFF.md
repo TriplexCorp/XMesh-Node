@@ -541,6 +541,17 @@ cap/renewal/fence/unknown ledger files, mismatched or absent persisted cap bytes
 foreign WAL aliases/runtimes, corrupt or missing streams/inventory, oversized
 scans, stale/changing local counters, and untrusted responses.
 
+The actual qualified meter always owns a zero-length, root-private
+`xray-instance.lock` lifetime flock. The readback requires that exact
+single-link inode, and verifies the exclusive whole-file `FLOCK` entry
+in the measured Xray PID's kernel `/proc/PID/fdinfo/N` for a descriptor
+whose device/inode matches the ledger path. The proof does not acquire
+or modify the lock. Replaced, absent, linked, unlocked, nonempty, foreign
+or changed lock evidence fails. The descriptor and inode are compared
+across both snapshots. Tests use genuine process-owned Linux flock,
+including transfer to a foreign live process. Do not confuse this
+instance lock with a signed cap or a committed WAL birth.
+
 The exact pinned Nexus Ed25519 signature, domain, fresh challenge, activation,
 policy, profile, roster, measured process, seven-second maximum TTL,
 and canonical index sequence/hash/tail must all match. HTTP 404, missing
