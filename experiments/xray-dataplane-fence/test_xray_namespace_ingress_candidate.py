@@ -8,7 +8,6 @@ private test namespace, using ephemeral fixture signatures/certificates.
 from contextlib import ExitStack
 import ctypes
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -37,16 +36,21 @@ from test_xray_live_ingress_cutover import (
 )
 from test_xray_patched_fence import await_socket, query_direction_counters
 import cap_install
+import journal_integrity as journal
+import meter_inventory_audit as inventory
 import public_tls_bound_listener as bound
 import public_tls_cap_watch as cap_watch
-import public_tls_child_inputs as child_inputs
-import public_tls_deadman as deadman
+import public_tls_executable as qualified_executable
 import public_tls_frontend as tls
 import public_tls_listener_manifest as manifests
 import public_tls_listener_readback as readback
 import public_tls_namespace as namespace
 import public_tls_namespace_route as namespace_route
+import public_tls_namespace_inputs as namespace_inputs
 import public_tls_pinned_inputs as pinned
+import public_tls_revocation_watch as revocation
+import public_tls_spawn_preflight as preflight
+import public_tls_stop_monitor as stop_monitor
 import public_tls_routes as routes
 import runtime_identity
 import vless_ingress
@@ -126,24 +130,6 @@ def stop(process):
     process.wait(timeout=5)
 
 
-def seal_binary(path):
-    fd = os.memfd_create("xmesh-disposable-namespace-xray",
-                         os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING | 0x10)
-    try:
-        with path.open("rb") as src, os.fdopen(os.dup(fd), "wb") as dst:
-            shutil.copyfileobj(src, dst)
-        os.fchmod(fd, 0o755)
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SHRINK |
-                    fcntl.F_SEAL_GROW | fcntl.F_SEAL_SEAL | 0x10 | 0x20)
-        with path.open("rb") as src, os.fdopen(os.dup(fd), "rb") as dst:
-            dst.seek(0)
-            assert hashlib.file_digest(src,"sha256").digest() == hashlib.file_digest(dst,"sha256").digest()
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
-
-
 def child_line(child, expected_prefix, timeout=10):
     # Read from the pipe itself: TextIOWrapper.readline can buffer the
     # second listener marker while select sees no additional kernel bytes.
@@ -186,13 +172,14 @@ def tls_echo(port,domain,ca,user_uuid,echo_port,payload):
             assert recv_exact(client,len(payload)) == payload
 
 
-def run(binary, original_ns):
+def run(binary, original_ns, stop_mode):
+    assert stop_mode in {"expiry", "revoked"}
     require_disposable_namespace(original_ns)
     with ExitStack() as stack:
         root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="xmesh-namespace-xray-")))
         executable = root/"xray"
         shutil.copyfile(binary,executable)
-        executable.chmod(0o700)
+        executable.chmod(0o755)
         assert hashlib.sha256(executable.read_bytes()).digest() == hashlib.sha256(binary.read_bytes()).digest()
         echo = subprocess.Popen([sys.executable,"-I","-B","-c",ECHO],stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,text=True)
@@ -287,11 +274,6 @@ def run(binary, original_ns):
             authority=authority,cap_watch=witness,runtime_pid=meter.pid,sockets=sockets,
             netns_cookie=network_cookie))
         tokens = dict(manifest._tokens)
-        fixed = (inputs._certificates.config_fd,*inputs._certificates.material_fds,
-                 *native_routes.child_fds,manifest.manifest_fd)
-        forbidden = tuple(fd for fd in (*inputs._certificates._fds,*inputs._routes._fds) if fd not in fixed)
-        route_fd = native_routes.child_fds[0]
-        child_token = child_inputs.capture(expected=fixed,forbidden=forbidden,route_fd=route_fd)
         sandbox = root/"sandbox"
         sandbox.mkdir(mode=0o700)
         subprocess.run(["mount","-t","tmpfs","-o","mode=0700,size=1m,nosuid,nodev,noexec",
@@ -302,8 +284,48 @@ def run(binary, original_ns):
         root_fd = os.open(sandbox,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
         stack.callback(os.close,root_fd)
         root_token = namespace.capture_root(root_fd)
-        executable_fd = seal_binary(executable)
-        stack.callback(os.close,executable_fd)
+        # Real PinnedTlsExecutable against a disposable qualification
+        # record scoped to this candidate, not the installed host path.
+        qualification = root/"fixture-qualification"
+        qualification.mkdir(mode=0o700)
+        record = qualification/"identity"
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+        record.write_text("".join(
+            f"{k}={digest if k == 'artifactSha256' else 'a'*40}\n"
+            for k in qualified_executable.release.FIELDS), encoding="ascii")
+        record.chmod(0o600)
+        stack.enter_context(mock.patch.object(qualified_executable.release,"QUALIFICATION",qualification))
+        stack.enter_context(mock.patch.object(qualified_executable.release,"EXECUTABLE",executable))
+        exec_proof = stack.enter_context(qualified_executable.PinnedTlsExecutable(
+            runtime_pid=meter.pid,runtime_id=runtime))
+        executable_fd = exec_proof.exec_fd
+        native_inputs = namespace_inputs.NamespaceTlsInputs(original=inputs,native=native_routes,
+            manifest=manifest,root_fd=root_fd,root_token=root_token)
+        fixed = native_inputs.child_fds
+        state = {"revoked":False,"ttl":7000}
+        authority_sha = hashlib.sha256(authority).hexdigest()
+
+        def fetch(challenge):
+            # Only an ephemeral fixture signer. No live Nexus SQL or
+            # production authority asserted by this diagnostic.
+            issued = time.time_ns()//1_000_000
+            return sign(root,key,b"",{
+                "schemaVersion":1,"kind":"xmesh.quota-v2.public-tls-revocation-witness",
+                "nodeId":NODE,"activationReceiptSha256":ACTIVATION,
+                "genesisPolicySha256":policy,"runtimeId":runtime,"profileRevision":policy,
+                "authoritySha256":authority_sha,"capRosterSha256":witness.roster_sha256,
+                "challenge":challenge,"issuedAtMs":issued,"validUntilMs":issued+state["ttl"],
+                "revoked":state["revoked"],"canServePublic":False,"canStart":False,"canResume":False,
+            })+b"\n"
+
+        revocation_watch = revocation.SignedTlsRevocationWatch(fetch=fetch,
+            node=NODE,activation=ACTIVATION,genesis_sha=policy,runtime_id=runtime,
+            profile_sha256=policy,authority_sha256=authority_sha,
+            roster_sha256=witness.roster_sha256,pinned=public)
+        proof_args = dict(profile=profile,authority=authority,runtime_pid=meter.pid,
+            cap_watch=witness,revocation_watch=revocation_watch,pinned_inputs=native_inputs,
+            pinned_executable=exec_proof,**binding_args)
+        assert preflight.check_before_spawn(**proof_args) is None
         fence_contents = (ROOT/"experiments/quota-v2-physical-stop/public_tls_network_fence.py").read_bytes()
         module_dir = root/"modules"
         module_dir.mkdir(mode=0o700)
@@ -344,59 +366,84 @@ def run(binary, original_ns):
         stack.callback(stop,child)
         try:
             child_line(child,"xmesh_namespace_candidate_prebound")
-            assert namespace.verify(child.pid,root_fd,root_token) is None
-            assert child_inputs.verify(child,expected=fixed,forbidden=forbidden,route_fd=route_fd,
-                                       pinned=child_token) is None
-            assert os.path.samestat(os.stat(f"/proc/{child.pid}/exe"),os.fstat(executable_fd))
-            assert witness.check() is None
-            for tag, owner in sockets.items():
-                readback.verify_child_fd(child,owner.fileno(),tokens[tag])
-                readback.verify_listen_state(tokens[tag],listening=False)
-            for tag, owner in sockets.items():
+            assert exec_proof.verify_child(child) is None
+            assert native_inputs.verify_pretransfer(child) is None
+            try:
+                native_inputs.verify_child(child)
+            except ValueError as exc:
+                assert "retains original listening socket copy" in str(exc)
+            else:
+                raise AssertionError("stop-only proof accepted nonexclusive transfer")
+            for owner in sockets.values():
                 owner.close()
-                readback.require_no_copy(os.getpid(),tokens[tag])
-            guardian = deadman.StopOnlyDeadman(child=child,timeout_ms=10_000)
+            # StopOnlyTlsMonitor starts the independent guardian before
+            # it rechecks original evidence and the exact exclusive FDs.
+            monitor = stop_monitor.StopOnlyTlsMonitor(child=child,**proof_args)
+            guardian = monitor._deadman
             stack.callback(guardian.close)
+            assert not monitor.stopped
             for token in tokens.values():
-                readback.require_no_copy(guardian._guardian.pid,token)
                 with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as probe:
                     probe.settimeout(2)
                     assert probe.connect_ex(("127.0.0.1",token.port)) == errno.ECONNREFUSED
-            guardian.pulse(deadline_ns=time.monotonic_ns()+8_000_000_000,
-                           wall_deadline_ms=time.time_ns()//1_000_000+8000)
             child.stdin.write("fixture_namespace_xray_transfer\n")
             child.stdin.flush()
-            found = set()
+            found = {}
             for _ in tokens:
                 line = child_line(child,"xmesh_namespace_candidate_listener:")
                 _,port,fd = line.split(":")
                 port,fd=int(port),int(fd)
                 assert port not in found
-                found.add(port)
-                token=next(t for t in tokens.values() if t.port==port)
-                readback.verify_child_fd(child,fd,token)
-                readback.verify_listen_state(token,listening=True)
-            assert found == set(ports.values())
+                found[port] = fd
+            assert set(found) == set(ports.values())
+            assert native_inputs.observe_adopted(
+                child,{tag:found[token.port] for tag,token in tokens.items()}) is None
+            assert monitor.check_stop_only() is None
             for cls,user in (("main",UUID_A),("cdn",UUID_B)):
                 tls_echo(ports[cls],domains[cls],certificate.ca_cert,user,echo_port,os.urandom(16384))
-            assert witness.check() is None
-            assert namespace.verify(child.pid,root_fd,root_token) is None
-            assert manifest.ensure_manifest() is None
-            assert native_routes.ensure_current() is None
-            guardian.pulse(deadline_ns=time.monotonic_ns()+4_000_000_000,
-                           wall_deadline_ms=time.time_ns()//1_000_000+4000)
             for user,cls in ((USER_A,"main"),(USER_B,"cdn")):
                 assert query_direction_counters(str(executable),api_port,
                     f"xmesh-u{user}--vless-{cls}") == {"uplink":16384,"downlink":16384}
-            assert child.wait(timeout=6)==-9
-            assert guardian._guardian.wait(timeout=2)==1
+            # Independently audit actual fsynced Xray WAL records and
+            # their hash-chained birth registry. The expected scope is
+            # derived from the two actual authenticated client flows.
+            ledger_fd=os.open(ledger,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+            try:
+                _,wals=inventory.verify_meter_inventory(ledger_fd,
+                    sorted(name for name in os.listdir(ledger_fd) if name.startswith("meter-")),
+                    journal._read_meter_wal,journal._canonical_go)
+                assert len(wals)==4
+                assert {(tail["runtimeId"],tail["email"],tail["direction"],tail["nextBytes"])
+                        for tail,_,_ in wals.values()} == {
+                    (runtime,f"xmesh-u{user}--vless-{cls}",direction,16384)
+                    for user,cls in ((USER_A,"main"),(USER_B,"cdn"))
+                    for direction in ("uplink","downlink")}
+            finally:
+                os.close(ledger_fd)
+            if stop_mode == "revoked":
+                state["revoked"] = True
+                try:
+                    monitor.check_stop_only()
+                except ValueError as exc:
+                    assert "signed Nexus revocation witness lost or revoked" in str(exc), exc
+                else:
+                    raise AssertionError("signed revocation did not stop actual TLS child")
+                assert monitor.stopped
+                assert child.wait(timeout=2)==-9
+            else:
+                state["ttl"] = 4000
+                assert monitor.check_stop_only() is None
+                # No more ticks. Independent deadman, not the fixture
+                # supervisor, must stop both listeners at signed expiry.
+                assert child.wait(timeout=6)==-9
+                assert guardian._guardian.wait(timeout=2)==1
             for token in tokens.values():
                 readback.verify_listen_state(token,listening=False)
                 with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as probe:
                     probe.settimeout(2)
                     assert probe.connect_ex(("127.0.0.1",token.port))==errno.ECONNREFUSED
             print("PASS: actual isolated sealed Xray TLS candidate -> original authenticated "
-                  "signed MAIN/CDN meter; exact 16KiB each direction; physical stop of both ports.")
+                  f"signed MAIN/CDN meter; exact 16KiB each direction; physical stop of both ports: {stop_mode}.")
         finally:
             stop(child)
             remainder=getattr(child,"_xmesh_stage_buffer",b"").decode("utf-8","replace")+child.stdout.read()
@@ -407,5 +454,5 @@ def run(binary, original_ns):
 
 
 if __name__ == "__main__":
-    assert len(sys.argv)==3
-    run(Path(sys.argv[1]).resolve(),sys.argv[2])
+    assert len(sys.argv)==4
+    run(Path(sys.argv[1]).resolve(),sys.argv[2],sys.argv[3])

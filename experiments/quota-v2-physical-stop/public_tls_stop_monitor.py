@@ -18,6 +18,7 @@ import public_tls_cap_watch
 import public_tls_deadman
 import public_tls_executable
 import public_tls_pinned_inputs
+import public_tls_namespace_inputs
 import public_tls_frontend
 import public_tls_revocation_watch
 import wal_transport
@@ -78,7 +79,8 @@ class StopOnlyTlsMonitor:
             self._config = public_tls_frontend.compile_signed_public_tls(
                 profile, authority, node=node, activation=activation,
                 genesis_sha=genesis_sha, runtime_id=runtime_id, pinned=pinned)
-            if not isinstance(pinned_inputs, public_tls_pinned_inputs.PinnedTlsInputs):
+            if not isinstance(pinned_inputs, (public_tls_pinned_inputs.PinnedTlsInputs,
+                public_tls_namespace_inputs.NamespaceTlsInputs)):
                 raise ValueError("missing exact sealed TLS material and read-only original route inputs")
             if not isinstance(pinned_executable, public_tls_executable.PinnedTlsExecutable):
                 raise ValueError("missing exact sealed qualified TLS executable")
@@ -191,6 +193,9 @@ class StopOnlyTlsMonitor:
             raise ValueError("qualified executable proof cannot grant public ingress")
         if self._inputs.verify_child(self._child) is not None:
             raise ValueError("qualified child input proof cannot grant public ingress")
+        if isinstance(self._inputs, public_tls_namespace_inputs.NamespaceTlsInputs):
+            if self._inputs.verify_guardian(self._deadman._guardian) is not None:
+                raise ValueError("guardian listener ownership proof cannot grant public ingress")
 
     def _check_pinned_inputs(self):
         if self._inputs.ensure_current(

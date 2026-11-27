@@ -1039,3 +1039,28 @@ matching real meter counters. Deadman expiry must physically close both
 ports while the parent lives. The fixture signs only disposable authority
 and has no live Nexus issuer, installation or deployment. No ordinary
 artifact, release pin, production flag, or public network may change.
+
+
+### Native namespace inputs under the signed stop-monitor (disposable diagnostic)
+
+The native proof borrows the exact sealed source config and certificates,
+detached original meter view and its version-2 manifest (including the
+complete pinned roster of empty Xray Unix listener lock files, when present),
+sealed listener manifest, and original private tmpfs identity. It proves
+prebound transfer and then requires actual parent and guardian no-copy
+readback, independently measured adopted FD numbers and exact kernel
+listen state on subsequent stop-only checks. The old host-PID route and
+writable supervisor root FDs are forbidden in the child. It cannot issue
+authority, open or resume a listener.
+
+The separate Xray integration fixture now uses the existing measured
+`PinnedTlsExecutable`, signed pre-spawn and stop-only monitor primitives;
+only its qualification directory and Ed25519 signer are disposable fixture
+inputs. The monitor, not a manually constructed pulse, determines the
+earliest verified cap/revocation/authority deadlines. Separate disposable
+network namespaces exercise signed revocation and witness expiry. Both
+must physically close MAIN/CDN ports. The independent local WAL verifier
+also checks all four fsynced hash chains, exact birth registry, runtime,
+alias, direction and 16KiB tails. Off-host Nexus WAL verification, an
+installed launcher with positive SQL authority, signed production binary
+qualification and systemd containment are not claimed by these fixtures.
