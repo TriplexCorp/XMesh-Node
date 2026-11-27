@@ -284,22 +284,30 @@ def _verify(raw, request, pinned, snapshot, now):
                      ("challenge", "containerId", "hostPid", "startedAt")})
     expected.update({
         "schemaVersion": 2, "kind": "xmesh.quota-v2.public-tls-wal-head",
+        "preBootstrapHistoryCompletenessVerified": False,
+        "liveMeterVerified": False, "finalMeterVerified": False,
+        "canServePublic": False, "canSpend": False, "canStart": False,
+        "canResume": False, "authorizedBytes": 0, "refundableBytes": 0,
+    })
+    local_history = {
         "historyState": ("committed_birth_index" if snapshot["sequence"]
                          else "empty_remote_history"),
         "inventorySequence": snapshot["sequence"],
         "inventorySha256": snapshot["sha256"], "inventoryTailDigest": snapshot["tail"],
         "committedChargeStreamCount": snapshot["sequence"],
         "committedChargeHeadsSha256": snapshot["chargeHeadsSha256"],
-        "preBootstrapHistoryCompletenessVerified": False,
-        "liveMeterVerified": False, "finalMeterVerified": False,
-        "canServePublic": False, "canSpend": False, "canStart": False,
-        "canResume": False, "authorizedBytes": 0, "refundableBytes": 0,
-    })
+    }
     p = doc["payload"]
     if (not isinstance(p, dict)
-            or set(p) != set(expected) | {"issuedAtMs", "validUntilMs"}
+            or set(p) != set(expected) | set(local_history) | {"issuedAtMs", "validUntilMs"}
             or any(type(p.get(k)) is not type(v) or p[k] != v
                    for k, v in expected.items())
+            or any(type(p.get(k)) is not type(v) for k, v in local_history.items())
+            or not 0 <= p["committedChargeStreamCount"] <= p["inventorySequence"] <= wal.registry.MAX_ENTRIES
+            or p["historyState"] != ("committed_birth_index" if p["inventorySequence"]
+                                     else "empty_remote_history")
+            or any(not wal._hex(p[k], 64) for k in ("inventorySha256", "inventoryTailDigest",
+                                                    "committedChargeHeadsSha256"))
             or type(p["issuedAtMs"]) is not int or type(p["validUntilMs"]) is not int
             or not 0 < p["issuedAtMs"] <= now < p["validUntilMs"]
             or now - p["issuedAtMs"] > MAX_AGE_MS
@@ -309,6 +317,11 @@ def _verify(raw, request, pinned, snapshot, now):
         public = Path(temp) / "nexus.pem"
         wal._write_public(pinned, public)
         wal.verifier.verify_nexus_signature(DOMAIN, p, doc["signature"], public)
+    # The mismatch is reported ONLY after authenticating the exact fresh
+    # server response. Fake/expired/malformed responses cannot masquerade
+    # as evidence that a genuine SQL snapshot is lagging the actual meter.
+    if any(p[key] != value for key, value in local_history.items()):
+        raise ValueError("signed Nexus WAL history does not match complete local conservative tails")
     return p["validUntilMs"]
 
 

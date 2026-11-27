@@ -174,7 +174,7 @@ class PublicTlsWalWatchTests(unittest.TestCase):
             self.check()
         empty = self.snapshot()
         self.create_wal()
-        with self.assertRaisesRegex(ValueError, "mismatched Nexus WAL"):
+        with self.assertRaisesRegex(ValueError, "signed Nexus WAL history does not match"):
             self.check(lambda request: self.reply(request, empty))
         # Deleting one indexed stream, or the entire index, cannot pass.
         index = self.directory / watch.wal.registry.NAME
@@ -212,9 +212,12 @@ class PublicTlsWalWatchTests(unittest.TestCase):
             self.assertEqual(old[key], new[key])
         self.assertNotEqual(old["chargeHeadsSha256"], new["chargeHeadsSha256"])
         # Both signatures genuine and fresh, only the committed tails lag.
-        with self.assertRaisesRegex(ValueError, "mismatched Nexus WAL"):
+        with self.assertRaisesRegex(ValueError, "signed Nexus WAL history does not match"):
             self.check(lambda request: self.reply(request, old))
-        with self.assertRaisesRegex(ValueError, "mismatched Nexus WAL"):
+        with self.assertRaises(ValueError) as bad:
+            self.check(lambda request: self.reply(request, old, domain=b"wrong-signing-domain"))
+        self.assertNotIn("signed Nexus WAL history does not match", str(bad.exception))
+        with self.assertRaisesRegex(ValueError, "signed Nexus WAL history does not match"):
             self.check(lambda request: self.reply(request, new, {
                 "committedChargeStreamCount": new["sequence"]-1}))
         self.assertIsNone(self.check())
