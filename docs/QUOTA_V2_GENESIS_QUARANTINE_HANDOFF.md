@@ -580,6 +580,28 @@ module. An installed two-node test, live lease/charge reconciliation and
 atomic fail-closed launch/stop integration are still required before public
 admission.
 
+
+### Original first-meter retirement evidence (dormant, hosted only)
+
+After independent TLS-stop proof and disposable worker quiescence, retain a
+kernel pidfd and open private ledger directory for the independently measured
+original isolated first-Genesis meter. Capture the fresh signed V2 complete
+committed charge-head readback and its exact response digest before invoking
+the existing root Unix fence for every signed user, including each MAIN/CDN
+alias. Require the immutable deny/checkpoint and conservative per-alias WAL
+audit; reject every extra, missing, pending or tainted ledger file and any
+changed cap, birth index or WAL byte. The pinned original instance must still
+own its exact lifetime flock before the caller stops it.
+
+After actual exit, require POLLIN on that same still-open pidfd, unchanged
+Docker ID/start time with no running/restarting process or restart policy,
+the same directory and lifetime-lock inodes, actual acquisition of the
+released lock without creating a file, and identical independently verified
+denial/WAL digests. This is local historical evidence only: not a re-start
+permit, proof of delivery, complete pre-bootstrap history, terminal
+settlement or a refund. No installer, persistent service or public issuer
+uses it. Real installed two-Node retirement still requires hosted qualification.
+
 ## Sealed TLS material before any future public spawn
 
 The dormant certificate verifier now snapshots the root-owned Certbot

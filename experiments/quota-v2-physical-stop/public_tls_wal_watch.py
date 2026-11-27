@@ -325,7 +325,7 @@ def _verify(raw, request, pinned, snapshot, now):
     return p["validUntilMs"]
 
 
-def _check(roster, user, measured, directory, remeasure, deadline):
+def _checked_evidence(roster, user, measured, directory, remeasure, deadline):
     before = _snapshot(directory, roster, deadline)
     _local_counters(roster, before, deadline)
     request = _request(roster, user, measured)
@@ -346,6 +346,13 @@ def _check(roster, user, measured, directory, remeasure, deadline):
             or abs((wall - received_wall) * 1_000_000 - (mono - received_mono))
             > 2_000_000_000):
         raise ValueError("Nexus WAL witness expired or clock changed")
+    # Private historical evidence for the disposable retirement verifier.
+    # The bytes/digest do not establish terminality or grant any authority.
+    return before, hashlib.sha256(raw).hexdigest()
+
+
+def _check(roster, user, measured, directory, remeasure, deadline):
+    _checked_evidence(roster, user, measured, directory, remeasure, deadline)
     # This successful diagnostic deliberately returns no reusable permit.
     return None
 
