@@ -35,7 +35,8 @@ class ContractTests(unittest.TestCase):
         self.assertIs(self.value["candidateOnly"], True)
         self.assertIs(self.value["productionActivationAuthorized"], False)
         self.assertEqual(self.value["verifiedScenarios"],
-                         ["signed-witness-expiry", "signed-revocation"])
+                         ["signed-witness-expiry", "signed-revocation",
+                          "systemd-watchdog-frozen-supervisor-guardian"])
 
     def test_wrong_bytes_source_flag_scenarios_and_schema_rejected(self):
         for key, bad in {
