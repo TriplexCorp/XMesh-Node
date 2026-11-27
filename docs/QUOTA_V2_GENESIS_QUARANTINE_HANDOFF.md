@@ -619,6 +619,29 @@ verification, Node signature, public/start/resume/settlement and refund
 authority. No dead-process-only reconstruction or permanent restart
 prevention is claimed.
 
+A dormant Go receipt-format package, `experiments/quota-v2-retirement-attestation`,
+defines the separate Ed25519 domain
+`XMESH_QUOTA_V2_HISTORICAL_RETIREMENT_ARCHIVE_POSSESSION_V1\0`. Its
+signature is over the SHA-256 of the exact immutable archive, enrolled
+Node and activation receipt identity, pinned Nexus key, runtime, original
+signed WAL response digest and historical Nexus validity interval. It
+validates canonical bounded archive bytes and the genuine embedded Nexus
+V2 signature before invoking a supplied signer; it then verifies that the
+signer used the independently pinned enrolled Node key. Verification
+reconstructs the entire message from the archive and that external scope.
+
+This is a **possession signature only**. A root process can fabricate local
+pidfd, ledger and fence claims; authentic Node possession does not verify
+those claims. Local observation, liveness, delivered-byte, finality,
+settlement, public/spend/start/resume and refund authority are explicitly
+false or zero, and historical replay does not imply current freshness.
+The independent experiment module is tested separately and cannot be imported
+by the deployed Agent module without an explicit versioned integration.
+There is no product command, private-key access, installed service, route
+or release/production version change. Integration with the active enrolled
+vault, independently assessed archive and an exact qualified new Agent
+artifact is a separate step.
+
 ## Sealed TLS material before any future public spawn
 
 The dormant certificate verifier now snapshots the root-owned Certbot
