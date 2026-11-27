@@ -983,3 +983,29 @@ connectivity; the separately qualified namespace-native manifest and
 peer verifier must be integrated into the actual Xray candidate,
 alongside the exact sealed listener inputs and full stop chain. No
 installer, version, Agent target, public authority or deployment change.
+
+### Exact signed listener set and sealed Go configuration (dormant)
+
+The raw Go transport token is not sufficient to associate all MAIN/CDN
+listeners with the verified TLS profile. `public_tls_listener_manifest`
+borrows the original verified signed TLS inputs and exact prebound
+unlistening socket set, measures each signed tag/address/port against the
+actual child-bound FD and kernel identities, and seals a canonical
+manifest. It binds the exact frozen (certificate-FD-rewritten) config
+bytes/hash/FD, original authority digest, runtime and roster digest.
+It never grants authority, binds or listens. The supervisor retains
+only the manifest/config proof after releasing its socket copies.
+
+The standalone Go reader verifies the independently expected runtime,
+roster, authority and config hashes, exact sealed memfd identity and
+canonical JSON, full MAIN/CDN roster, uniqueness of FD/port/inode/cookie,
+matching original namespace, and actual unlistening socket identities.
+Every adoption requires the exact tag and endpoint, rechecks original
+manifest and config before delegating to the one-shot Go transport.
+Any error is terminal for a future launcher; no ordinary bind or
+alternate endpoint fallback is supplied. The actual hosted diagnostic
+runs signed input assembly and capless compiled Go over the original
+two inherited prebound sockets and config; wrong digest, namespace,
+scope, FD and same-content replacement after capture are refused. No
+socket listens during this diagnostic. Real Xray integration and
+complete installed authority/launcher qualification remain separate.

@@ -105,10 +105,14 @@ func fcntl(fd, command int) (uintptr, error) {
 }
 
 func readSealed(fd int) ([]byte, identity, error) {
+	return readSealedLimit(fd, maxManifest)
+}
+
+func readSealedLimit(fd, limit int) ([]byte, identity, error) {
 	var before, after syscall.Stat_t
 	if fd < 3 || syscall.Fstat(fd, &before) != nil ||
 		before.Mode != syscall.S_IFREG|0600 || before.Uid != 0 ||
-		before.Gid != 0 || before.Nlink != 0 || before.Size <= 0 || before.Size > maxManifest {
+		before.Gid != 0 || before.Nlink != 0 || before.Size <= 0 || before.Size > int64(limit) {
 		return nil, identity{}, errors.New("invalid sealed namespace manifest FD")
 	}
 	if seals, err := fcntl(fd, fGetSeals); err != nil || seals != allSeals {
