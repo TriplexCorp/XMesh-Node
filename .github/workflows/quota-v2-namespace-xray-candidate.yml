@@ -3,7 +3,6 @@ on:
   pull_request:
     paths:
       - '.github/workflows/quota-v2-namespace-xray-candidate.yml'
-      - 'deploy/install-namespace-xray-candidate.sh'
       - 'experiments/xray-dataplane-fence/**'
       - 'experiments/quota-v2-physical-stop/**'
       - 'tests/test_quota_v2_public_tls*'
@@ -14,7 +13,6 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/quota-v2-namespace-xray-candidate.yml'
-      - 'deploy/install-namespace-xray-candidate.sh'
       - 'experiments/xray-dataplane-fence/**'
       - 'experiments/quota-v2-physical-stop/**'
       - 'tests/test_quota_v2_public_tls*'
@@ -40,7 +38,7 @@ jobs:
           go-version: '1.27.4'
           cache: false
       - name: Test exact, non-authorizing namespace artifact manifest
-        run: sudo python3 tests/test_namespace_candidate_artifact.py -v
+        run: sudo python3 -B tests/test_namespace_candidate_artifact.py -v
       - name: Build separate exact upstream patched Xray namespace candidate (never release)
         env:
           EXPECTED_NODE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -69,7 +67,7 @@ jobs:
           host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
           trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
           for stop_mode in expiry revoked; do
-            sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$host_ns" "$stop_mode"
+            sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 -B experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$host_ns" "$stop_mode"
           done
       - name: Independently rebuild the exact tested namespace candidate
         env:
@@ -173,7 +171,7 @@ jobs:
           # Invalid bytes must fail before creating any installation root.
           cp -a "$input" "$RUNNER_TEMP/foreign-candidate"
           printf tampered >> "$RUNNER_TEMP/foreign-candidate/xray"
-          if sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/foreign-candidate"; then
+          if sudo bash experiments/xray-dataplane-fence/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/foreign-candidate"; then
             echo 'Modified candidate unexpectedly installed' >&2
             exit 1
           fi
@@ -189,16 +187,16 @@ jobs:
           manifest["artifactSha256"]=hashlib.sha256((root/"xray").read_bytes()).hexdigest()
           path.write_text(json.dumps(manifest,sort_keys=True,indent=2)+"\n")
           PY
-          if sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/foreign-candidate"; then
+          if sudo bash experiments/xray-dataplane-fence/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/foreign-candidate"; then
             echo 'Consistently modified but unsigned candidate unexpectedly installed' >&2
             exit 1
           fi
           test ! -e "$target"
-          sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$input"
+          sudo bash experiments/xray-dataplane-fence/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$input"
           installed="$target/$GITHUB_SHA/xray"
           test "$(sudo stat -c '%u:%g:%a:%h' "$installed")" = 0:0:755:1
           inode="$(sudo stat -c '%d:%i' "$installed")"
-          sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$input"
+          sudo bash experiments/xray-dataplane-fence/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$input"
           test "$(sudo stat -c '%d:%i' "$installed")" = "$inode"
           test ! -e /usr/local/libexec/xmesh-metered-xray
           test ! -e /var/lib/xmesh-metered-xray
@@ -210,14 +208,14 @@ jobs:
           host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
           trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
           for stop_mode in expiry revoked; do
-            sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$installed" "$host_ns" "$stop_mode" --installed-candidate
+            sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 -B experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$installed" "$host_ns" "$stop_mode" --installed-candidate
           done
           # Repaired or replaced local executable must never be silently
           # accepted; preserve the modified inode and reject reinstallation.
           inode="$(sudo stat -c '%d:%i' "$installed")"
           sudo sh -c 'printf invalid >> "$1"' sh "$installed"
           before="$(sudo sha256sum "$installed")"
-          if sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/namespace-candidate-artifact"; then
+          if sudo bash experiments/xray-dataplane-fence/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/namespace-candidate-artifact"; then
             echo 'Modified installed namespace candidate was replaced' >&2
             exit 1
           fi

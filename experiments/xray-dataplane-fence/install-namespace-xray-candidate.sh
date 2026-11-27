@@ -4,10 +4,10 @@ set -Eeuo pipefail
 umask 077
 [[ "$EUID" == 0 && "$#" == 2 && "$1" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$(uname -s):$(uname -m)" == Linux:x86_64 ]] || exit 2
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 REVISION="$1"
 INPUT="$(realpath -e -- "$2")"
-[[ -d "$INPUT" && "$(git -C "$ROOT" rev-parse HEAD)" == "$REVISION" ]] || exit 2
+[[ -d "$INPUT" && "$(git -c safe.directory="$ROOT" -C "$ROOT" rev-parse HEAD)" == "$REVISION" ]] || exit 2
 # Same independently pinned Sigstore verifier distribution used by the
 # existing metered Xray installer, never an arbitrary PATH executable.
 WORK="$(mktemp -d /tmp/xmesh-namespace-candidate-install.XXXXXXXX)"
