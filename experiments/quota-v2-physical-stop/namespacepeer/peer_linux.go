@@ -43,9 +43,17 @@ type socketRecord struct {
 	Tag    string `json:"tag"`
 }
 
+type lockRecord struct {
+	Device string `json:"device"`
+	Inode  string `json:"inode"`
+	Mode   uint32 `json:"mode"`
+	Tag    string `json:"tag"`
+}
+
 type manifest struct {
 	Aliases              []string       `json:"aliases"`
 	Kind                 string         `json:"kind"`
+	LockFiles            []lockRecord   `json:"lockFiles"`
 	MeterDirectoryDevice string         `json:"meterDirectoryDevice"`
 	MeterDirectoryFD     int            `json:"meterDirectoryFd"`
 	MeterDirectoryInode  string         `json:"meterDirectoryInode"`
@@ -186,7 +194,7 @@ func Open(manifestFD int, expectedRuntime, expectedRoster string) (*Route, error
 	}
 	canonical, err := json.Marshal(r.m)
 	if err != nil || !bytes.Equal(canonical, raw) ||
-		r.m.Kind != "xmesh.quota-v2.namespace-meter-inputs" || r.m.Version != 1 ||
+		r.m.Kind != "xmesh.quota-v2.namespace-meter-inputs" || r.m.Version != 2 || r.m.LockFiles == nil ||
 		r.m.RuntimeID != expectedRuntime || r.m.RosterSHA256 != expectedRoster ||
 		r.m.MeterDirectoryFD < 3 || r.m.MeterDirectoryFD == manifestFD ||
 		len(r.m.Aliases) == 0 || len(r.m.Aliases) > 4096 ||
@@ -227,6 +235,21 @@ func Open(manifestFD int, expectedRuntime, expectedRoster string) (*Route, error
 	if len(r.sockets) != len(tags) {
 		return nil, errors.New("incomplete original socket roster")
 	}
+	// Only the complete exact Xray lock roster, or an explicitly
+	// lockless fixture, is valid. Locks never become dial targets.
+	if len(r.m.LockFiles) != 0 && len(r.m.LockFiles) != len(tags) {
+		return nil, errors.New("incomplete original lock roster")
+	}
+	for i, item := range r.m.LockFiles {
+		if !strings.HasSuffix(item.Tag, ".lock") || !tags[strings.TrimSuffix(item.Tag, ".lock")] ||
+			(i > 0 && r.m.LockFiles[i-1].Tag >= item.Tag) ||
+			(item.Mode != 0600 && item.Mode != 0644) {
+			return nil, errors.New("foreign or unsafe original lock")
+		}
+		if _, err := inode(item.Device, item.Inode); err != nil {
+			return nil, err
+		}
+	}
 	if err := r.check(); err != nil {
 		return nil, err
 	}
@@ -266,12 +289,21 @@ func (r *Route) check() error {
 		return errors.New("original meter mount identity changed")
 	}
 	entries, err := os.ReadDir(r.directoryPath())
-	if err != nil || len(entries) != len(r.sockets) {
-		return errors.New("foreign or absent original meter socket")
+	if err != nil || len(entries) != len(r.sockets)+len(r.m.LockFiles) {
+		return errors.New("foreign or absent original meter socket or lock file")
 	}
-	for _, entry := range entries {
-		if err := r.checkSocket(entry.Name()); err != nil {
+	for tag := range r.sockets {
+		if err := r.checkSocket(tag); err != nil {
 			return err
+		}
+	}
+	for _, lock := range r.m.LockFiles {
+		expected, err := inode(lock.Device, lock.Inode)
+		var info syscall.Stat_t
+		if err != nil || syscall.Lstat(filepath.Join(r.directoryPath(), lock.Tag), &info) != nil ||
+			info.Mode != syscall.S_IFREG|lock.Mode || info.Uid != 0 || info.Gid != 0 ||
+			info.Nlink != 1 || info.Size != 0 || statID(&info) != expected {
+			return errors.New("original meter lock inode changed")
 		}
 	}
 	return nil

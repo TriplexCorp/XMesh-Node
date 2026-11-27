@@ -1,0 +1,116 @@
+// This file is injected ONLY into the separate disposable candidate tree.
+// It is excluded from normal production Xray source/attestation workflows.
+package xmeshdrain
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/xtls/xray-core/app/xmeshdrain/namespacepeer"
+	"github.com/xtls/xray-core/common/protocol"
+	"github.com/xtls/xray-core/common/session"
+)
+
+type namespaceCandidateInputs struct {
+	listeners *namespacepeer.ListenerSet
+	route *namespacepeer.Route
+	configPath string
+}
+
+var namespaceCandidate *namespaceCandidateInputs
+
+func NamespaceCandidateActive() bool { return namespaceCandidate != nil }
+
+func NamespaceCandidateConfigPath() string {
+	if namespaceCandidate == nil { return "" }
+	return namespaceCandidate.configPath
+}
+
+func NamespaceCandidateConfigBytes() ([]byte,error) {
+	if namespaceCandidate == nil { return nil,errors.New("missing namespace candidate") }
+	return namespaceCandidate.listeners.ConfigBytes()
+}
+
+func namespaceCandidateFD(name string) int {
+	value, err := strconv.Atoi(os.Getenv(name))
+	if err != nil || value < 3 { panic("invalid independent candidate descriptor") }
+	return value
+}
+
+func init() {
+	if os.Getenv("XMESH_NAMESPACE_INGRESS_DIAGNOSTIC") == "" { return }
+	if os.Getenv("XMESH_NAMESPACE_INGRESS_DIAGNOSTIC") != "1" ||
+		os.Getpid() != 1 || os.Getuid() != 0 || os.Getgid() != 0 {
+		panic("namespace ingress candidate requires isolated capless PID1")
+	}
+	for _, key := range []string{
+		"XMESH_QUOTA_V2_RUNTIME_ROLE", "XMESH_QUOTA_INGRESS_STATE",
+		"XMESH_EXPERIMENTAL_DRAIN", "XMESH_EXPERIMENTAL_SIGNED_CAP_BINDING",
+		"XMESH_QUOTA_PRIVATE_VLESS", "XMESH_QUOTA_INGRESS_STAGING",
+		"XMESH_QUOTA_V2_STAGING_RUNTIME", "GITHUB_ACTIONS",
+	} {
+		if os.Getenv(key) != "" { panic("namespace diagnostic cannot use old production/staging role") }
+	}
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil { panic(err) }
+	fields := make(map[string]string)
+	for _, line := range strings.Split(string(status), "\n") {
+		k,v,ok := strings.Cut(line,":")
+		if ok { fields[k] = strings.TrimSpace(v) }
+	}
+	if fields["NoNewPrivs"] != "1" || fields["Seccomp"] != "2" {
+		panic("namespace candidate missing irreversible kernel filter")
+	}
+	for _, key := range []string{"CapInh","CapPrm","CapEff","CapBnd","CapAmb"} {
+		if fields[key] == "" || strings.Trim(fields[key],"0") != "" {
+			panic("namespace candidate has nonzero capability")
+		}
+	}
+	configFD := namespaceCandidateFD("XMESH_NAMESPACE_CONFIG_FD")
+	listenerFD := namespaceCandidateFD("XMESH_NAMESPACE_LISTENER_MANIFEST_FD")
+	routeFD := namespaceCandidateFD("XMESH_NAMESPACE_ROUTE_MANIFEST_FD")
+	runtimeID := os.Getenv("XMESH_NAMESPACE_RUNTIME_ID")
+	roster := os.Getenv("XMESH_NAMESPACE_ROSTER_SHA256")
+	listeners, err := namespacepeer.OpenListeners(listenerFD, configFD, runtimeID, roster,
+		os.Getenv("XMESH_NAMESPACE_AUTHORITY_SHA256"), os.Getenv("XMESH_NAMESPACE_CONFIG_SHA256"))
+	if err != nil { panic(err) }
+	route, err := namespacepeer.Open(routeFD, runtimeID, roster)
+	if err != nil { panic(err) }
+	// Fixture-only synchronization, NOT a production authority gate.
+	// The supervisor proves the actual original FD ownership, transfers
+	// exclusively and arms the real independent deadman before sending it.
+	fmt.Fprintln(os.Stdout, "xmesh_namespace_candidate_prebound")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil || line != "fixture_namespace_xray_transfer\n" {
+		panic("namespace candidate missing exclusive-transfer synchronization")
+	}
+	namespaceCandidate = &namespaceCandidateInputs{listeners, route, fmt.Sprintf("/proc/self/fd/%d",configFD)}
+}
+
+func AdoptNamespaceCandidateListener(address string,port int) (net.Listener,error) {
+	if namespaceCandidate == nil { return nil,errors.New("missing namespace candidate") }
+	listener, err := namespaceCandidate.listeners.AdoptEndpoint(address,port)
+	if err != nil { return nil,err }
+	raw, err := listener.SyscallConn()
+	if err != nil { listener.Close(); return nil,err }
+	if err := raw.Control(func(fd uintptr) {
+		fmt.Fprintf(os.Stdout,"xmesh_namespace_candidate_listener:%d:%d\n",port,fd)
+	}); err != nil { listener.Close(); return nil,err }
+	return listener,nil
+}
+
+func dialNamespaceCandidateMeter(ctx context.Context,user *protocol.MemoryUser) (net.Conn,error) {
+	ib := session.InboundFromContext(ctx)
+	if namespaceCandidate == nil || ib == nil || ib.User == nil ||
+		user == nil || user.Account == nil || ib.User.Account == nil ||
+		ib.User.Email != user.Email || !ib.User.Account.Equals(user.Account) {
+		return nil,errors.New("namespace route differs from authenticated VLESS identity")
+	}
+	return namespaceCandidate.route.Dial(ctx,user.Email,ib.Tag)
+}
