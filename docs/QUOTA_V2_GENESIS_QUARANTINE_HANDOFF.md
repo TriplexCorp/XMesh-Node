@@ -1178,3 +1178,32 @@ rejection, repetition, disconnect, deadline and the hosted guard.
 The enrolled transport is a fixture in those tests; they do not yet
 prove the real Nexus SQL stop witness across the private boundary or
 serve a public TLS listener. No installer or service uses this module.
+
+### Exact read-only meter route across Docker mount namespaces
+
+The first two-installed-Node native TLS rehearsal discovered the kernel
+rejects `open_tree(OPEN_TREE_CLONE)` with EINVAL when the retained meter
+directory FD belongs to a different mount namespace, even as root. The
+original meter's Unix sockets live on its own Docker /dev/shm, unlike the
+same-mount local fixture. The signed route capsule still independently pins
+the original actual pidfs object and source inode.
+
+For a foreign mount only, the dormant route bundle uses a single-use
+child that closes all unrelated inherited descriptors, enters the exact
+already-pinned meter pidfd's mount namespace, clones the already-open meter
+directory (no pathname resolution or bind mount), applies the same
+read-only/nosuid/nodev/noexec attributes and transfers exactly one FD over
+a credential-checked connected seqpacket pair. The child exits before
+acceptance. In its unchanged private mount namespace the supervisor
+independently verifies the actual source/view inode, distinct mount ID,
+kernel VFS flags, CLOEXEC, original live pidfd and both mount namespace
+identities. Only the detached view and sealed manifest are passed to the
+native child; it receives neither a pidfd nor any namespace descriptor.
+No host mount is modified and no weaker fallback, route, public port or
+production authorization is introduced.
+
+A real separate tmpfs mount namespace test requires direct open_tree to
+fail, the exact detached read-only view to succeed, actual Unix stream
+peer authentication, rejection of a wrong pidfd, foreign source and dead
+meter, and an unchanged supervisor mount namespace. The local structural
+variant cannot replace the mandatory hosted real-peer test.
