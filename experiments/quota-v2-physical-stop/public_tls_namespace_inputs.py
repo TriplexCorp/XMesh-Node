@@ -51,7 +51,7 @@ class NamespaceTlsInputs:
 
     def _forbidden_fds(self):
         return tuple(fd for fd in (*self._original._certificates._fds,
-                                   *self._original._routes._fds, self._root_fd)
+                                   *self._original._routes._fds)
                      if fd not in self._fixed)
 
     def _check_pins(self):
@@ -87,6 +87,26 @@ class NamespaceTlsInputs:
         if child_inputs.verify(child, expected=self._fixed, forbidden=self._forbidden,
                 route_fd=self._route_fd, pinned=self._identity) is not None:
             raise ValueError("native child input proof cannot authorize ingress")
+        # pivot_root legitimately removes oldroot from the shared tmpfs,
+        # changing its nlink/size. Forbid any FD to its exact original
+        # dev/inode independently, rather than re-anchoring mutable
+        # directory metadata after the child has started.
+        started = time.monotonic_ns()
+        with os.scandir(f"/proc/{child.pid}/fd") as fds:
+            for count, item in enumerate(fds, 1):
+                if (count > child_inputs.MAX_FDS or not item.name.isascii()
+                        or not item.name.isdecimal()
+                        or not 0 <= time.monotonic_ns()-started < child_inputs.MAX_PROOF_NS):
+                    raise ValueError("native child root FD scan exceeded bound")
+                try:
+                    info = os.stat(item.path)
+                except FileNotFoundError:
+                    continue
+                if (info.st_dev,info.st_ino) == self._root_token.root:
+                    raise ValueError("native child inherited supervisor root FD")
+        if (child.poll() is not None
+                or namespace.capture_root(self._root_fd) != self._root_token):
+            raise ValueError("native child or original root changed")
 
     def _readback(self, child, entries, *, listening, released):
         started = time.monotonic_ns()
