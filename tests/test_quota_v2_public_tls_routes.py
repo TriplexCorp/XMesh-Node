@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Real kernel private route/peer checks; disposable, no public listener."""
 import errno
+import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,6 +17,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments/quota-v2-physical-stop"))
 import public_tls_routes as routes
+import public_tls_namespace_route as namespace_route
 import public_tls_cap_watch as caps
 import test_quota_v2_first_cap_handoff as fixture
 
@@ -132,6 +136,73 @@ class FirstGenesisRouteStructureTests(RouteFixture):
         patch = mock.patch.object(routes.FirstGenesisRoutes, "_check_meter", measure)
         patch.start()
         self.addCleanup(patch.stop)
+
+    def test_namespace_manifest_sealed_and_view_exact_with_actual_inode_structure(self):
+        # The structural-only test uses socket-typed INODES, not real
+        # listening peers. The independent live test below is mandatory.
+        for tag in ("vless-main", "vless-cdn"):
+            os.mknod(self.meter / tag, stat.S_IFSOCK | 0o600)
+
+        def measure(capsule, deadline):
+            deadline()
+            capsule._check_liveness()
+            for tag in capsule._tags:
+                evidence = routes._socket_identity(capsule._meter_fd, tag)
+                if capsule._socket_ids.get(tag, evidence) != evidence:
+                    raise ValueError("original socket changed")
+                capsule._socket_ids[tag] = evidence
+            deadline()
+
+        with mock.patch.object(routes.FirstGenesisRoutes, "_check_meter", measure):
+            with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
+                with namespace_route.NamespaceMeterInputs(capsule) as bundle:
+                    view, manifest = bundle.child_fds
+                    self.assertIsNone(bundle.ensure_current())
+                    self.assertNotIn(capsule.directory_fd, bundle.child_fds)
+                    self.assertNotIn(capsule._pidfd, bundle.child_fds)
+                    data = os.pread(manifest, namespace_route.MAX_MANIFEST_BYTES, 0)
+                    value = json.loads(data)
+                    self.assertEqual(value["aliases"], ["xmesh-u100--vless-cdn", "xmesh-u100--vless-main"])
+                    self.assertEqual(value["runtimeId"], self.runtime)
+                    self.assertEqual(value["meterDirectoryFd"], view)
+                    self.assertEqual(value["peerInode"], str(bundle._peer.inode))
+                    self.assertEqual(value["sockets"], [
+                        {"tag": tag, "device": str(capsule._socket_ids[tag][0]),
+                         "inode": str(capsule._socket_ids[tag][1])}
+                        for tag in sorted(capsule._tags)])
+                    self.assertNotIn(b"/proc/", data)
+                    self.assertNotIn(b"pidfd", data)
+                    self.assertEqual(os.fstat(view).st_ino, os.stat("..", dir_fd=view).st_ino)
+                    self.assertEqual(fcntl.fcntl(manifest, fcntl.F_GET_SEALS),
+                                     namespace_route.certificates.SEALS)
+                    with self.assertRaises(OSError) as failure:
+                        os.pwrite(manifest, b"x", 0)
+                    self.assertEqual(failure.exception.errno, errno.EPERM)
+                    with self.assertRaises(OSError) as failure:
+                        os.unlink("vless-main", dir_fd=view)
+                    self.assertEqual(failure.exception.errno, errno.EROFS)
+                    (self.meter/"foreign").write_text("unexpected")
+                    with self.assertRaisesRegex(ValueError, "foreign or changed sockets"):
+                        bundle.ensure_current()
+                for fd in (view, manifest):
+                    with self.assertRaises(OSError):
+                        os.fstat(fd)
+                (self.meter/"foreign").unlink()
+                with namespace_route.NamespaceMeterInputs(capsule) as bundle:
+                    view, manifest = bundle.child_fds
+                    replacement = namespace_route.certificates._sealed_bytes(
+                        "foreign-identical-manifest", os.pread(manifest, 1<<20, 0))
+                    try:
+                        os.dup2(replacement, manifest, inheritable=False)
+                        with self.assertRaisesRegex(ValueError, "manifest changed"):
+                            bundle.ensure_current()
+                    finally:
+                        os.close(replacement)
+                with namespace_route.NamespaceMeterInputs(capsule) as bundle:
+                    view, _ = bundle.child_fds
+                    os.dup2(capsule._meter_fd, view, inheritable=False)
+                    with self.assertRaisesRegex(ValueError, "pinned read-only mount"):
+                        bundle.ensure_current()
 
     def test_inherited_fd_pins_original_directory_even_after_path_replacement(self):
         with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
@@ -360,6 +431,81 @@ func main() {
             self.assertEqual(read_child(), self.target)
             with self.assertRaisesRegex(ValueError, "changed from signed original"):
                 capsule.ensure_current()
+
+    def test_namespace_view_and_sealed_manifest_authenticate_actual_invisible_peer(self):
+        # The child imports only fixture code from root-private temp;
+        # no host-proc route, original meter pidfd or writable FD passed.
+        helper = self.root.parent / "public_tls_peer_identity.py"
+        shutil.copyfile(ROOT / "experiments/quota-v2-physical-stop/public_tls_peer_identity.py", helper)
+        helper.chmod(0o600)
+        inner = r"""
+import errno, fcntl, json, os, socket, stat, struct, sys
+sys.path.insert(0, sys.argv[1])
+import public_tls_peer_identity as proof
+view, manifest, old_pid = map(int, sys.argv[2:5])
+verdict = sys.argv[5]
+assert os.getpid() == 1 and os.getuid() == os.getgid() == 0
+assert not os.path.exists(f"/proc/{old_pid}")
+status = dict(line.split(":", 1) for line in open("/proc/self/status") if ":" in line)
+assert status["NoNewPrivs"].strip() == "1"
+for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+    assert int(status[key].strip(), 16) == 0
+flags = os.ST_RDONLY | os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC
+assert os.fstatvfs(view).f_flag & flags == flags
+assert os.fstat(view).st_ino == os.stat("..", dir_fd=view).st_ino
+assert fcntl.fcntl(manifest, fcntl.F_GET_SEALS) == 15
+value = json.loads(os.pread(manifest, 1<<20, 0))
+assert value["meterDirectoryFd"] == view
+assert os.fstat(view).st_dev == int(value["meterDirectoryDevice"])
+assert os.fstat(view).st_ino == int(value["meterDirectoryInode"])
+assert value["aliases"] == ["xmesh-u100--vless-cdn", "xmesh-u100--vless-main"]
+token = proof.PidfdIdentity(int(value["peerDevice"]), int(value["peerInode"]))
+original = next(item for item in value["sockets"] if item["tag"] == "vless-main")
+actual = os.stat("vless-main", dir_fd=view, follow_symlinks=False)
+assert ((actual.st_dev, actual.st_ino) ==
+        (int(original["device"]), int(original["inode"]))) == (verdict == "accept")
+for name in os.listdir("/proc/self/fd"):
+    try:
+        assert proof._filesystem_magic(int(name)) != proof.PID_FS_MAGIC
+    except OSError as exc:
+        assert exc.errno == errno.EBADF
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+    conn.connect(f"/proc/self/fd/{view}/vless-main")
+    cred = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    assert cred == (0, 0, 0)
+    if verdict == "accept":
+        assert proof.verify_connected_peer(conn, token) is None
+    else:
+        try:
+            proof.verify_connected_peer(conn, token)
+        except ValueError as exc:
+            assert str(exc) == "Unix peer is not the original pidfs meter object"
+        else:
+            raise AssertionError("foreign same-UID peer accepted")
+print("namespace_manifest_" + verdict)
+"""
+        with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
+            with namespace_route.NamespaceMeterInputs(capsule) as bundle:
+                view, manifest = bundle.child_fds
+                def check(verdict):
+                    output = subprocess.check_output([
+                        "unshare", "--pid", "--fork", "--kill-child=SIGKILL", "--mount-proc",
+                        "setpriv", "--no-new-privs", "--bounding-set=-all",
+                        "--inh-caps=-all", "--ambient-caps=-all", sys.executable,
+                        "-I", "-B", "-c", inner, str(helper.parent), str(view), str(manifest),
+                        str(self.child.pid), verdict,
+                    ], pass_fds=bundle.child_fds, timeout=8)
+                    self.assertEqual(output.strip(), ("namespace_manifest_" + verdict).encode())
+                check("accept")
+                target = self.meter / "vless-main"
+                target.unlink()
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as other:
+                    other.bind(str(target))
+                    target.chmod(0o600)
+                    other.listen(1)
+                    check("reject")
+                    with self.assertRaisesRegex(ValueError, "socket was replaced"):
+                        bundle.ensure_current()
 
     def test_actual_kernel_peer_and_cleanup(self):
         with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
