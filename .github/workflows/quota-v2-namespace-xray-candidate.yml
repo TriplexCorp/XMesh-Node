@@ -1,0 +1,50 @@
+name: Quota V2 namespace Xray TLS transport (disposable)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/quota-v2-namespace-xray-candidate.yml'
+      - 'experiments/xray-dataplane-fence/apply-namespace-ingress-candidate.py'
+      - 'experiments/xray-dataplane-fence/namespace_ingress_candidate.go.txt'
+      - 'experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py'
+      - 'experiments/quota-v2-physical-stop/namespacepeer/**'
+      - 'experiments/quota-v2-physical-stop/public_tls_*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  actual-isolated-xray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Build separate exact upstream patched Xray namespace candidate (never release)
+        run: |
+          set -euo pipefail
+          python3 -m py_compile experiments/xray-dataplane-fence/apply-namespace-ingress-candidate.py experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py
+          source="$RUNNER_TEMP/xray-namespace-source"
+          git init "$source"
+          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+          python3 experiments/xray-dataplane-fence/apply-namespace-ingress-candidate.py "$source"
+          binary="$RUNNER_TEMP/xray-namespace-candidate"
+          (cd "$source" && CGO_ENABLED=0 go build -trimpath -o "$binary" ./main)
+          if readelf -l "$binary" | grep -q INTERP; then
+            echo "candidate must execute statically from sealed FD in empty private root" >&2
+            exit 1
+          fi
+          sha256sum "$binary"
+          echo "XMESH_NAMESPACE_CANDIDATE_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Real signed MAIN CDN VLESS TLS through capless pivot-root Xray and original signed meter
+        run: |
+          set -euo pipefail
+          host_ns="$(readlink /proc/self/ns/net)"
+          host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+          trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$host_ns"

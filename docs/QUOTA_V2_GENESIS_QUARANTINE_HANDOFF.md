@@ -1009,3 +1009,33 @@ two inherited prebound sockets and config; wrong digest, namespace,
 scope, FD and same-content replacement after capture are refused. No
 socket listens during this diagnostic. Real Xray integration and
 complete installed authority/launcher qualification remain separate.
+
+### Separate actual Xray namespace frontend build (disposable diagnostic)
+
+The candidate-only injector `apply-namespace-ingress-candidate.py` runs
+the existing exact upstream patch in a clean disposable checkout, then
+adds the namespace-native meter dialer, sealed listener set adapter, and
+narrow Xray TCP TLS transport/config-loader hooks. It is NOT invoked by
+the normal production Xray build or signed artifact workflow. The
+fixture-only candidate initialization refuses old runtime and staging
+roles, requires actual capless namespace PID1/no-new-privs/seccomp and
+independently expected runtime/roster/authority/config hashes, and has
+an explicit fixture-only ownership synchronization before listen.
+It never uses the ordinary bind or host-PID route path in candidate mode.
+
+The dedicated mandatory hosted diagnostic builds real static Xray from
+the exact upstream commit. In a private loopback-only runner network
+namespace, an independent real metered Xray installs real Ed25519 signed
+MAIN/CDN cap admissions, and signed original routes/certificates/config
+are frozen into the exact namespace-specific inputs. A separate direct
+PID1 frontend pivots to a private readonly tmpfs plus its own procfs,
+drops all capabilities, installs the kernel network fence, and execs
+the exact sealed Xray memfd. The supervisor checks kernel namespace,
+inherited FD and executable identities, transfers exact prebound TCP
+sockets exclusively, then gates fixture listen under the real deadman.
+A verified real TLS 1.3 VLESS client must obtain separate actual 16KiB
+echoes on MAIN/CDN through the original authenticated Unix meter, with
+matching real meter counters. Deadman expiry must physically close both
+ports while the parent lives. The fixture signs only disposable authority
+and has no live Nexus issuer, installation or deployment. No ordinary
+artifact, release pin, production flag, or public network may change.
