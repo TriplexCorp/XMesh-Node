@@ -121,6 +121,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_wal_watch.py tests/test_quota_v2_public_tls_wal_watch.py
           python3 tests/test_quota_v2_public_tls_wal_watch.py -v
+      - name: First-Genesis retirement proves original pidfd exit and immutable fully fenced WAL
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_meter_retirement.py tests/test_quota_v2_public_tls_meter_retirement.py
+          python3 tests/test_quota_v2_public_tls_meter_retirement.py -v
       - name: First-Genesis private route capsule pins original kernel meter and Go ingress path
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_route_mount.py experiments/quota-v2-physical-stop/public_tls_routes.py experiments/quota-v2-physical-stop/public_tls_namespace_route.py tests/test_quota_v2_public_tls_routes.py
