@@ -773,3 +773,39 @@ the host proc PID path, authenticate before forwarding any application
 bytes, and demonstrate its actual namespace, FD, seccomp and stop-chain
 requirements on the independently qualified executable. Do not weaken
 the original dialer's PID check or make unsupported kernels eligible.
+
+### Exact pre-bound TCP identity and capless private-network child (dormant)
+
+The public TLS compiler may eventually require a privileged port such
+as 443. Reintroducing CAP_NET_BIND_SERVICE into the serving Xray or
+changing the host's privileged-port sysctl is not acceptable.
+`public_tls_bound_listener` is a read-only identity primitive: it pins an
+already-bound **not listening** exclusive IPv4 TCP descriptor's exact
+signed address/port, kernel device/inode, socket cookie and network
+namespace cookie. It independently requires an unconnected stream with
+no reuse, device override, freebind or transparent socket option.
+The future owned child must inherit the same object, never an alternate
+endpoint or a connected stream; the same identity and the expected
+listen phase can subsequently be rechecked. This module never opens
+or binds a socket, listens, accepts, or grants authority itself.
+
+The required hosted test uses a fresh disposable network namespace
+containing only loopback, verified distinct from PID1's host network
+namespace. It sets the privileged-port floor to 1024 **inside that test
+namespace only** and requires a real capless process to receive EACCES
+on an independent bind of port 443. The owner then binds loopback 443
+but does not listen. A separate capless PID/network namespace inherits
+only the exact bound descriptor, proves the socket belongs to the
+ancestor's isolated namespace and its own fresh socket does not, and
+waits for explicit fixture synchronization. Connection before that
+marker must be refused; afterwards the capless child must accept and
+echo a real loopback TCP connection over the original descriptor.
+The workflow independently checks the host sysctl stays unchanged.
+No traffic or listen bind is made on the host's external network.
+
+This is **not** Xray inherited-listener support, a launcher, seccomp
+policy, positive signed authority, public listener, or production
+qualification. The future executable must use exact signed listener
+FDs, prevent independently created public/outbound sockets, and stop
+and reap before releasing these identities. No installed worker,
+release version or metered Xray artifact changes here.
