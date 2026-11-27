@@ -840,3 +840,31 @@ before creating any mount. No installed launcher, association to the
 qualified Xray, seccomp/cgroup proof, authority issuance, public bind,
 or production flag changes are supplied by this primitive. Those
 independent gates are still required.
+
+### Namespace-native immutable meter input bundle (dormant)
+
+The original `FirstGenesisRoutes` is intentionally a supervisor-side
+readback of installed route symlinks, including host PID paths. A child
+inside its own PID namespace cannot use these paths. The dormant
+`public_tls_namespace_route.NamespaceMeterInputs` borrows that exact
+live original route capsule, including its still-pinned meter pidfd,
+but prepares only two child inputs: a detached read-only/nosuid/nodev/
+noexec view of the original meter socket directory, and a sealed
+anonymous manifest of the exact authenticated alias roster, runtime,
+roster SHA, directory/mount identity and kernel pidfs device/inode.
+The manifest has neither host PID nor host-proc path and the original
+pidfd and writable directory are not passed. Unsigned aliases, an extra
+socket/file, changed original evidence, writable view substitution or
+an identical-content replacement manifest fail closed. The detached
+view's parent resolves to its own root, not an enclosing directory.
+The actual capless private PID namespace test connects to the exact
+inherited meter directory, verifies the manifest and root peer pidfs
+identity, then rejects a replaced same-UID invisible Unix listener.
+The original route capsule must remain live until child stop/reap.
+
+This does **not** implement the Go dialer yet, change signed Xray,
+integrate the inherited input bundle into a launcher, grant authority
+or publish a port. Only an independently qualified future dialer may
+consume these inputs, checking the authenticated alias/tag before any
+application bytes, and the actual kernel peer for every connection.
+No existing installed service or production flag changes.
