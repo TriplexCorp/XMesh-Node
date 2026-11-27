@@ -56,7 +56,8 @@ class NamespaceMeterInputs:
             if original.ensure_current() is not None:
                 raise ValueError("original route evidence cannot authorize ingress")
             self._peer = peers.capture_original(original._pidfd, original._pid)
-            self._view, self._mount = mounts.readonly_view(original._meter_fd)
+            self._view, self._mount = mounts.readonly_meter_view(
+                original._meter_fd, original._pidfd, original._pid)
             names = set(os.listdir(self._view))
             lock_names = {tag + ".lock" for tag in original._tags}
             # Standalone lockless kernel fixtures remain valid. Real Xray

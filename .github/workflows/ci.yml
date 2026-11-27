@@ -125,6 +125,7 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_route_mount.py experiments/quota-v2-physical-stop/public_tls_routes.py experiments/quota-v2-physical-stop/public_tls_namespace_route.py tests/test_quota_v2_public_tls_routes.py
           sudo env PATH="$PATH" python3 tests/test_quota_v2_public_tls_routes.py -v
+          sudo env PATH="$PATH" python3 -B tests/test_quota_v2_public_tls_foreign_mount.py -v
       - name: Actual capless private PID namespace proves original Unix meter by pidfs identity
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_peer_identity.py tests/test_quota_v2_public_tls_peer_identity.py
