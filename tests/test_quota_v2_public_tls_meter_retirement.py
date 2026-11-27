@@ -6,6 +6,7 @@ No positive issuer, terminal byte claim or service is exercised here.
 """
 from contextlib import ExitStack
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -160,6 +161,71 @@ class RetirementTests(unittest.TestCase):
         self.assertFalse(result["canResume"])
         self.assertEqual(result["refundableBytes"], 0)
         self.assertEqual(proof.verify_exited(), result)
+
+    def test_archive_only_after_real_exit_preserves_exact_signed_response(self):
+        with tempfile.TemporaryDirectory(prefix="xmesh-retirement-archive-") as folder:
+            with mock.patch.object(retirement, "RECORD_DIRECTORY", Path(folder)):
+                proof = self.fenced()
+                with self.assertRaisesRegex(ValueError, "pidfd has not exited"):
+                    proof.verify_exited(retain=True)
+                self.assertFalse(list(Path(folder).iterdir()))
+                self.stop_child()
+                published = proof.verify_exited(retain=True)
+                path = Path(folder) / retirement._record_name(self.runtime)
+                raw = path.read_bytes()
+                record = json.loads(raw)
+                self.assertEqual(raw, retirement.wal.observed.canonical(record))
+                self.assertEqual(published["archiveSha256"], hashlib.sha256(raw).hexdigest())
+                self.assertEqual(record["result"], published["result"])
+                evidence = record["walReadback"]
+                signed = evidence["signedResponse"].encode()
+                self.assertEqual(hashlib.sha256(signed).hexdigest(),
+                                 record["result"]["signedWalReadbackSha256"])
+                # Independent signature verification at captured historical
+                # receive time, not a present-time freshness assertion.
+                watch._verify(signed, evidence["request"], self.roster.pinned,
+                              proof._snapshot, evidence["receivedAtMs"])
+                # Altering signed bytes cannot survive signature verification.
+                altered = json.loads(signed)
+                envelope = json.loads(altered["signedEnvelope"])
+                envelope["signature"] = "0"*128
+                altered["signedEnvelope"] = retirement.wal.observed.canonical(envelope).decode()+"\n"
+                with self.assertRaises(Exception):
+                    watch._verify(retirement.wal.observed.canonical(altered),
+                                  evidence["request"], self.roster.pinned,
+                                  proof._snapshot, evidence["receivedAtMs"])
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.stat().st_nlink, 1)
+                self.assertEqual(proof.verify_exited(retain=True), published)
+                changed = dict(record, schemaVersion=2)
+                with self.assertRaisesRegex(ValueError, "conflicting retirement"):
+                    retirement._retain_record(changed)
+                self.assertEqual(path.read_bytes(), raw)
+
+    def test_archive_rejects_symlink_unsafe_mode_and_hardlink(self):
+        with tempfile.TemporaryDirectory(prefix="xmesh-retirement-archive-") as folder:
+            root = Path(folder)
+            with mock.patch.object(retirement, "RECORD_DIRECTORY", root):
+                proof = self.fenced()
+                self.stop_child()
+                published = proof.verify_exited(retain=True)
+                path = root / retirement._record_name(self.runtime)
+                raw = path.read_bytes()
+                old = root / "other"
+                path.rename(old)
+                path.symlink_to(old)
+                with self.assertRaises(OSError):
+                    proof.verify_exited(retain=True)
+                path.unlink()
+                os.link(old, path)
+                with self.assertRaisesRegex(ValueError, "invalid original WAL file"):
+                    proof.verify_exited(retain=True)
+                old.unlink()
+                path.chmod(0o644)
+                with self.assertRaisesRegex(ValueError, "invalid original WAL file"):
+                    proof.verify_exited(retain=True)
+                self.assertEqual(path.read_bytes(), raw)
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), published["archiveSha256"])
 
     def test_false_Docker_stopped_metadata_cannot_replace_real_pidfd(self):
         proof = self.fenced()

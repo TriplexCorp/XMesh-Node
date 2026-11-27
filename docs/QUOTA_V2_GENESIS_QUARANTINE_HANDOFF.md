@@ -600,7 +600,16 @@ released lock without creating a file, and identical independently verified
 denial/WAL digests. This is local historical evidence only: not a re-start
 permit, proof of delivery, complete pre-bootstrap history, terminal
 settlement or a refund. No installer, persistent service or public issuer
-uses it. Real installed two-Node retirement still requires hosted qualification.
+uses it. The hosted installed two-Node rehearsal has verified physical meter
+retirement. The follow-up archive retains the exact original signed response,
+challenge/request, captured receipt time and retirement summary in one
+root-private fsynced no-replace file keyed by original runtime identity. A
+conflicting replay, symlink or unsafe archive inode fails closed. The same
+lifetime lock remains acquired through archive publication and re-audit.
+The archive does **not** sign local pidfd/fence observations with the enrolled
+Node key; only the embedded Nexus WAL response is signed. Historical
+re-verification proves that response, not present liveness, delivery or a
+refund; off-host qualification is still required.
 
 ## Sealed TLS material before any future public spawn
 

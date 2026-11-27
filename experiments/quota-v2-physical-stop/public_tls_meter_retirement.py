@@ -16,6 +16,7 @@ import hashlib
 import os
 from pathlib import Path
 import select
+import secrets
 import stat
 import time
 import uuid
@@ -28,6 +29,78 @@ journal = wal.journal
 DIRECTORY = Path("/var/lib/xmesh-first-meter/runtime/ledger")
 FENCE_NAMESPACE = uuid.UUID("74df852d-a5a6-47d8-bac9-55f84d9b102a")
 MAX_RETIRE_NS = 30_000_000_000
+RECORD_DIRECTORY = Path("/opt/xmesh-ci-namespace-proof")
+MAX_RECORD = 64 << 10
+
+
+def _record_name(runtime):
+    if not wal._hex(runtime, 64):
+        raise ValueError("invalid archived runtime identity")
+    return f"retirement-{runtime}.json"
+
+
+def _retain_record(record):
+    """No-replace fsynced diagnostic archive, NOT a signed Node attestation.
+
+    Root can still fabricate local observations. Only the embedded Nexus
+    witness is cryptographically authentic; nothing here may authorize a
+    successor or serve as a terminal checkpoint.
+    """
+    _require_disposable()
+    raw = wal.observed.canonical(record)
+    if not 0 < len(raw) <= MAX_RECORD:
+        raise ValueError("retirement archive exceeds bound")
+    target = _record_name(record["result"]["runtimeId"])
+    fd = journal._validate_directory(RECORD_DIRECTORY)
+    tmp = None
+    try:
+        anchor = _directory_identity(fd)
+
+        def check_directory():
+            named = os.stat(RECORD_DIRECTORY, follow_symlinks=False)
+            if (not stat.S_ISDIR(named.st_mode)
+                    or (named.st_dev, named.st_ino) != anchor
+                    or _directory_identity(fd) != anchor):
+                raise ValueError("retirement archive directory changed")
+
+        def verify_existing():
+            try:
+                digest = _file_hash(fd, target, MAX_RECORD)
+            except FileNotFoundError:
+                return False
+            if digest != hashlib.sha256(raw).hexdigest():
+                raise ValueError("conflicting retirement record; cannot overwrite")
+            return True
+
+        check_directory()
+        if not verify_existing():
+            candidate = ".retirement-" + secrets.token_hex(16)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+            output_fd = os.open(candidate, flags, 0o600, dir_fd=fd)
+            tmp = candidate
+            with os.fdopen(output_fd, "wb") as output:
+                output.write(raw)
+                output.flush()
+                os.fsync(output.fileno())
+            check_directory()
+            try:
+                os.link(tmp, target, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            except FileExistsError:
+                # Only an exact replay under the same incarnation is accepted.
+                pass
+            os.unlink(tmp, dir_fd=fd)
+            tmp = None
+            if not verify_existing():
+                raise ValueError("retirement archive was not installed")
+        os.fsync(fd)
+        check_directory()
+        if not verify_existing():
+            raise ValueError("retirement archive disappeared")
+        return hashlib.sha256(raw).hexdigest()
+    finally:
+        if tmp is not None:
+            os.unlink(tmp, dir_fd=fd)
+        os.close(fd)
 
 
 def _require_disposable():
@@ -184,7 +257,7 @@ class FirstGenesisRetirement:
                 if not 0 <= time.monotonic_ns() - readback_start < watch.MAX_CHECK_NS:
                     raise ValueError("first-Genesis WAL readback exceeded time budget")
 
-            self._snapshot, self._witness_sha = watch._checked_evidence(
+            self._snapshot, self._witness = watch._checked_evidence(
                 roster, user, measured, os.fspath(DIRECTORY), remeasure, readback_deadline)
             if self._snapshot["identity"] != self._identity:
                 raise ValueError("WAL witness used another directory")
@@ -284,7 +357,7 @@ class FirstGenesisRetirement:
         self._live()
         self._prestop = evidence
 
-    def verify_exited(self):
+    def verify_exited(self, *, retain=False):
         """Observe physical exit; do NOT interpret charged bytes as delivery."""
         if self._prestop is None or self._pidfd is None or not _poll_exit(self._pidfd):
             raise ValueError("original meter pidfd has not exited after durable full-roster denial")
@@ -295,11 +368,12 @@ class FirstGenesisRetirement:
             self._bound(False)
             if not _poll_exit(self._pidfd):
                 raise ValueError("original meter pidfd exit could not be confirmed")
-            return {
+            result = {
                 "kind": "xmesh.quota-v2.nonfinal-first-meter-retirement",
                 "runtimeId": self._measured[3], "containerId": self._measured[0],
                 "startedAt": self._measured[1],
-                "signedWalReadbackSha256": self._witness_sha,
+                "signedWalReadbackSha256": hashlib.sha256(
+                    self._witness["signedResponse"].encode("utf-8")).hexdigest(),
                 "inventorySha256": self._snapshot["sha256"],
                 "committedChargeHeadsSha256": self._snapshot["chargeHeadsSha256"],
                 "durableUserDenials": dict(self._prestop),
@@ -309,6 +383,23 @@ class FirstGenesisRetirement:
                 "settlementEligible": False,
                 "canResume": False, "refundableBytes": 0,
             }
+            if not retain:
+                return result
+            # Hold the exact released lifetime lock across publication. The
+            # original kernel witness is checked again before reporting success.
+            record = {
+                "schemaVersion": 1,
+                "kind": "xmesh.quota-v2.historical-retirement-archive",
+                "result": result,
+                "walReadback": self._witness,
+            }
+            digest = _retain_record(record)
+            if self._ledger(docker) != self._prestop:
+                raise ValueError("retirement ledger changed during archival")
+            self._bound(False)
+            if not _poll_exit(self._pidfd):
+                raise ValueError("original pidfd exit changed during archival")
+            return {"result": result, "archiveSha256": digest}
 
     def close(self):
         for name in ("_directory_fd", "_pidfd"):

@@ -348,7 +348,11 @@ def _checked_evidence(roster, user, measured, directory, remeasure, deadline):
         raise ValueError("Nexus WAL witness expired or clock changed")
     # Private historical evidence for the disposable retirement verifier.
     # The bytes/digest do not establish terminality or grant any authority.
-    return before, hashlib.sha256(raw).hexdigest()
+    return before, {
+        "request": request,
+        "signedResponse": raw.decode("utf-8"),
+        "receivedAtMs": received_wall,
+    }
 
 
 def _check(roster, user, measured, directory, remeasure, deadline):
