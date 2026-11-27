@@ -3,6 +3,8 @@
 Only a pinned strict-PQ response can distinguish signed empty remote history
 from a committed birth index. Reconcile that snapshot against the original
 isolated PID's complete private journal, exact first grants and live counters.
+Each local stream must match its exact committed SQL charge head, even if
+the immutable birth index has not changed since an earlier append.
 This is NOT terminal WAL finality, pre-bootstrap completeness, or an
 atomic public bind. No installer, service or public activation calls this.
 """
@@ -22,7 +24,7 @@ import public_tls_preflight as preflight
 import qualified_runtime_image as qualification
 import wal_transport as wal
 
-DOMAIN = b"XMESH_QUOTA_V2_PUBLIC_TLS_WAL_HEAD_V1\x00"
+DOMAIN = b"XMESH_QUOTA_V2_PUBLIC_TLS_WAL_HEAD_V2\x00"
 MAX_WIRE = 8192
 MAX_SCAN = 64 << 20
 MAX_CHECK_NS = 9_000_000_000
@@ -157,7 +159,8 @@ def _snapshot(directory, roster, deadline):
                    for email in emails}
         totals = {user: [0, 0] for user in roster._grants}
         digests = {}
-        for name, (last, digest, _) in raw_wal.items():
+        heads = []
+        for name, (last, digest, _) in sorted(raw_wal.items()):
             email = last["email"]
             if last["runtimeId"] != roster.runtime_id or email not in aliases:
                 raise ValueError("meter WAL is outside original measured signed roster")
@@ -168,6 +171,19 @@ def _snapshot(directory, roster, deadline):
             if total[0] > 2**63 - 1:
                 raise ValueError("meter WAL total overflows signed counter")
             digests[name] = digest
+            user = aliases[email]
+            # Filename commits runtime, alias and direction. Bind the exact
+            # signed lease owner and class too; a matching birth count or
+            # stale prefix of this stream is not a complete SQL charge.
+            heads.append({
+                "filename": name,
+                "reservationId": roster._grants[user][1]["reservationId"],
+                "userId": user,
+                "lastSequence": last["sequence"],
+                "lastDigest": last["digest"],
+                "streamBytes": last["nextBytes"],
+                "isCdn": email.endswith("--vless-cdn"),
+            })
         # A re-bound directory cannot masquerade as an unchanged empty one.
         current = os.stat(directory, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (anchor.st_dev, anchor.st_ino):
@@ -183,6 +199,8 @@ def _snapshot(directory, roster, deadline):
             "tail": next(reversed(entries.values()))["digest"] if entries else "0"*64,
             "totals": totals,
             "wal": digests,
+            "chargeHeadsSha256": hashlib.sha256(
+                wal.observed.canonical(heads)).hexdigest(),
         }
     finally:
         os.close(fd)
@@ -265,24 +283,31 @@ def _verify(raw, request, pinned, snapshot, now):
     expected.update({key: proof[key] for key in
                      ("challenge", "containerId", "hostPid", "startedAt")})
     expected.update({
-        "schemaVersion": 1, "kind": "xmesh.quota-v2.public-tls-wal-head",
-        "historyState": ("committed_birth_index" if snapshot["sequence"]
-                         else "empty_remote_history"),
-        "inventorySequence": snapshot["sequence"],
-        "inventorySha256": snapshot["sha256"], "inventoryTailDigest": snapshot["tail"],
+        "schemaVersion": 2, "kind": "xmesh.quota-v2.public-tls-wal-head",
         "preBootstrapHistoryCompletenessVerified": False,
         "liveMeterVerified": False, "finalMeterVerified": False,
         "canServePublic": False, "canSpend": False, "canStart": False,
         "canResume": False, "authorizedBytes": 0, "refundableBytes": 0,
     })
+    local_history = {
+        "historyState": ("committed_birth_index" if snapshot["sequence"]
+                         else "empty_remote_history"),
+        "inventorySequence": snapshot["sequence"],
+        "inventorySha256": snapshot["sha256"], "inventoryTailDigest": snapshot["tail"],
+        "committedChargeStreamCount": snapshot["sequence"],
+        "committedChargeHeadsSha256": snapshot["chargeHeadsSha256"],
+    }
     p = doc["payload"]
     if (not isinstance(p, dict)
-            or set(p) != set(expected) | {"issuedAtMs", "validUntilMs",
-                                          "committedChargeStreamCount"}
+            or set(p) != set(expected) | set(local_history) | {"issuedAtMs", "validUntilMs"}
             or any(type(p.get(k)) is not type(v) or p[k] != v
                    for k, v in expected.items())
-            or type(p["committedChargeStreamCount"]) is not int
-            or not 0 <= p["committedChargeStreamCount"] <= snapshot["sequence"]
+            or any(type(p.get(k)) is not type(v) for k, v in local_history.items())
+            or not 0 <= p["committedChargeStreamCount"] <= p["inventorySequence"] <= wal.registry.MAX_ENTRIES
+            or p["historyState"] != ("committed_birth_index" if p["inventorySequence"]
+                                     else "empty_remote_history")
+            or any(not wal._hex(p[k], 64) for k in ("inventorySha256", "inventoryTailDigest",
+                                                    "committedChargeHeadsSha256"))
             or type(p["issuedAtMs"]) is not int or type(p["validUntilMs"]) is not int
             or not 0 < p["issuedAtMs"] <= now < p["validUntilMs"]
             or now - p["issuedAtMs"] > MAX_AGE_MS
@@ -292,6 +317,11 @@ def _verify(raw, request, pinned, snapshot, now):
         public = Path(temp) / "nexus.pem"
         wal._write_public(pinned, public)
         wal.verifier.verify_nexus_signature(DOMAIN, p, doc["signature"], public)
+    # The mismatch is reported ONLY after authenticating the exact fresh
+    # server response. Fake/expired/malformed responses cannot masquerade
+    # as evidence that a genuine SQL snapshot is lagging the actual meter.
+    if any(p[key] != value for key, value in local_history.items()):
+        raise ValueError("signed Nexus WAL history does not match complete local conservative tails")
     return p["validUntilMs"]
 
 

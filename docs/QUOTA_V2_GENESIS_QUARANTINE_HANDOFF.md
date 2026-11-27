@@ -559,8 +559,14 @@ history or a legacy fallback is NOT a signed empty history statement.
 The local birth index and complete WAL digests are re-read around the strict-PQ
 request, with every alias's nonce/PID-authenticated cumulative MAIN/CDN cap
 counters reconciled to local WAL sums. If anything changed or the signed time
-window expired, the check fails. For a nonempty index the readback proves
-equality of **birth history**, not equality of off-host charge byte counters.
+window expired, the check fails. Version 2 also binds a canonical sorted manifest digest of each committed
+charge head (filename, exact reservation/user/class, last sequence, last
+digest and cumulative conservative bytes). A fresh authentic signature
+covering the same birth index but a lagging charge head is refused, as is
+a manifest missing any local stream. Empty manifests use SHA-256 of the
+canonical empty array. The V1 birth-only signature is no longer accepted
+by the V2 verifier. This proves equality of **conservative pre-send intent
+heads**, not delivered-byte accounting.
 The signature cannot prove pre-bootstrap historical completeness, actual
 delivery of every recorded intent, future absence of revocation, or terminal
 meter finality. The check returns no permit even on success.

@@ -69,7 +69,7 @@ class PublicTlsWalWatchTests(unittest.TestCase):
         proof = request["proof"]
         now = time.time_ns() // 1_000_000
         p = {
-            "schemaVersion": 1, "kind": "xmesh.quota-v2.public-tls-wal-head",
+            "schemaVersion": 2, "kind": "xmesh.quota-v2.public-tls-wal-head",
             "nodeId": scope["nodeId"], "userId": scope["userId"],
             "activationReceiptSha256": scope["activationReceiptSha256"],
             "genesisPolicySha256": scope["genesisPolicySha256"],
@@ -84,6 +84,7 @@ class PublicTlsWalWatchTests(unittest.TestCase):
             "inventorySha256": snapshot["sha256"],
             "inventoryTailDigest": snapshot["tail"],
             "committedChargeStreamCount": snapshot["sequence"],
+            "committedChargeHeadsSha256": snapshot["chargeHeadsSha256"],
             "preBootstrapHistoryCompletenessVerified": False,
             "liveMeterVerified": False, "finalMeterVerified": False,
             "canServePublic": False, "canSpend": False, "canStart": False,
@@ -151,6 +152,7 @@ class PublicTlsWalWatchTests(unittest.TestCase):
             ("historyState", "committed_birth_index"), ("inventorySequence", 1),
             ("inventorySha256", "f"*64), ("inventoryTailDigest", "f"*64),
             ("committedChargeStreamCount", 1), ("committedChargeStreamCount", True),
+            ("committedChargeHeadsSha256", "f"*64), ("schemaVersion", 1),
             ("validUntilMs", 1), ("validUntilMs", time.time_ns()//1_000_000 + 30000),
             ("issuedAtMs", time.time_ns()//1_000_000 - 5000),
         ):
@@ -172,7 +174,7 @@ class PublicTlsWalWatchTests(unittest.TestCase):
             self.check()
         empty = self.snapshot()
         self.create_wal()
-        with self.assertRaisesRegex(ValueError, "mismatched Nexus WAL"):
+        with self.assertRaisesRegex(ValueError, "signed Nexus WAL history does not match"):
             self.check(lambda request: self.reply(request, empty))
         # Deleting one indexed stream, or the entire index, cannot pass.
         index = self.directory / watch.wal.registry.NAME
@@ -185,6 +187,46 @@ class PublicTlsWalWatchTests(unittest.TestCase):
         next(self.directory.glob("meter-*.jsonl")).unlink()
         with self.assertRaisesRegex(ValueError, "missing previously"):
             self.snapshot()
+
+    def test_same_birth_index_and_count_cannot_hide_later_unacknowledged_wal(self):
+        self.create_wal()
+        old = self.snapshot()
+        path = next(p for p in self.directory.glob("meter-*.jsonl")
+                    if b'"email":"xmesh-u100--vless-main","direction":"uplink"' in p.read_bytes())
+        dfd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            previous, _, _ = watch.wal.journal._read_meter_wal(dfd, path.name)
+        finally:
+            os.close(dfd)
+        record = dict(previous)
+        record.update(sequence=previous["sequence"]+1, previousBytes=previous["nextBytes"],
+                      nextBytes=previous["nextBytes"]+13, previousDigest=previous["digest"], digest="")
+        record["digest"] = hashlib.sha256(watch.wal.journal._canonical_go(record)).hexdigest()
+        with path.open("ab") as handle:
+            handle.write(watch.wal.journal._canonical_go(record))
+            handle.flush()
+            os.fsync(handle.fileno())
+        self.counters = (64, 7)
+        new = self.snapshot()
+        for key in ("sequence", "sha256", "tail"):
+            self.assertEqual(old[key], new[key])
+        self.assertNotEqual(old["chargeHeadsSha256"], new["chargeHeadsSha256"])
+        # Both signatures genuine and fresh, only the committed tails lag.
+        with self.assertRaisesRegex(ValueError, "signed Nexus WAL history does not match"):
+            self.check(lambda request: self.reply(request, old))
+        with self.assertRaises(ValueError) as bad:
+            self.check(lambda request: self.reply(request, old, domain=b"wrong-signing-domain"))
+        self.assertNotIn("signed Nexus WAL history does not match", str(bad.exception))
+        with self.assertRaisesRegex(ValueError, "signed Nexus WAL history does not match"):
+            self.check(lambda request: self.reply(request, new, {
+                "committedChargeStreamCount": new["sequence"]-1}))
+        self.assertIsNone(self.check())
+        # V1 was birth-index-only; never accept a downgrade.
+        request = watch._request(self.roster, 100, self.measured)
+        with self.assertRaises(ValueError):
+            watch._verify(self.reply(request, new, {"schemaVersion": 1},
+                                     domain=b"XMESH_QUOTA_V2_PUBLIC_TLS_WAL_HEAD_V1\0"),
+                          request, self.roster.pinned, new, time.time_ns()//1_000_000)
 
     def test_foreign_runtime_and_alias_never_match_original(self):
         self.create_wal(runtime="f"*64)
