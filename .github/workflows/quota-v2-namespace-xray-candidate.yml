@@ -38,7 +38,9 @@ jobs:
           go-version: '1.27.4'
           cache: false
       - name: Test exact, non-authorizing namespace artifact manifest
-        run: sudo python3 -B tests/test_namespace_candidate_artifact.py -v
+        run: |
+          sudo python3 -B tests/test_namespace_candidate_artifact.py -v
+          sudo python3 -B tests/test_quota_v2_public_tls_namespace_launcher.py -v
       - name: Build separate exact upstream patched Xray namespace candidate (never release)
         env:
           EXPECTED_NODE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
