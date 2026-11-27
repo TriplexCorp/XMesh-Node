@@ -26,6 +26,17 @@ def _identity(info):
             info.st_gid, info.st_nlink, info.st_size)
 
 
+def _lock_identity(fd, name):
+    # Exact pinned Xray FileLocker creates an empty regular file via
+    # os.Create beside each Unix socket. This is not a routing input.
+    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) not in (0o600, 0o644)
+            or info.st_nlink != 1 or info.st_size != 0):
+        raise ValueError("unsafe original meter lock file")
+    return info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)
+
+
 class NamespaceMeterInputs:
     """Borrow the original measured route capsule; own only two child FDs.
 
@@ -46,6 +57,14 @@ class NamespaceMeterInputs:
                 raise ValueError("original route evidence cannot authorize ingress")
             self._peer = peers.capture_original(original._pidfd, original._pid)
             self._view, self._mount = mounts.readonly_view(original._meter_fd)
+            names = set(os.listdir(self._view))
+            lock_names = {tag + ".lock" for tag in original._tags}
+            # Standalone lockless kernel fixtures remain valid. Real Xray
+            # must expose a complete, exact lock roster, never a subset.
+            if names not in (original._tags, original._tags | lock_names):
+                raise ValueError("namespace meter view contains foreign or changed sockets")
+            self._lock_ids = {name: _lock_identity(self._view, name)
+                              for name in sorted(names & lock_names)}
             self._raw = self._encode()
             if not 0 < len(self._raw) <= MAX_MANIFEST_BYTES:
                 raise ValueError("namespace meter manifest exceeded bound")
@@ -73,7 +92,11 @@ class NamespaceMeterInputs:
         # Python/Go JSON decoders; no float conversion is admissible.
         return routes.wal.observed.canonical({
             "kind": "xmesh.quota-v2.namespace-meter-inputs",
-            "version": 1,
+            "version": 2,
+            "lockFiles": [
+                {"tag": name, "device": str(dev), "inode": str(ino), "mode": mode}
+                for name, (dev, ino, mode) in sorted(self._lock_ids.items())
+            ],
             "runtimeId": original._runtime,
             "rosterSha256": original._roster_sha,
             "aliases": sorted(aliases),
@@ -99,9 +122,11 @@ class NamespaceMeterInputs:
         if (routes._dir_identity(os.fstat(self._view)) != original._meter_id
                 or routes._dir_identity(os.stat("..", dir_fd=self._view)) != original._meter_id):
             raise ValueError("namespace meter directory is not its exact detached root")
-        # The view exposes only the original VLESS sockets, not arbitrary
-        # files, writable owner paths or another mount hierarchy.
-        if (set(os.listdir(self._view)) != original._tags
+        # The view exposes only the original VLESS sockets and exact
+        # empty pinned Xray lock files, never arbitrary files or paths.
+        if (set(os.listdir(self._view)) != original._tags | self._lock_ids.keys()
+                or any(_lock_identity(self._view, name) != identity
+                       for name, identity in self._lock_ids.items())
                 or any(routes._socket_identity(self._view, tag) != original._socket_ids.get(tag)
                        for tag in original._tags)):
             raise ValueError("namespace meter view contains foreign or changed sockets")

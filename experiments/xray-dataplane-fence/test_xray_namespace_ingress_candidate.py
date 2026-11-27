@@ -230,6 +230,7 @@ def run(binary, original_ns):
         runtime = runtime_identity.trusted_runtime_identity(meter.pid)
         meter_dir = Path("/dev/shm/xmesh-"+runtime)
         stack.callback(shutil.rmtree,meter_dir,True)
+        stack.callback(stop,meter)
         deadline = time.monotonic()+10
         while not all((meter_dir/("vless-"+cls)).is_socket() for cls in CLASSES):
             if meter.poll() is not None or time.monotonic() >= deadline:

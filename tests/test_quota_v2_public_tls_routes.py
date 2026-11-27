@@ -164,6 +164,8 @@ class FirstGenesisRouteStructureTests(RouteFixture):
                     value = json.loads(data)
                     self.assertEqual(value["aliases"], ["xmesh-u100--vless-cdn", "xmesh-u100--vless-main"])
                     self.assertEqual(value["runtimeId"], self.runtime)
+                    self.assertEqual(value["version"], 2)
+                    self.assertEqual(value["lockFiles"], [])
                     self.assertEqual(value["meterDirectoryFd"], view)
                     self.assertEqual(value["peerInode"], str(bundle._peer.inode))
                     self.assertEqual(value["sockets"], [
@@ -198,6 +200,32 @@ class FirstGenesisRouteStructureTests(RouteFixture):
                             bundle.ensure_current()
                     finally:
                         os.close(replacement)
+                # Actual Xray uses a complete pair of empty, root-owned
+                # FileLocker .lock files. A partial roster or arbitrary
+                # data-bearing file may not enter the detached view.
+                lock = self.meter/"vless-main.lock"
+                lock.touch(mode=0o600)
+                with self.assertRaisesRegex(ValueError, "foreign or changed sockets"):
+                    namespace_route.NamespaceMeterInputs(capsule)
+                other = self.meter/"vless-cdn.lock"
+                other.touch(mode=0o644)
+                with namespace_route.NamespaceMeterInputs(capsule) as bundle:
+                    view, manifest = bundle.child_fds
+                    doc = json.loads(os.pread(manifest, 1<<20, 0))
+                    self.assertEqual([row["tag"] for row in doc["lockFiles"]],
+                                     ["vless-cdn.lock", "vless-main.lock"])
+                    self.assertIsNone(bundle.ensure_current())
+                    lock.write_bytes(b"foreign")
+                    with self.assertRaisesRegex(ValueError, "unsafe original meter lock"):
+                        bundle.ensure_current()
+                    lock.write_bytes(b"")
+                    lock.rename(self.meter/"previous")
+                    lock.touch(mode=0o600)
+                    (self.meter/"previous").unlink()
+                    with self.assertRaisesRegex(ValueError, "foreign or changed sockets"):
+                        bundle.ensure_current()
+                lock.unlink()
+                other.unlink()
                 with namespace_route.NamespaceMeterInputs(capsule) as bundle:
                     view, _ = bundle.child_fds
                     os.dup2(capsule._meter_fd, view, inheritable=False)
@@ -513,6 +541,10 @@ print("namespace_manifest_" + verdict)
         subprocess.run(["go", "test", "-c", "-o", str(binary),
                         "./experiments/quota-v2-physical-stop/namespacepeer"],
                        cwd=ROOT, env=env, check=True, timeout=90)
+        # Exercise the actual Go decoder against the real lock-file
+        # shape, then mutate content and replace its exact inode.
+        for tag in ("vless-main", "vless-cdn"):
+            (self.meter/(tag+".lock")).touch(mode=0o600)
         with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
             with namespace_route.NamespaceMeterInputs(capsule) as bundle:
                 view, manifest = bundle.child_fds
@@ -552,7 +584,21 @@ print("namespace_manifest_" + verdict)
                 finally:
                     os.close(parent)
                 variant(raw + b" ", "manifest-reject")
-                variant(raw[:-1] + b',"version":1}', "manifest-reject")
+                variant(raw[:-1] + b',"version":2}', "manifest-reject")
+                document = json.loads(raw)
+                document["lockFiles"].pop()
+                variant(routes.wal.observed.canonical(document), "manifest-reject")
+                lock = self.meter/"vless-main.lock"
+                lock.write_bytes(b"not an empty lock")
+                check(manifest, "manifest-reject")
+                lock.write_bytes(b"")
+                check(manifest, "accept")
+                lock.rename(self.meter/"old-lock")
+                lock.touch(mode=0o600)
+                check(manifest, "manifest-reject")
+                lock.unlink()
+                (self.meter/"old-lock").rename(lock)
+                check(manifest, "accept")
                 # Replacing the original listener inode must fail before
                 # an authenticated stream could ever be returned.
                 target = self.meter / "vless-main"
