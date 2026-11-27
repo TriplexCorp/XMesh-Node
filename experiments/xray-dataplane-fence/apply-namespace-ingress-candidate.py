@@ -42,6 +42,18 @@ import (
     "net"
 )
 
+// Read only the already verified exact sealed config; never invoke the
+// ordinary filename or remote-source loader for the namespace candidate.
+func (s *ListenerSet) ConfigBytes() ([]byte,error) {
+    if s == nil { return nil,errors.New("missing sealed listener set") }
+    if err := s.check(); err != nil { return nil,err }
+    raw,id,err := readSealedLimit(s.configFD,maxSealedConfig)
+    if err != nil || id != s.configID || hashBytes(raw) != s.configSHA {
+        return nil,errors.New("original sealed namespace config changed")
+    }
+    return raw,nil
+}
+
 func (s *ListenerSet) AdoptEndpoint(address string, port int) (*net.TCPListener,error) {
     if s == nil { return nil,errors.New("missing sealed listener set") }
     for tag,item := range s.listeners {
@@ -76,14 +88,31 @@ func (s *ListenerSet) AdoptEndpoint(address string, port int) (*net.TCPListener,
         listener,err = xmeshdrain.AdoptNamespaceCandidateListener(address.IP().String(),int(port))
     } else if streamSettings.FinalMask != nil {""")
     run = root / "main/run.go"
+    replace_file(run, '"fmt"', '"bytes"\n\t"fmt"')
     replace_file(run, '"github.com/xtls/xray-core/common/cmdarg"',
                  '"github.com/xtls/xray-core/app/xmeshdrain"\n\t"github.com/xtls/xray-core/common/cmdarg"')
+    replace_file(run, '"github.com/xtls/xray-core/core"',
+                 '"github.com/xtls/xray-core/core"\n\t"github.com/xtls/xray-core/infra/conf/serial"')
     replace_file(run, "configFiles := getConfigFilePath(true)",
                  """configFiles := getConfigFilePath(true)
     if xmeshdrain.NamespaceCandidateActive() &&
         (len(configFiles) != 1 || configFiles[0] != xmeshdrain.NamespaceCandidateConfigPath() ||
          configDir != "" || *format != "json") {
         return nil,errors.New("namespace candidate requires the exact independently sealed config")
+    }""")
+    replace_file(run, "c, err := core.LoadConfig(getConfigFormat(), configFiles)",
+                 """var c *core.Config
+    var err error
+    if xmeshdrain.NamespaceCandidateActive() {
+        // The normal upstream loader rejects extensionless FD paths.
+        // Do not relax its filename rules or introduce a path alias.
+        raw, readErr := xmeshdrain.NamespaceCandidateConfigBytes()
+        if readErr != nil { return nil, readErr }
+        cfg, readErr := serial.DecodeJSONConfigStrict(bytes.NewReader(raw))
+        if readErr != nil { return nil, readErr }
+        c, err = cfg.Build()
+    } else {
+        c, err = core.LoadConfig(getConfigFormat(), configFiles)
     }""")
     subprocess.run(["gofmt", "-w", str(candidate), str(ingress), str(hub), str(run),
                     *[str(p) for p in peer.glob("*.go")]], check=True, cwd=root)

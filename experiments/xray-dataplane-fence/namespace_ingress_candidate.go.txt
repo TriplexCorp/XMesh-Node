@@ -32,6 +32,11 @@ func NamespaceCandidateConfigPath() string {
 	return namespaceCandidate.configPath
 }
 
+func NamespaceCandidateConfigBytes() ([]byte,error) {
+	if namespaceCandidate == nil { return nil,errors.New("missing namespace candidate") }
+	return namespaceCandidate.listeners.ConfigBytes()
+}
+
 func namespaceCandidateFD(name string) int {
 	value, err := strconv.Atoi(os.Getenv(name))
 	if err != nil || value < 3 { panic("invalid independent candidate descriptor") }
