@@ -39,9 +39,10 @@ def expected_source(root, revision):
     if (not re.fullmatch(r"[a-f0-9]{40}", revision or "")
             or git(root, "HEAD") != revision):
         raise ValueError("candidate verifier must be the exact expected source checkout")
-    if subprocess.check_output(["git", "--no-optional-locks", "-c", f"safe.directory={root}", "-C", str(root), "status", "--porcelain",
-                                "--untracked-files=all"], timeout=10):
-        raise ValueError("candidate source checkout must be clean")
+    dirty = subprocess.check_output(["git", "--no-optional-locks", "-c", f"safe.directory={root}", "-C", str(root), "status", "--porcelain",
+                                     "--untracked-files=all"], timeout=10)
+    if dirty:
+        raise ValueError("candidate source checkout must be clean: " + repr(dirty[:2048]))
     return {"nodeSourceRevision": revision, "upstreamSourceRevision": UPSTREAM,
             **{field: git(root, path) for field, path in TREE_PATHS.items()}}
 

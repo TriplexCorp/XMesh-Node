@@ -7,7 +7,6 @@ candidate may be selected only on the disposable installed-candidate test path. 
 private test namespace, using ephemeral fixture signatures/certificates.
 """
 from contextlib import ExitStack
-import ctypes
 import errno
 import hashlib
 import json
@@ -50,64 +49,12 @@ import public_tls_namespace_route as namespace_route
 import public_tls_namespace_inputs as namespace_inputs
 import public_tls_pinned_inputs as pinned
 import public_tls_revocation_watch as revocation
-import public_tls_spawn_preflight as preflight
+import public_tls_namespace_launcher as launcher
 import public_tls_stop_monitor as stop_monitor
 import public_tls_routes as routes
 import runtime_identity
 import vless_ingress
 
-PIVOT_EXEC = r"""
-import codecs, ctypes, os, sys
-from pathlib import Path
-module_dir, module_sha, root, executable, config = sys.argv[1:]
-sys.path.insert(0,module_dir)
-import public_tls_network_fence as network
-import hashlib
-assert hashlib.sha256(Path(network.__file__).read_bytes()).hexdigest() == module_sha
-assert os.getpid() == 1 and os.geteuid() == 0
-executable,config = int(executable),int(config)
-# Resolve layouts and module imports while original root is still available.
-lib = ctypes.CDLL(None,use_errno=True)
-lib.mount.argtypes = [ctypes.c_char_p,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_ulong,ctypes.c_char_p]
-lib.umount2.argtypes = [ctypes.c_char_p,ctypes.c_int]
-class Header(ctypes.Structure):
-    _fields_ = [("version",ctypes.c_uint32),("pid",ctypes.c_int)]
-class Caps(ctypes.Structure):
-    _fields_ = [(x,ctypes.c_uint32) for x in ("effective","permitted","inheritable")]
-header,caps = Header(0x20080522,0),(Caps*2)()
-network._Instruction(0,0,0,0)
-network._Program()
-network._Ruleset()
-network._native()
-# Python lazily resolves ASCII on the first text-mode status read.
-# Cache the codec before detaching the original filesystem; the sandbox
-# must contain no Python installation or other host files.
-codecs.lookup("ascii")
-last_cap = int(Path("/proc/sys/kernel/cap_last_cap").read_text())
-RDONLY,NOSUID,NODEV,NOEXEC,REMOUNT,REC,PRIVATE = 1,2,4,8,32,16384,1<<18
-def check(rc,msg):
-    if rc:
-        e=ctypes.get_errno()
-        raise OSError(e,os.strerror(e),msg)
-check(lib.mount(None,b"/",None,REC|PRIVATE,None),"private propagation")
-check(lib.mount(b"proc",os.fsencode(root+"/proc"),b"proc",RDONLY|NOSUID|NODEV|NOEXEC,None),"readonly own proc")
-os.chdir(root)
-check(lib.syscall(155,b".",b"oldroot"),"pivot_root")
-os.chdir("/")
-check(lib.umount2(b"/oldroot",2),"detach old root")
-os.rmdir("/oldroot")
-check(lib.mount(None,b"/",None,REMOUNT|RDONLY|NOSUID|NODEV|NOEXEC,None),"readonly private root")
-assert os.listdir("/") == ["proc"]
-os.setgroups([])
-for cap in range(last_cap+1):
-    check(lib.prctl(24,cap,0,0,0),"drop bounding cap")
-check(lib.capset(ctypes.byref(header),ctypes.byref(caps)),"clear caps")
-check(lib.prctl(38,1,0,0,0),"no new privs")
-assert network.install() is None
-os.set_inheritable(executable,False)
-os.execve(executable,["namespace-xray-candidate","run","-format","json","-config",
-                     f"/proc/self/fd/{config}"],os.environ)
-"""
 
 ECHO = r"""
 import socketserver
@@ -312,10 +259,8 @@ def run(binary, original_ns, stop_mode, installed=False):
         stack.enter_context(mock.patch.object(qualified_executable.release,"EXECUTABLE",executable))
         exec_proof = stack.enter_context(qualified_executable.PinnedTlsExecutable(
             runtime_pid=meter.pid,runtime_id=runtime))
-        executable_fd = exec_proof.exec_fd
         native_inputs = namespace_inputs.NamespaceTlsInputs(original=inputs,native=native_routes,
             manifest=manifest,root_fd=root_fd,root_token=root_token)
-        fixed = native_inputs.child_fds
         state = {"revoked":False,"ttl":7000}
         authority_sha = hashlib.sha256(authority).hexdigest()
 
@@ -339,44 +284,7 @@ def run(binary, original_ns, stop_mode, installed=False):
         proof_args = dict(profile=profile,authority=authority,runtime_pid=meter.pid,
             cap_watch=witness,revocation_watch=revocation_watch,pinned_inputs=native_inputs,
             pinned_executable=exec_proof,**binding_args)
-        assert preflight.check_before_spawn(**proof_args) is None
-        fence_contents = (ROOT/"experiments/quota-v2-physical-stop/public_tls_network_fence.py").read_bytes()
-        module_dir = root/"modules"
-        module_dir.mkdir(mode=0o700)
-        (module_dir/"public_tls_network_fence.py").write_bytes(fence_contents)
-        (module_dir/"public_tls_network_fence.py").chmod(0o600)
-        manifest_doc = json.loads(os.pread(manifest.manifest_fd,manifests.MAX_MANIFEST,0))
-        env = dict(XMESH_NAMESPACE_INGRESS_DIAGNOSTIC="1",
-                   XMESH_NAMESPACE_CONFIG_FD=str(inputs._certificates.config_fd),
-                   XMESH_NAMESPACE_LISTENER_MANIFEST_FD=str(manifest.manifest_fd),
-                   XMESH_NAMESPACE_ROUTE_MANIFEST_FD=str(native_routes.child_fds[1]),
-                   XMESH_NAMESPACE_RUNTIME_ID=runtime,
-                   XMESH_NAMESPACE_ROSTER_SHA256=witness.roster_sha256,
-                   XMESH_NAMESPACE_AUTHORITY_SHA256=manifest_doc["authoritySha256"],
-                   XMESH_NAMESPACE_CONFIG_SHA256=manifest_doc["configSha256"])
-        assert len(os.listdir("/proc/self/task")) == 1
-        saved = os.open("/proc/self/ns/pid",os.O_RDONLY|os.O_CLOEXEC)
-        libc = ctypes.CDLL(None,use_errno=True)
-        def check(rc):
-            if rc:
-                e=ctypes.get_errno()
-                raise OSError(e,os.strerror(e))
-        child = None
-        try:
-            check(libc.unshare(0x20000000))
-            try:
-                child = subprocess.Popen(["unshare","--mount","--net","--ipc","--uts",
-                    "--mount-proc",sys.executable,"-I","-B","-c",PIVOT_EXEC,
-                    str(module_dir),hashlib.sha256(fence_contents).hexdigest(),str(sandbox),
-                    str(executable_fd),str(inputs._certificates.config_fd)],
-                    pass_fds=(*fixed,*[s.fileno() for s in sockets.values()],executable_fd),
-                    env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,text=True)
-            finally:
-                check(libc.setns(saved,0x20000000))
-        finally:
-            os.close(saved)
-        assert child is not None
+        child = launcher.spawn_disposable(original_ns=original_ns, proof_args=proof_args)
         stack.callback(stop,child)
         try:
             child_line(child,"xmesh_namespace_candidate_prebound")

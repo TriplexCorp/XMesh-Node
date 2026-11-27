@@ -104,7 +104,9 @@ def install(source_root, expected_revision, inputs, gh):
                             "--bundle", str(work/"provenance.jsonl"), "--repo", SIGNER,
                             "--signer-workflow", WORKFLOW, "--source-ref", "refs/heads/main",
                             "--source-digest", expected_revision, "--deny-self-hosted-runners"],
-                           env={"PATH":"/usr/bin:/bin", "GH_PROMPT_DISABLED":"1",
+                           cwd=work, env={"PATH":"/usr/bin:/bin", "GH_PROMPT_DISABLED":"1",
+                                "HOME":str(work), "XDG_CACHE_HOME":str(work/"cache"),
+                                "XDG_CONFIG_HOME":str(work/"config"),
                                 "GH_CONFIG_DIR":str(work/"gh-config")},
                            check=True, timeout=180)
         # A failed/missing/foreign attestation does not create the

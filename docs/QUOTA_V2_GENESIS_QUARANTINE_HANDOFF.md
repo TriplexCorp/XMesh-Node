@@ -1093,3 +1093,23 @@ TLS/WAL scenarios from the *actual installed candidate path*, with the
 same fixture authority and metering harness. This proves the candidate's
 provenance-to-exec path, not production admission, live Nexus signing,
 or an installed service launcher.
+
+### Disposable native launcher: immutable network-fence handoff
+
+The reusable diagnostic-only `public_tls_namespace_launcher.py` now owns
+the actual PID namespace bootstrap. Before spawning, it verifies the private
+loopback-only hosted environment, exact pinned root, listener input bundle,
+sealed executable and signed stop-only preflight. It snapshots the fence
+source into a kernel-sealed anonymous descriptor; the PID1 bootstrap checks
+its seals, bounds and digest, closes unlisted bootstrap FDs and rejects any
+missing declared FD before compiling
+those bytes, closes the source FD, detaches the host root, clears capabilities,
+installs Landlock/seccomp and execs the sealed executable FD. No mutable
+Python module pathname is imported in that handoff. A changed pathname after
+snapshot, matching-but-unsealed bytes and foreign digest are tested with
+actual subprocesses, including exact closure of unlisted descriptors. The
+installer also confines verifier working directory, HOME and XDG caches to
+private staging (without relaxing the exact clean checkout check). The original fixture retains exclusive socket transfer,
+post-exec readback, continuous stop monitor and both real TLS/WAL scenarios.
+This is not yet the production host supervisor or systemd unit, and the
+ephemeral diagnostic signer still cannot supply live Nexus authority.
