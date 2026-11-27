@@ -1132,3 +1132,21 @@ and leave the cgroup empty *before* measured signed witness expiry, report
 retained netns. This is qualification of an experimental transient unit,
 not a product service, live Nexus issuer or authorization. The separately
 signed installed candidate must repeat the same real containment scenario.
+
+### Independent installed namespace frontend and original meter identities
+
+The namespace frontend is a different signed ELF from the existing measured
+release. `namespace_candidate_executable.PinnedNamespaceCandidateExecutable`
+is explicitly hosted-only. It requires the actual side-by-side candidate
+store, exact clean reviewed source, the independent manifest and provenance
+hashes from the verified input bundle, and root-private metadata for every
+installed subject. The ordinary meter's installed release record, binary
+digest and live kernel executable are independently checked, not equated
+to the frontend digest. The child still execs only the read-only sealed
+memfd; source/bundle/inode changes invalidate subsequent monitor checks.
+The ordinary executable proof's same-release contract is unchanged.
+The main-only installed E2E now uses the real manifest and provenance pins
+instead of synthesizing an ordinary qualification record for that candidate.
+Fixture same-candidate meter mode remains distinct and explicitly opted in.
+This is non-authorizing: it relies on the separately verified installer,
+does not re-sign/issue authority, and is not called by product services.

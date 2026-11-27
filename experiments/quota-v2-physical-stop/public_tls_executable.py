@@ -99,11 +99,11 @@ class PinnedTlsExecutable:
             if not 0 <= time.monotonic_ns() - start < MAX_PREP_NS:
                 raise ValueError("sealed executable preparation exceeded watchdog budget")
 
-        self._record = release.read_identity(release.QUALIFICATION)
+        self._record = self._read_record()
         try:
             self._pidfd = os.pidfd_open(runtime_pid, 0)
             self._check_meter()
-            with os.fdopen(os.open(release.EXECUTABLE, READ_FLAGS | os.O_NOFOLLOW), "rb") as source:
+            with os.fdopen(os.open(self._source_path(), READ_FLAGS | os.O_NOFOLLOW), "rb") as source:
                 writer = os.memfd_create("xmesh-qualified-tls-executable",
                                          os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING | MFD_EXEC)
                 try:
@@ -121,13 +121,25 @@ class PinnedTlsExecutable:
                     os.close(writer)
             with os.fdopen(os.open(f"/proc/{runtime_pid}/exe", READ_FLAGS), "rb") as meter:
                 self._meter_id, digest = _read_hash(meter.fileno(), deadline)
-                if digest != self._record["artifactSha256"]:
+                if digest != self._meter_digest(self._record):
                     raise ValueError("original meter executable differs from verified release")
             self.ensure_current()
             deadline()
         except BaseException:
             self.close()
             raise
+
+    # Ordinary qualification remains the default same-executable contract.
+    # The separate hosted-only namespace proof supplies two independently
+    # checked identities; it never changes either production path.
+    def _source_path(self):
+        return release.EXECUTABLE
+
+    def _read_record(self):
+        return release.read_identity(release.QUALIFICATION)
+
+    def _meter_digest(self, record):
+        return record["artifactSha256"]
 
     def _check_meter(self):
         if (_ready(self._pidfd)
@@ -146,8 +158,8 @@ class PinnedTlsExecutable:
                 or fcntl.fcntl(self._fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
                 or os.get_inheritable(self._fd)):
             raise ValueError("sealed TLS executable inode or permissions changed")
-        if (release.read_identity(release.QUALIFICATION) != self._record
-                or _source_identity(release.EXECUTABLE.stat(follow_symlinks=False))
+        if (self._read_record() != self._record
+                or _source_identity(self._source_path().stat(follow_symlinks=False))
                 != self._source_id
                 or _source_identity(Path(f"/proc/{self._runtime_pid}/exe").stat())
                 != self._meter_id):
