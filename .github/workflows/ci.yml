@@ -152,6 +152,14 @@ jobs:
           host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
           trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net -- python3 tests/test_quota_v2_public_tls_network_fence.py --live "$host_ns"
+      - name: Actual Go inherited TCP listener and Unix meter survive sandbox but physically stop on deadman
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tests/test_quota_v2_public_tls_go_listener.py
+          host_ns="$(readlink /proc/self/ns/net)"
+          host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+          trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" PATH="$PATH" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net -- python3 tests/test_quota_v2_public_tls_go_listener.py --live "$host_ns"
       - name: Actual pivot root and isolated PID1 prove private readonly TLS namespace topology
         run: |
           set -euo pipefail

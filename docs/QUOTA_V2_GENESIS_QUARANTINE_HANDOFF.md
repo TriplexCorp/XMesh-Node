@@ -952,3 +952,34 @@ The subprocess must exit on unsupported/missing Landlock or filter failure;
 passing local structural tests without the actual hosted network test is
 not qualification. Actual Go/Xray integration and independent complete
 sandbox/stop-chain proofs remain required.
+
+### Actual Go transfer adapter behind the irreversible network fence (dormant)
+
+A future Xray TCP transport cannot call its normal bind/listen path in the
+isolated child. The separate `namespacepeer.AdoptTransferred` Go adapter
+checks the independently measured signed IPv4 endpoint, original socket
+device/inode and both kernel cookies, exclusive options and unconnected
+phase before listen. It uses `net.FileListener` only on the inherited
+descriptor after the caller's exclusive-transfer gate. It checks the
+resulting Go pollable TCP listener's exact kernel identity and closes
+the input FD before returning. Any failure closes the owned FD and the
+new listener. No other endpoint is created or used.
+
+The hosted fixture compiles the real Go package, installs Landlock and
+seccomp in the capless direct child before exec into Go, then requires
+Go to reject independently created TCP listeners and dials. The
+supervisor verifies exact child FD inheritance, drops its own FD and
+checks that the endpoint is not listening. The Go adapter must reject
+every incorrect token, adopt the precise bound socket, transfer actual
+TCP payload to a disposable Unix meter and return its echo. Independent
+procfs and INET_DIAG readback prove the new Go FD has the exact kernel
+identity, with no remaining owner or guardian copy and only one child
+listener FD. Real deadman expiry kills exact namespace PID1; require
+physical listener removal and ECONNREFUSED while supervisor lives.
+
+This is a **standalone transport qualification**, not an attested Xray
+change, production launcher or permission. The Unix fixture is raw
+connectivity; the separately qualified namespace-native manifest and
+peer verifier must be integrated into the actual Xray candidate,
+alongside the exact sealed listener inputs and full stop chain. No
+installer, version, Agent target, public authority or deployment change.
