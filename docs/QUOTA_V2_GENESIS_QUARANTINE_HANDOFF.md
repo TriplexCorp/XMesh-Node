@@ -637,10 +637,20 @@ settlement, public/spend/start/resume and refund authority are explicitly
 false or zero, and historical replay does not imply current freshness.
 The independent experiment module is tested separately and cannot be imported
 by the deployed Agent module without an explicit versioned integration.
-There is no product command, private-key access, installed service, route
-or release/production version change. Integration with the active enrolled
-vault, independently assessed archive and an exact qualified new Agent
-artifact is a separate step.
+The original experiment had no product command. The **6.0.39 source
+candidate** exposes only the explicit root command
+`retirement-archive-possession --panel ... --node-id ... --runtime-id ...`.
+It has no arbitrary path/key input, service or route. It reads the original
+root-private policy pin and fixed retired runtime record while holding a
+shared lock on the archive directory, rejects pending publication and unsafe
+inodes, verifies the running release and both original activation request
+signatures with the actual opened encrypted vault, matches the durable dual
+signed receipt and canonical original marker, then signs only the domain
+above. Exact input bytes are checked again before detached signature export.
+It never modifies the archive, starts Xray, or settles/refunds quota.
+Nexus must independently reconstruct and verify all evidence and key
+identity; this command does not authorize production use. The 6.0.39 source
+candidate is not the current production release pin.
 
 ## Sealed TLS material before any future public spawn
 
@@ -1275,3 +1285,21 @@ fail, the exact detached read-only view to succeed, actual Unix stream
 peer authentication, rejection of a wrong pidfd, foreign source and dead
 meter, and an unchanged supervisor mount namespace. The local structural
 variant cannot replace the mandatory hosted real-peer test.
+
+### Meter source provenance with namespace experiments present
+
+The ordinary metered-Xray installer reconstructs only from the exact
+attested Node commit and tree named by the qualification, not from the
+newer Agent checkout. An identical tree remains supported. The sole
+reviewed expanded tree is the ordinary signed tree plus eight specific
+namespace-only files, with every original blob and file mode unchanged.
+All other differences fail closed. The reconstructed binary and manifest
+must still match both original hosted attestations and the exact digest
+before publication. This does not qualify the namespace artifact for
+production or authorize ingress or settlement.
+
+The patcher itself invokes `gofmt`. Cold installation authenticates and
+extracts pinned Go 1.27.4 before patching, and both patch and build run with
+the private toolchain first in an isolated PATH. No preinstalled Go or
+ambient `gofmt` is required. Hosted installer testing poisons the ambient
+Go/Gofmt PATH; the real guest bootstrap tests a clean system without Go.
