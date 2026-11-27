@@ -71,6 +71,13 @@ jobs:
           for stop_mode in expiry revoked; do
             sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 -B experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$host_ns" "$stop_mode"
           done
+      - name: Actual PID1 watchdog contains frozen native Xray supervisor and guardian
+        run: |
+          set -euo pipefail
+          host_ns="$(readlink /proc/self/ns/net)"
+          host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+          trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_TLS_SYSTEMD_TEST=1 python3 -B experiments/xray-dataplane-fence/test_xray_namespace_systemd.py "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$host_ns"
       - name: Independently rebuild the exact tested namespace candidate
         env:
           EXPECTED_NODE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -212,6 +219,7 @@ jobs:
           for stop_mode in expiry revoked; do
             sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 -B experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$installed" "$host_ns" "$stop_mode" --installed-candidate
           done
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_TLS_SYSTEMD_TEST=1 python3 -B experiments/xray-dataplane-fence/test_xray_namespace_systemd.py "$installed" "$host_ns" --installed-candidate
           # Repaired or replaced local executable must never be silently
           # accepted; preserve the modified inode and reject reinstallation.
           inode="$(sudo stat -c '%d:%i' "$installed")"

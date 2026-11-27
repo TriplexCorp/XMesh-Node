@@ -16,7 +16,7 @@ import sys
 UPSTREAM = "a4a3dff5b20c2faae567b742c172c7b95e75c083"
 GO_VERSION = "go version go1.27.4 linux/amd64"
 BUILD_FLAGS = ["GOOS=linux", "GOARCH=amd64", "GOAMD64=v1", "CGO_ENABLED=0", "-trimpath"]
-SCENARIOS = ["signed-witness-expiry", "signed-revocation"]
+SCENARIOS = ["signed-witness-expiry", "signed-revocation", "systemd-watchdog-frozen-supervisor-guardian"]
 ARTIFACT_MAX = 256 << 20
 MANIFEST_MAX = 16384
 BUNDLE_MAX = 1 << 20

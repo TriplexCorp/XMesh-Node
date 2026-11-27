@@ -120,11 +120,19 @@ def tls_echo(port,domain,ca,user_uuid,echo_port,payload):
             assert recv_exact(client,len(payload)) == payload
 
 
-def run(binary, original_ns, stop_mode, installed=False):
-    assert stop_mode in {"expiry", "revoked"}
+def run(binary, original_ns, stop_mode, installed=False, containment=None):
+    assert stop_mode in {"expiry", "revoked", "systemd"}
+    if stop_mode == "systemd":
+        from test_quota_v2_public_tls_systemd import require_hosted_ci
+        require_hosted_ci()
+        assert os.environ.get("WATCHDOG_USEC") == "3000000"
+        assert os.environ.get("WATCHDOG_PID", str(os.getpid())) == str(os.getpid())
+        assert containment is not None and containment.is_dir()
+    else:
+        assert containment is None
     require_disposable_namespace(original_ns)
     with ExitStack() as stack:
-        root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="xmesh-namespace-xray-")))
+        root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="xmesh-namespace-xray-", dir=containment)))
         if installed:
             # The separately signed qualification job installed this exact
             # file in the isolated candidate store. Never copy or rename it
@@ -342,6 +350,31 @@ def run(binary, original_ns, stop_mode, installed=False):
                     for direction in ("uplink","downlink")}
             finally:
                 os.close(ledger_fd)
+            if stop_mode == "systemd":
+                # Only a real transient service calls this path. PID1 receives
+                # watchdog ticks from the main supervisor after a fresh signed
+                # proof and guardian ACK, never from a timer/helper process.
+                from test_quota_v2_public_tls_systemd import notify
+                assert monitor.check_stop_only() is None
+                info = dict(main=os.getpid(), guardian=guardian._guardian.pid,
+                    listener=child.pid, meter=meter.pid, echo=echo.pid,
+                    runtime=runtime, ports=ports, domains=domains,
+                    ca=str(certificate.ca_cert), echoPort=echo_port)
+                ready = containment/"ready.json"
+                first = True
+                while True:
+                    assert not monitor.stopped
+                    # Record exact earliest measured guardian deadline; the
+                    # external driver must prove watchdog stop happened first.
+                    info["deadlineNs"] = min(monitor._deadline_ns,
+                        monitor._cap_deadline_ns, revocation_watch._deadline_ns)
+                    pending = containment/"ready.next"
+                    pending.write_text(json.dumps(info), encoding="ascii")
+                    pending.replace(ready)
+                    notify("READY=1\nWATCHDOG=1" if first else "WATCHDOG=1")
+                    first = False
+                    time.sleep(.10)
+                    assert monitor.check_stop_only() is None
             if stop_mode == "revoked":
                 state["revoked"] = True
                 try:
@@ -376,6 +409,12 @@ def run(binary, original_ns, stop_mode, installed=False):
 
 
 if __name__ == "__main__":
-    assert len(sys.argv) in (4,5)
-    assert len(sys.argv)==4 or sys.argv[4]=="--installed-candidate"
-    run(Path(sys.argv[1]).resolve(),sys.argv[2],sys.argv[3],len(sys.argv)==5)
+    if len(sys.argv) in (6,7) and sys.argv[4]=="--systemd-fixture":
+        assert sys.argv[3]=="systemd"
+        assert len(sys.argv)==6 or sys.argv[6]=="--installed-candidate"
+        run(Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3],
+            installed=len(sys.argv)==7, containment=Path(sys.argv[5]).resolve())
+    else:
+        assert len(sys.argv) in (4,5)
+        assert len(sys.argv)==4 or sys.argv[4]=="--installed-candidate"
+        run(Path(sys.argv[1]).resolve(),sys.argv[2],sys.argv[3],len(sys.argv)==5)

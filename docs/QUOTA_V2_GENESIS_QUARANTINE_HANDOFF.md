@@ -1113,3 +1113,22 @@ private staging (without relaxing the exact clean checkout check). The original 
 post-exec readback, continuous stop monitor and both real TLS/WAL scenarios.
 This is not yet the production host supervisor or systemd unit, and the
 ephemeral diagnostic signer still cannot supply live Nexus authority.
+
+### Actual native Xray PID1 watchdog containment qualification
+
+The hosted namespace workflow now also requires the real native supervisor,
+original metered Xray, TLS PID1 child, independent pidfd guardian and echo
+backend to run in one transient systemd service cgroup with `Type=notify`,
+`NotifyAccess=main`, `WatchdogSec=3s`, `WatchdogSignal=SIGKILL`,
+`KillMode=control-group`, private mount/network namespaces and no restart.
+The supervisor notifies PID1 only following fresh complete signed stop-only
+evidence and guardian ACK. After actual MAIN/CDN TLS and WAL proof, the
+external driver retains the original private netns and opens two real
+authenticated VLESS TLS 1.3 sessions with echoed payload. It pins exact
+service PIDs, stops the supervisor and guardian via pidfds and requires
+both to be actually frozen. PID1 must terminate all five original processes
+and leave the cgroup empty *before* measured signed witness expiry, report
+`Result=watchdog`, halt existing sessions and refuse both ports in the still
+retained netns. This is qualification of an experimental transient unit,
+not a product service, live Nexus issuer or authorization. The separately
+signed installed candidate must repeat the same real containment scenario.
