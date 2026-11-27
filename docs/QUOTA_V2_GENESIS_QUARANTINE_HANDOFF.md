@@ -809,3 +809,29 @@ qualification. The future executable must use exact signed listener
 FDs, prevent independently created public/outbound sockets, and stop
 and reap before releasing these identities. No installed worker,
 release version or metered Xray artifact changes here.
+
+### Actual private root and PID namespace topology proof (dormant)
+
+A capability-free UID 0 is not proof that Xray cannot read the Agent's
+state by absolute path or an inherited host procfs. The dormant
+`public_tls_namespace.py` pins the supervisor's exact retained,
+root-owned mode-0700 tmpfs root FD and namespace identities. It verifies
+the kernel's actual child mount, PID, network, IPC and UTS namespaces
+differ from the supervisor's while user namespace is unchanged; the
+exact root inode is mounted read-only/nosuid/nodev/noexec, and mountinfo
+has exactly a private tmpfs root and private read-only procfs. Its procfs
+PID 1 must identify the same actual child's PID namespace, root and
+executable. The actual child is namespace init, and pidfd liveness,
+birth, all thread capless credentials and stable mount/namespace
+snapshots are checked in a bounded observation window.
+
+The disposable fixture actually pivots into the tmpfs, detaches old
+root, mounts its own procfs, execs a static sealed executable with all
+capabilities cleared, proves Agent state/host shadow are absent and
+root writes fail with EROFS. It rejects a different root, writable root,
+unexpected extra read-only mount, nonisolated child and ordinary
+non-mount-root directory. CI requires a fresh private mount namespace
+before creating any mount. No installed launcher, association to the
+qualified Xray, seccomp/cgroup proof, authority issuance, public bind,
+or production flag changes are supplied by this primitive. Those
+independent gates are still required.
