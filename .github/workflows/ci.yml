@@ -134,6 +134,15 @@ jobs:
           host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
           trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net -- python3 tests/test_quota_v2_public_tls_bound_listener.py --live "$host_ns"
+      - name: Actual exclusively transferred listener is physically closed by direct child deadman
+        run: |
+          set -euo pipefail
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_listener_readback.py tests/test_quota_v2_public_tls_listener_readback.py
+          sudo python3 tests/test_quota_v2_public_tls_listener_readback.py -v
+          host_ns="$(readlink /proc/self/ns/net)"
+          host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+          trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net -- python3 tests/test_quota_v2_public_tls_listener_readback.py --live "$host_ns"
       - name: Actual pivot root and isolated PID1 prove private readonly TLS namespace topology
         run: |
           set -euo pipefail
