@@ -921,3 +921,34 @@ expires, actual guardian SIGKILL of PID1 must produce no kernel
 listener and ECONNREFUSED while the supervisor itself remains alive.
 No host sysctl change, public bind, actual authority, Xray inherited
 listener integration, seccomp policy or installed service is supplied.
+
+### Irreversible kernel network fence (dormant candidate)
+
+The socket syscall filter alone would be insufficient: an inherited bound
+IPv4 socket or accepted TCP stream still belongs to the original network
+namespace, and seccomp cannot inspect the pointed-to sockaddr. The dormant
+`public_tls_network_fence` installs a mandatory Linux Landlock ABI >= 4
+ruleset handling TCP bind and connect with **no allow rules**. It then
+installs a native amd64 classic seccomp filter denying new sockets other
+than AF_UNIX SOCK_STREAM (optional CLOEXEC/NONBLOCK, protocol zero),
+socketpair, bind, address-based sends, ancillary FD import/export,
+io_uring and selected namespace/descriptor entry points. Native architecture
+and x32 syscall handling are explicit. This is a network fence, **not**
+a complete syscall allowlist, cgroup proof or positive launch authority.
+It requires a single-thread capless root no-new-privs pre-exec process.
+Failure is terminal for the child; there is no weak-policy fallback.
+
+The required hosted diagnostic uses only an explicitly disposable network
+namespace with loopback. A capless nested PID/net namespace process inherits
+the exact unlistening TCP socket, plus a deliberately extra unconnected
+TCP socket used only for the negative test. It must refuse new internet,
+datagram, netlink and ancillary FD operations, deny TCP connect using the
+inherited negative socket, successfully echo on the transferred listener and
+connect to an original pathname Unix meter fixture, then refuse reuse of an
+accepted socket for egress even after an attempted AF_UNSPEC disconnect.
+A real independent TCP destination must receive no connection. No production
+network, installer, Xray artifact, authority, version or flag is changed.
+The subprocess must exit on unsupported/missing Landlock or filter failure;
+passing local structural tests without the actual hosted network test is
+not qualification. Actual Go/Xray integration and independent complete
+sandbox/stop-chain proofs remain required.
