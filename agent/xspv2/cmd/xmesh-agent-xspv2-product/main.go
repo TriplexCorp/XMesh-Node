@@ -1167,7 +1167,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release|switch-release|confirm-release|rollback-release|resume-activation}")
+		fmt.Fprintln(os.Stderr, "usage: xmesh-agent-xspv2-product {bootstrap|verify-active|request|wal-evidence|retirement-archive-possession|verify-release-plan|fetch-release-plan|download-release-artifact|prepare-release|switch-release|confirm-release|rollback-release|resume-activation}")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -1294,6 +1294,20 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(`{"status":"candidate-verified","runtimeSwitched":false}`)
+	case "retirement-archive-possession":
+		flags := flag.NewFlagSet("retirement-archive-possession", flag.ExitOnError)
+		panel := flags.String("panel", "", "HTTPS panel origin")
+		nodeID := flags.Int64("node-id", 0, "node ID")
+		runtime := flags.String("runtime-id", "", "exact historical retired runtime digest")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 0 {
+			flags.Usage()
+			os.Exit(2)
+		}
+		if err := retirementArchivePossession(strings.TrimRight(*panel, "/"), *nodeID, *runtime); err != nil {
+			fmt.Fprintln(os.Stderr, "historical retirement archive possession failed:", err)
+			os.Exit(1)
+		}
 	case "wal-evidence":
 		flags := flag.NewFlagSet("wal-evidence", flag.ExitOnError)
 		panel := flags.String("panel", "", "HTTPS panel origin")

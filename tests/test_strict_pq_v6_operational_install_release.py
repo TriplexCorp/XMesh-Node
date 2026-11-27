@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source-only first-install strict-PQ control-v6.0.38 regression tests."""
+"""Source-only first-install strict-PQ control-v6.0.39 regression tests."""
 from pathlib import Path
 import subprocess
 import unittest
@@ -16,7 +16,7 @@ class FirstInstall(unittest.TestCase):
         cls.xray = (ROOT / "deploy/xmesh-xray-update.py").read_text(encoding="utf-8")
 
     def test_fresh_version_and_zero_stale_recovery_gates(self):
-        self.assertEqual(CANONICAL, "control-v6.0.38")
+        self.assertEqual(CANONICAL, "control-v6.0.39")
         for label, source in (("bootstrap", self.bootstrap),
                               ("installer", self.installer), ("Xray updater", self.xray)):
             with self.subTest(label=label):
@@ -25,6 +25,7 @@ class FirstInstall(unittest.TestCase):
                 self.assertNotIn("control-v6.0.35", source)
                 self.assertNotIn("control-v6.0.36", source)
                 self.assertNotIn("control-v6.0.37", source)
+                self.assertNotIn("control-v6.0.38", source)
                 self.assertIn(CANONICAL, source)
         self.assertIn('AGENT_VERSION = "' + CANONICAL + '"', self.xray)
 

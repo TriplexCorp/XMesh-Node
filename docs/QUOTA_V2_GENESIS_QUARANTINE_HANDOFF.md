@@ -637,10 +637,20 @@ settlement, public/spend/start/resume and refund authority are explicitly
 false or zero, and historical replay does not imply current freshness.
 The independent experiment module is tested separately and cannot be imported
 by the deployed Agent module without an explicit versioned integration.
-There is no product command, private-key access, installed service, route
-or release/production version change. Integration with the active enrolled
-vault, independently assessed archive and an exact qualified new Agent
-artifact is a separate step.
+The original experiment had no product command. The **6.0.39 source
+candidate** exposes only the explicit root command
+`retirement-archive-possession --panel ... --node-id ... --runtime-id ...`.
+It has no arbitrary path/key input, service or route. It reads the original
+root-private policy pin and fixed retired runtime record while holding a
+shared lock on the archive directory, rejects pending publication and unsafe
+inodes, verifies the running release and both original activation request
+signatures with the actual opened encrypted vault, matches the durable dual
+signed receipt and canonical original marker, then signs only the domain
+above. Exact input bytes are checked again before detached signature export.
+It never modifies the archive, starts Xray, or settles/refunds quota.
+Nexus must independently reconstruct and verify all evidence and key
+identity; this command does not authorize production use. The 6.0.39 source
+candidate is not the current production release pin.
 
 ## Sealed TLS material before any future public spawn
 
