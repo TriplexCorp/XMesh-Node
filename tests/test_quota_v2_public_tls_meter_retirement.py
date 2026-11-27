@@ -5,6 +5,8 @@ The installed native TLS and actual Xray fence must be qualified separately.
 No positive issuer, terminal byte claim or service is exercised here.
 """
 from contextlib import ExitStack
+import fcntl
+import json
 import hashlib
 import os
 from pathlib import Path
@@ -187,7 +189,6 @@ class RetirementTests(unittest.TestCase):
             proof.verify_exited()
 
     def test_foreign_writer_lock_after_original_exit_rejected_against_real_flock(self):
-        import fcntl
         proof = self.fenced()
         self.stop_child()
         with (self.directory / watch.INSTANCE_LOCK).open("rb") as lock:
@@ -202,6 +203,83 @@ class RetirementTests(unittest.TestCase):
             wal.write(b"x")
         with self.assertRaisesRegex(ValueError, "committed original WAL bytes changed"):
             proof.verify_exited()
+
+    @staticmethod
+    def replace_identical(path):
+        raw = path.read_bytes()
+        replacement = path.with_name(".replacement")
+        replacement.write_bytes(raw)
+        replacement.chmod(0o600)
+        replacement.replace(path)
+
+    def test_same_bytes_different_inode_before_fence_denies(self):
+        proof = self.capture()
+        self.replace_identical(next(self.directory.glob("meter-*.jsonl")))
+        with self.assertRaisesRegex(ValueError, "changed before fencing"):
+            proof.fence_all()
+        self.fence.assert_not_called()
+
+    def test_identical_wal_replacement_after_exit_denies(self):
+        proof = self.fenced()
+        self.stop_child()
+        self.replace_identical(next(self.directory.glob("meter-*.jsonl")))
+        with self.assertRaisesRegex(ValueError, "WAL inode changed"):
+            proof.verify_exited()
+
+    def test_identical_durable_fence_replacement_after_exit_denies(self):
+        proof = self.fenced()
+        self.stop_child()
+        self.replace_identical(next(self.directory.glob("fence-*.json")))
+        with self.assertRaisesRegex(ValueError, "changed across process exit"):
+            proof.verify_exited()
+
+    def test_original_lock_retained_across_verification_and_publication(self):
+        proof = self.fenced()
+        self.stop_child()
+        root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(
+            prefix="xmesh-retire-record-")))
+        with mock.patch.object(retirement, "RECORD_DIRECTORY", root):
+            payload = proof.publish_exited()
+            record = root / ("retired-" + self.runtime + ".json")
+            wire = record.read_bytes()
+            doc = json.loads(wire)
+            self.assertEqual(doc["observation"], payload)
+            self.assertEqual(hashlib.sha256(doc["nexusResponse"].encode()).hexdigest(),
+                             payload["signedWalReadbackSha256"])
+            self.assertEqual(doc["nexusResponse"].encode(), proof._witness_raw)
+            for flag in ("deliveredBytesVerified", "nodeSignatureVerified", "canStart",
+                         "canServePublic", "canResume", "settlementEligible", "finalMeterVerified"):
+                self.assertIs(payload[flag], False)
+            self.assertEqual(payload["refundableBytes"], 0)
+            self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(record.stat().st_nlink, 1)
+            inode = record.stat().st_ino
+            self.assertEqual(proof.publish_exited(), payload)
+            self.assertEqual(record.stat().st_ino, inode)
+            self.assertEqual(record.read_bytes(), wire)
+            with (self.directory / watch.INSTANCE_LOCK).open("rb") as foreign:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(foreign, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ValueError, "conflicting immutable"):
+                retirement._publish_record(root, self.runtime, b"other", lambda: None)
+        proof.close()
+        with (self.directory / watch.INSTANCE_LOCK).open("rb") as foreign:
+            fcntl.flock(foreign, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_pending_record_denies_recovery_without_original_observation(self):
+        root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(
+            prefix="xmesh-retire-abort-")))
+
+        def abort():
+            raise ValueError("ledger changed before publication")
+
+        with self.assertRaisesRegex(ValueError, "ledger changed"):
+            retirement._publish_record(root, self.runtime, b"nonfinal", abort)
+        names = list(root.iterdir())
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].name.startswith(".retirement-pending-"))
+        with self.assertRaisesRegex(ValueError, "interrupted retirement publication"):
+            retirement._publish_record(root, self.runtime, b"nonfinal", lambda: None)
 
     def test_missing_deny_or_unknown_journal_after_exit_is_not_proof(self):
         proof = self.fenced()

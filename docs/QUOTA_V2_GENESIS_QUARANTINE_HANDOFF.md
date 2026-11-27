@@ -602,6 +602,23 @@ permit, proof of delivery, complete pre-bootstrap history, terminal
 settlement or a refund. No installer, persistent service or public issuer
 uses it. Real installed two-Node retirement still requires hosted qualification.
 
+The subsequent inode-continuity check rejects even a byte-identical file
+replacement between signed readback, durable fencing and actual exit,
+including the original caps, inventory, streams, and every durable fence
+and checkpoint. The instance-lock descriptor is retained from before the
+authenticated live readback, then exclusively acquired after the original
+pidfd exits and held until the proof object closes. A bounded full-ledger
+scan includes exact private regular-file identities, mode, owner, timestamps,
+size and SHA-256. Optional `publish_exited()` retains a root-private,
+unsigned observation and the exact authentic original Nexus response
+bytes under an immutable no-replace, file/directory-fsynced record. Before
+the final link it repeats the original exit, same lock, all ledger and
+Docker proof while retaining that lock; an interrupted pending record
+denies publication/recovery. The record explicitly denies delivered-byte
+verification, Node signature, public/start/resume/settlement and refund
+authority. No dead-process-only reconstruction or permanent restart
+prevention is claimed.
+
 ## Sealed TLS material before any future public spawn
 
 The dormant certificate verifier now snapshots the root-owned Certbot

@@ -136,6 +136,20 @@ class PublicTlsWalWatchTests(unittest.TestCase):
             (self.directory / watch.wal.registry.NAME).read_bytes()).hexdigest())
         self.assertIsNone(self.check())
 
+    def test_same_bytes_different_inode_during_readback_denied(self):
+        def replace_cap(request):
+            snapshot = self.snapshot()
+            reply = self.reply(request, snapshot)
+            cap = self.directory / "positive-cap-u100.json"
+            replacement = self.directory / "untrusted-replacement"
+            replacement.write_bytes(cap.read_bytes())
+            replacement.chmod(0o600)
+            replacement.replace(cap)
+            return reply
+
+        with self.assertRaisesRegex(ValueError, "changed during readback"):
+            self.check(fetch=replace_cap)
+
     def test_real_signature_is_not_authority_or_a_substitute_for_fresh_scope(self):
         request = watch._request(self.roster, 100, self.measured)
         snapshot = self.snapshot()

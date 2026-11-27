@@ -36,6 +36,13 @@ MAX_METER_FDS = 4096
 MAX_FDINFO = 8192
 
 
+def _file_identity(info):
+    """Stable bytes/inode/change identity (intentionally excludes access time)."""
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+            info.st_gid, info.st_nlink, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns)
+
+
 def _instance_lock(directory_fd, pid, deadline):
     """Read the measured Xray's real lifetime flock; never take it ourselves."""
     fd = os.open(INSTANCE_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -117,6 +124,10 @@ def _snapshot(directory, roster, deadline):
         # Bind the bytes persisted inside Xray, not only Agent's root copies.
         # Bound work before opening any file, and reject unsafe inodes.
         total = 0
+        inodes = {INSTANCE_LOCK: _file_identity(
+            os.stat(INSTANCE_LOCK, dir_fd=fd, follow_symlinks=False))}
+        if inodes[INSTANCE_LOCK][:2] != instance[:2]:
+            raise ValueError("first-Genesis instance lock replaced before snapshot")
         for name in names - {INSTANCE_LOCK}:
             deadline()
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -127,6 +138,7 @@ def _snapshot(directory, roster, deadline):
                     or stat.S_IMODE(info.st_mode) != 0o600
                     or not 0 < info.st_size <= limit):
                 raise ValueError("unsafe first-Genesis ledger file")
+            inodes[name] = _file_identity(info)
             total += info.st_size
             if total > MAX_SCAN:
                 raise ValueError("first-Genesis WAL scan exceeds bounded budget")
@@ -188,12 +200,17 @@ def _snapshot(directory, roster, deadline):
         current = os.stat(directory, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (anchor.st_dev, anchor.st_ino):
             raise ValueError("first-Genesis journal directory was replaced")
+        if (set(os.listdir(fd)) != names
+                or any(_file_identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                       != identity for name, identity in inodes.items())):
+            raise ValueError("first-Genesis ledger inode changed during snapshot")
         if _instance_lock(fd, roster._pid, deadline) != instance:
             raise ValueError("Xray instance lock was replaced during snapshot")
         deadline()
         return {
             "identity": (anchor.st_dev, anchor.st_ino),
             "instanceLock": instance,
+            "inodes": inodes,
             "sequence": len(entries),
             "sha256": hashlib.sha256(index).hexdigest(),
             "tail": next(reversed(entries.values()))["digest"] if entries else "0"*64,
@@ -348,7 +365,7 @@ def _checked_evidence(roster, user, measured, directory, remeasure, deadline):
         raise ValueError("Nexus WAL witness expired or clock changed")
     # Private historical evidence for the disposable retirement verifier.
     # The bytes/digest do not establish terminality or grant any authority.
-    return before, hashlib.sha256(raw).hexdigest()
+    return before, raw
 
 
 def _check(roster, user, measured, directory, remeasure, deadline):
