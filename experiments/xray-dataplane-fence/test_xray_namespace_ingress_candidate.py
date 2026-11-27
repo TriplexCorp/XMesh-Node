@@ -52,7 +52,7 @@ import runtime_identity
 import vless_ingress
 
 PIVOT_EXEC = r"""
-import ctypes, os, sys
+import codecs, ctypes, os, sys
 from pathlib import Path
 module_dir, module_sha, root, executable, config = sys.argv[1:]
 sys.path.insert(0,module_dir)
@@ -74,6 +74,10 @@ network._Instruction(0,0,0,0)
 network._Program()
 network._Ruleset()
 network._native()
+# Python lazily resolves ASCII on the first text-mode status read.
+# Cache the codec before detaching the original filesystem; the sandbox
+# must contain no Python installation or other host files.
+codecs.lookup("ascii")
 last_cap = int(Path("/proc/sys/kernel/cap_last_cap").read_text())
 RDONLY,NOSUID,NODEV,NOEXEC,REMOUNT,REC,PRIVATE = 1,2,4,8,32,16384,1<<18
 def check(rc,msg):
