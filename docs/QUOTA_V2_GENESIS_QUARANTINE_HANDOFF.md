@@ -1150,3 +1150,31 @@ instead of synthesizing an ordinary qualification record for that candidate.
 Fixture same-candidate meter mode remains distinct and explicitly opted in.
 This is non-authorizing: it relies on the separately verified installer,
 does not re-sign/issue authority, and is not called by product services.
+
+### Fixed-scope revocation witness transport across the private network boundary
+
+A future supervisor must remain in its private loopback network, while
+the existing enrolled strict-PQ revocation RPC needs the original host
+network. The dormant hosted-only `public_tls_revocation_relay.py` creates
+a connected Unix seqpacket pair before the private supervisor is spawned.
+The original-network parent retains only its endpoint and fixes the node,
+user, activation, runtime, policy, authority and roster scope in the
+existing enrolled RPC closure. Requests are exactly 64-byte lowercase hex
+challenges; the parent forwards only the bounded exact response bytes.
+Neither endpoint accepts connections (Linux may kernel-autobind a
+connected endpoint to a short abstract address); no listening socket,
+arbitrary URL, caller-provided request JSON, route, signer, or key is
+exposed. Both directions verify actual per-message root PID/UID/GID,
+reject ancillary file descriptors, truncation, duplicate challenges and
+changed/expired pidfds or network identities. The supervisor uses one
+monotonic round-trip budget and verifies Nexus signatures, nonce, scope
+and expiry with the unchanged `SignedTlsRevocationWatch`; an unavailable
+or invalid relay is not permission. Both descriptors are close-on-exec:
+the native child must never inherit this endpoint or the broker pidfd.
+
+Real Linux netns and SCM-credential tests exercise fresh signed clear,
+signed revocation, malformed/oversize/FD-injected or descendant sender
+rejection, repetition, disconnect, deadline and the hosted guard.
+The enrolled transport is a fixture in those tests; they do not yet
+prove the real Nexus SQL stop witness across the private boundary or
+serve a public TLS listener. No installer or service uses this module.

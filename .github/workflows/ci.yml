@@ -93,6 +93,10 @@ jobs:
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_revocation_watch.py tests/test_quota_v2_public_tls_revocation_watch.py
           python3 tests/test_quota_v2_public_tls_revocation_watch.py -v
+      - name: Credentialed private-netns stop-witness relay accepts only exact enrolled challenges
+        run: |
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_revocation_relay.py tests/test_quota_v2_public_tls_revocation_relay.py
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 python3 -B tests/test_quota_v2_public_tls_revocation_relay.py -v
       - name: Independent Linux pidfd deadman kills silent and orphaned TLS child processes
         run: |
           python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_deadman.py tests/test_quota_v2_public_tls_deadman.py
