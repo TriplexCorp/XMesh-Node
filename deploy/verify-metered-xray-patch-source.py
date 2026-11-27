@@ -30,7 +30,9 @@ def require(condition, reason):
 
 
 def git(root, *args):
-    return subprocess.check_output(["git", "-C", str(root), *args], timeout=20)
+    # Under sudo, even a read-only git status must not refresh the user's
+    # index with root ownership or the installer's private umask.
+    return subprocess.check_output(["git", "--no-optional-locks", "-C", str(root), *args], timeout=20)
 
 
 def entries(raw):

@@ -44,12 +44,14 @@ jobs:
           patch=experiments/xray-dataplane-fence/apply-experiment.py
           cp "$patch" "$RUNNER_TEMP/original-meter-patcher"
           printf '\n# disposable tamper probe\n' >> "$patch"
+          index_before="$(stat -c '%u:%g:%a:%i' .git/index):$(sha256sum .git/index)"
           if sudo bash deploy/install-metered-xray.sh "$nexus"; then
             echo 'Modified ordinary-meter source unexpectedly installed.' >&2
             exit 1
           fi
           test ! -e "$target"
           sudo test ! -e /var/lib/xmesh-metered-xray
+          [[ "$(stat -c '%u:%g:%a:%i' .git/index):$(sha256sum .git/index)" == "$index_before" ]]
           mv "$RUNNER_TEMP/original-meter-patcher" "$patch"
           git diff --exit-code HEAD -- experiments/xray-dataplane-fence
           sudo bash deploy/install-metered-xray.sh "$nexus"
