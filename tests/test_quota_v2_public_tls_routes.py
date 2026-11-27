@@ -166,6 +166,10 @@ class FirstGenesisRouteStructureTests(RouteFixture):
                     self.assertEqual(value["runtimeId"], self.runtime)
                     self.assertEqual(value["meterDirectoryFd"], view)
                     self.assertEqual(value["peerInode"], str(bundle._peer.inode))
+                    self.assertEqual(value["sockets"], [
+                        {"tag": tag, "device": str(capsule._socket_ids[tag][0]),
+                         "inode": str(capsule._socket_ids[tag][1])}
+                        for tag in sorted(capsule._tags)])
                     self.assertNotIn(b"/proc/", data)
                     self.assertNotIn(b"pidfd", data)
                     self.assertEqual(os.fstat(view).st_ino, os.stat("..", dir_fd=view).st_ino)
@@ -456,6 +460,10 @@ assert os.fstat(view).st_dev == int(value["meterDirectoryDevice"])
 assert os.fstat(view).st_ino == int(value["meterDirectoryInode"])
 assert value["aliases"] == ["xmesh-u100--vless-cdn", "xmesh-u100--vless-main"]
 token = proof.PidfdIdentity(int(value["peerDevice"]), int(value["peerInode"]))
+original = next(item for item in value["sockets"] if item["tag"] == "vless-main")
+actual = os.stat("vless-main", dir_fd=view, follow_symlinks=False)
+assert ((actual.st_dev, actual.st_ino) ==
+        (int(original["device"]), int(original["inode"]))) == (verdict == "accept")
 for name in os.listdir("/proc/self/fd"):
     try:
         assert proof._filesystem_magic(int(name)) != proof.PID_FS_MAGIC

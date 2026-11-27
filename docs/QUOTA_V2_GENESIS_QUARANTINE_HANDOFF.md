@@ -851,7 +851,8 @@ live original route capsule, including its still-pinned meter pidfd,
 but prepares only two child inputs: a detached read-only/nosuid/nodev/
 noexec view of the original meter socket directory, and a sealed
 anonymous manifest of the exact authenticated alias roster, runtime,
-roster SHA, directory/mount identity and kernel pidfs device/inode.
+roster SHA, directory/mount identity, every original listener inode and
+kernel pidfs device/inode.
 The manifest has neither host PID nor host-proc path and the original
 pidfd and writable directory are not passed. Unsigned aliases, an extra
 socket/file, changed original evidence, writable view substitution or

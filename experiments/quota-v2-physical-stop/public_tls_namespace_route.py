@@ -83,6 +83,11 @@ class NamespaceMeterInputs:
             "meterMountId": str(self._mount),
             "peerDevice": str(self._peer.device),
             "peerInode": str(self._peer.inode),
+            "sockets": [
+                {"tag": tag, "device": str(original._socket_ids[tag][0]),
+                 "inode": str(original._socket_ids[tag][1])}
+                for tag in sorted(original._tags)
+            ],
         })
 
     def _check_inputs(self):
