@@ -41,16 +41,7 @@ def load_sealed_network(fd, digest):
     network = types.ModuleType("xmesh_sealed_network_fence")
     exec(compile(raw, "<sealed-network-fence>", "exec"), network.__dict__)
     return network
-"""
 
-PIVOT_EXEC = SOURCE_LOADER + r"""
-import codecs, ctypes, sys
-from pathlib import Path
-source, digest, root, executable, config, inventory = sys.argv[1:]
-source, executable, config = int(source), int(executable), int(config)
-expected = {int(fd) for fd in inventory.split(",")}
-assert os.getpid() == 1 and os.geteuid() == os.getegid() == 0
-assert {0, 1, 2, source, executable, config} <= expected
 def open_fds():
     found = set()
     for item in os.listdir("/proc/self/fd"):
@@ -61,10 +52,32 @@ def open_fds():
             continue  # directory listing's already-closed FD
         found.add(fd)
     return found
-assert open_fds() == expected
+def seal_inventory(expected):
+    actual = open_fds()
+    if not expected <= actual:
+        raise ValueError(f"missing declared bootstrap FDs: {sorted(expected-actual)}")
+    # Some namespace tooling/interpreters retain their own descriptors.
+    # Do not allow *any* unlisted FD to reach the fence or final executable.
+    for fd in actual - expected:
+        os.close(fd)
+    if open_fds() != expected:
+        raise ValueError("bootstrap FD inventory still differs after closing extras")
+
+"""
+
+PIVOT_EXEC = SOURCE_LOADER + r"""
+import codecs, ctypes, sys
+from pathlib import Path
+source, digest, root, executable, config, inventory = sys.argv[1:]
+source, executable, config = int(source), int(executable), int(config)
+expected = {int(fd) for fd in inventory.split(",")}
+assert os.getpid() == 1 and os.geteuid() == os.getegid() == 0
+assert {0, 1, 2, source, executable, config} <= expected
+seal_inventory(expected)
 network = load_sealed_network(source, digest)
 os.close(source)
-assert open_fds() == expected - {source}
+if open_fds() != expected - {source}:
+    raise ValueError("source FD or other descriptor retained before pivot")
 # Resolve layouts and module imports while original root is still available.
 lib = ctypes.CDLL(None,use_errno=True)
 lib.mount.argtypes = [ctypes.c_char_p,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_ulong,ctypes.c_char_p]

@@ -97,6 +97,37 @@ print(network.PROOF)
             with self.assertRaises(ValueError):
                 launcher.snapshot_fence(root/"fifo")
 
+    def test_exact_inventory_closes_unlisted_fd_and_rejects_missing(self):
+        kept = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+        extra = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            script = launcher.SOURCE_LOADER + """
+import sys
+kept, extra = map(int, sys.argv[1:])
+seal_inventory({0, 1, 2, kept})
+assert open_fds() == {0, 1, 2, kept}
+os.fstat(kept)
+try:
+    os.fstat(extra)
+except OSError:
+    pass
+else:
+    raise AssertionError("foreign descriptor survived")
+try:
+    seal_inventory({0, 1, 2, kept, extra})
+except ValueError as exc:
+    assert "missing declared bootstrap FDs" in str(exc)
+else:
+    raise AssertionError("missing declared descriptor accepted")
+"""
+            result = subprocess.run([sys.executable, "-I", "-B", "-c", script,
+                str(kept), str(extra)], pass_fds=(kept, extra), capture_output=True,
+                text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            os.close(kept)
+            os.close(extra)
+
     def test_spawn_refuses_non_hosted_environment_before_touching_inputs(self):
         from unittest.mock import patch
         with patch.dict(os.environ, {"GITHUB_ACTIONS":"false"}), self.assertRaisesRegex(ValueError, "disposable hosted"):
