@@ -103,7 +103,7 @@ def live(original_ns):
                 readback.verify_child_fd(child, original_fd, token)
                 owner.close()
                 readback.require_no_copy(os.getpid(), token)
-                guardian = deadman.StopOnlyDeadman(child=child, timeout_ms=12_000)
+                guardian = deadman.StopOnlyDeadman(child=child, timeout_ms=10_000)
                 readback.require_no_copy(guardian._guardian.pid, token)
                 readback.verify_listen_state(token, listening=False)
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
