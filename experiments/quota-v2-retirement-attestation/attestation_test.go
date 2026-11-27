@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -58,27 +59,27 @@ func newFixture(t *testing.T) fixture {
 		"canStart":                   false,
 	}
 	f.payload = map[string]any{
-		"schemaVersion":                           2,
-		"kind":                                    "xmesh.quota-v2.public-tls-wal-head",
-		"nodeId":                                  42,
-		"userId":                                  100,
-		"activationReceiptSha256":                 hash("a"),
-		"genesisPolicySha256":                     hash("3"),
-		"runtimeId":                               hash("b"),
-		"profileRevision":                         hash("4"),
-		"capRosterSha256":                         hash("5"),
-		"challenge":                               hash("6"),
-		"containerId":                             hash("c"),
-		"hostPid":                                 731,
-		"startedAt":                               "2026-11-27T04:00:00.123456789Z",
-		"issuedAtMs":                              11000,
-		"validUntilMs":                            18000,
-		"historyState":                            "committed_birth_index",
-		"inventorySequence":                       2,
-		"inventorySha256":                         hash("e"),
-		"inventoryTailDigest":                     hash("7"),
-		"committedChargeStreamCount":              2,
-		"committedChargeHeadsSha256":              hash("f"),
+		"schemaVersion":              2,
+		"kind":                       "xmesh.quota-v2.public-tls-wal-head",
+		"nodeId":                     42,
+		"userId":                     100,
+		"activationReceiptSha256":    hash("a"),
+		"genesisPolicySha256":        hash("3"),
+		"runtimeId":                  hash("b"),
+		"profileRevision":            hash("4"),
+		"capRosterSha256":            hash("5"),
+		"challenge":                  hash("6"),
+		"containerId":                hash("c"),
+		"hostPid":                    731,
+		"startedAt":                  "2026-11-27T04:00:00.123456789Z",
+		"issuedAtMs":                 11000,
+		"validUntilMs":               18000,
+		"historyState":               "committed_birth_index",
+		"inventorySequence":          2,
+		"inventorySha256":            hash("e"),
+		"inventoryTailDigest":        hash("7"),
+		"committedChargeStreamCount": 2,
+		"committedChargeHeadsSha256": hash("f"),
 		"preBootstrapHistoryCompletenessVerified": false,
 		"liveMeterVerified":                       false,
 		"finalMeterVerified":                      false,
@@ -257,5 +258,47 @@ func TestEmptyHistoricalWitnessStillNotAStatementOfCompleteness(t *testing.T) {
 	f.payload["preBootstrapHistoryCompletenessVerified"] = true
 	if _, err := Message(f.archive(t, nexusDomain), f.scope); err == nil {
 		t.Fatal("signed empty history turned into pre-bootstrap completeness")
+	}
+}
+
+// A Python canonical JSON + independent Ed25519 implementation generated
+// this fixed vector. Reject a Go-only serialization or signature dialect.
+func TestPythonArchiveInteroperability(t *testing.T) {
+	raw, err := os.ReadFile("testdata/python_ed25519_vector.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vector struct {
+		NodeID                  int64  `json:"nodeId"`
+		ActivationReceiptSHA256 string `json:"activationReceiptSha256"`
+		NodePublicKey           string `json:"nodePublicKey"`
+		NexusPublicKey          string `json:"nexusPublicKey"`
+		Archive                 string `json:"archive"`
+		MessageHex              string `json:"messageHex"`
+		Signature               string `json:"signature"`
+	}
+	if err := json.Unmarshal(raw, &vector); err != nil {
+		t.Fatal(err)
+	}
+	decode := func(s string) []byte {
+		t.Helper()
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	scope := Scope{
+		NodeID:                  vector.NodeID,
+		ActivationReceiptSHA256: vector.ActivationReceiptSHA256,
+		NodePublicKey:           decode(vector.NodePublicKey),
+		NexusPublicKey:          decode(vector.NexusPublicKey),
+	}
+	message, err := Message([]byte(vector.Archive), scope)
+	if err != nil || !bytes.Equal(message, decode(vector.MessageHex)) {
+		t.Fatalf("Python and Go canonical archive message differ: %v", err)
+	}
+	if err := Verify([]byte(vector.Archive), scope, decode(vector.Signature)); err != nil {
+		t.Fatalf("independent Python Ed25519 signature rejected: %v", err)
 	}
 }
