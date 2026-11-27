@@ -828,7 +828,12 @@ snapshots are checked in a bounded observation window.
 The disposable fixture actually pivots into the tmpfs, detaches old
 root, mounts its own procfs, execs a static sealed executable with all
 capabilities cleared, proves Agent state/host shadow are absent and
-root writes fail with EROFS. It rejects a different root, writable root,
+root writes fail with EROFS. The single-thread disposable supervisor
+creates the new PID namespace for its next child, spawns directly (no
+wrapper PID), then restores its original namespace for future children
+before starting the actual deadman. The Popen PID is itself the child
+namespace init, the guardian remains in the supervisor PID namespace,
+and an expired fixture deadline kills that exact init with SIGKILL. It rejects a different root, writable root,
 unexpected extra read-only mount, nonisolated child and ordinary
 non-mount-root directory. CI requires a fresh private mount namespace
 before creating any mount. No installed launcher, association to the

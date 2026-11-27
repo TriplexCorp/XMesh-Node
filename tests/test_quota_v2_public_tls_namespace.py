@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Real pivot-root fixture, capless isolated child, and kernel topology proof."""
 from contextlib import contextmanager
+import ctypes
 import fcntl
 import os
 from pathlib import Path
 import select
 import subprocess
 import sys
+import time
 import tempfile
 import unittest
 
@@ -14,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "experiments/quota-v2-physical-stop"
 sys.path.insert(0, str(MODULES))
 import public_tls_namespace as proof
+import public_tls_deadman as deadman
 
 
 FIXTURE = r"""
@@ -52,7 +55,7 @@ int main(int argc, char **argv) {
 
 # Only the test starts a disposable root. Not an installed launcher. The
 # first process in the new PID namespace pivots and then execs a sealed
-# static fixture. The outer unshare wrapper is NOT treated as owned Xray.
+# static fixture, directly owned by the disposable single-thread supervisor.
 PIVOT_TEST = r"""
 import ctypes, os, sys
 from pathlib import Path
@@ -66,6 +69,14 @@ lib = ctypes.CDLL(None, use_errno=True)
 lib.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
                       ctypes.c_ulong, ctypes.c_char_p]
 lib.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+
+# Resolve ctypes structure layouts before detaching the host root;
+# Python 3.14 lazily imports ctypes._layout on class creation.
+class Header(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+class Caps(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in ("effective","permitted","inheritable")]
+header, caps = Header(0x20080522, 0), (Caps * 2)()
 
 RDONLY, NOSUID, NODEV, NOEXEC, REMOUNT, REC, PRIVATE = 1, 2, 4, 8, 32, 16384, 1<<18
 def check(rc, msg):
@@ -101,11 +112,6 @@ except PermissionError:
 for cap in range(last_cap + 1):
     check(lib.prctl(24, cap, 0, 0, 0), "drop capability bounding set")
 
-class Header(ctypes.Structure):
-    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
-class Caps(ctypes.Structure):
-    _fields_ = [(name, ctypes.c_uint32) for name in ("effective","permitted","inheritable")]
-header, caps = Header(0x20080522, 0), (Caps * 2)()
 check(lib.capset(ctypes.byref(header), ctypes.byref(caps)), "clear all capabilities")
 check(lib.prctl(38, 1, 0, 0, 0), "no new privileges")
 os.set_inheritable(fd, False)
@@ -166,62 +172,95 @@ class ActualNamespaceTests(unittest.TestCase):
                 subprocess.run(["umount", directory], check=True, timeout=5)
 
     @contextmanager
-    def fixture(self, root, mode):
-        # The unshare parent is a fixture wrapper; verify the actual
-        # independently measured inner PID, not the wrapper's PID.
-        child = subprocess.Popen(
-            ["unshare", "--mount", "--pid", "--net", "--ipc", "--uts", "--fork",
-             "--kill-child=SIGKILL", "--mount-proc", sys.executable, "-I", "-B", "-c",
-             PIVOT_TEST, str(root), str(self.executable), mode],
-            pass_fds=(self.executable,), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True)
+    def fixture(self, root, mode, *, expect_killed=False):
+        # Only a strictly single-thread disposable supervisor may make
+        # this temporary change to the namespace of future children.
+        # No wrapper fork is allowed: the Popen PID itself is namespace
+        # init and directly owned by the existing pidfd deadman.
+        self.assertEqual(len(os.listdir("/proc/self/task")), 1)
+        original = os.readlink("/proc/self/ns/pid")
+        self.assertEqual(os.readlink("/proc/self/ns/pid_for_children"), original)
+        saved = os.open("/proc/self/ns/pid", os.O_RDONLY | os.O_CLOEXEC)
+        lib = ctypes.CDLL(None, use_errno=True)
+        newpid = 0x20000000
+
+        def check(result):
+            if result != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
+
+        child = None
         try:
+            check(lib.unshare(newpid))
+            try:
+                child = subprocess.Popen(
+                    ["unshare", "--mount", "--net", "--ipc", "--uts",
+                     "--mount-proc", sys.executable, "-I", "-B", "-c",
+                     PIVOT_TEST, str(root), str(self.executable), mode],
+                    pass_fds=(self.executable,), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True)
+                self.assertNotEqual(os.readlink("/proc/self/ns/pid_for_children"), original)
+            finally:
+                # Restore before starting any guardian or other process;
+                # this does not move the supervisor's active namespace.
+                check(lib.setns(saved, newpid))
+            self.assertEqual(os.readlink("/proc/self/ns/pid_for_children"), original)
+            self.assertEqual(os.readlink("/proc/self/ns/pid"), original)
             self.assertTrue(select.select([child.stdout], [], [], 8)[0], "fixture never ready")
             line = child.stdout.readline()
             if line != "root_ready\n":
                 child.wait(timeout=3)
                 self.fail(child.stderr.read() + line)
-            actual = []
-            # /proc/TID/children is optional in kernel configs. Discover
-            # the exact inner child through actual procfs PPid instead.
-            for entry in Path("/proc").iterdir():
-                if not entry.name.isdecimal():
-                    continue
-                try:
-                    raw = (entry / "stat").read_bytes()
-                    fields = raw[raw.rfind(b")") + 1:].split()
-                    if int(fields[1]) == child.pid:
-                        actual.append(int(entry.name))
-                except (FileNotFoundError, ProcessLookupError, PermissionError):
-                    continue
-            self.assertEqual(len(actual), 1)
-            pid = actual[0]
-            yield pid
-            child.stdin.write("X\n")
-            child.stdin.flush()
-            self.assertEqual(child.wait(timeout=5), 0)
+            self.assertEqual(deadman._starttime_and_parent(child.pid)[1], os.getpid())
+            self.assertNotEqual(os.readlink(f"/proc/{child.pid}/ns/pid"), original)
+            yield child
+            if expect_killed:
+                self.assertEqual(child.returncode, -9)
+            else:
+                child.stdin.write("X\n")
+                child.stdin.flush()
+                self.assertEqual(child.wait(timeout=5), 0)
         finally:
-            if child.poll() is None:
-                child.kill()
-            _, stderr = child.communicate(timeout=5)
-            if stderr:
-                print(stderr, file=sys.stderr)
+            os.close(saved)
+            if child is not None:
+                if child.poll() is None:
+                    child.kill()
+                _, stderr = child.communicate(timeout=5)
+                if stderr:
+                    print(stderr, file=sys.stderr)
 
     def test_real_readonly_pivot_and_private_procfs(self):
-        with self.root_mount() as (root, descriptor, token), self.fixture(root, "readonly") as pid:
-            self.assertIsNone(proof.verify(pid, descriptor, token))
-            self.assertIsNone(proof.verify(pid, descriptor, token))
+        with self.root_mount() as (root, descriptor, token), self.fixture(root, "readonly") as child:
+            self.assertIsNone(proof.verify(child.pid, descriptor, token))
+            self.assertIsNone(proof.verify(child.pid, descriptor, token))
             with self.root_mount() as (_, wrong, wrong_token):
                 with self.assertRaisesRegex(ValueError, "exact read-only private tmpfs"):
-                    proof.verify(pid, wrong, wrong_token)
+                    proof.verify(child.pid, wrong, wrong_token)
             self.assertFalse((root / "forbidden").exists())
 
     def test_real_writable_tmpfs_and_foreign_readonly_attachment_refused(self):
         for mode in ("writable", "extra"):
             with self.subTest(mode=mode), self.root_mount() as (root, descriptor, token):
-                with self.fixture(root, mode) as pid:
+                with self.fixture(root, mode) as child:
                     with self.assertRaisesRegex(ValueError, "root|mount"):
-                        proof.verify(pid, descriptor, token)
+                        proof.verify(child.pid, descriptor, token)
+
+    def test_direct_owned_namespace_init_is_killed_by_actual_deadman(self):
+        with self.root_mount() as (root, descriptor, token):
+            with self.fixture(root, "readonly", expect_killed=True) as child:
+                guard = deadman.StopOnlyDeadman(child=child, timeout_ms=2000)
+                try:
+                    self.assertEqual(os.readlink(f"/proc/{guard._guardian.pid}/ns/pid"),
+                                     os.readlink("/proc/self/ns/pid"))
+                    self.assertIsNone(proof.verify(child.pid, descriptor, token))
+                    guard.pulse(deadline_ns=time.monotonic_ns() + 900_000_000,
+                                wall_deadline_ms=time.time_ns() // 1_000_000 + 900)
+                    # No new heartbeat; actual guardian must kill exact
+                    # namespace PID1, not an unshare parent wrapper.
+                    self.assertEqual(child.wait(timeout=4), -9)
+                    self.assertEqual(guard._guardian.wait(timeout=3), 1)
+                finally:
+                    guard.close()
 
     def test_unisolated_process_and_non_tmpfs_root_refused(self):
         with self.root_mount() as (_, descriptor, token):
