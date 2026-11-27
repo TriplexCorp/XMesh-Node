@@ -15,6 +15,7 @@ import time
 import public_tls_cap_watch
 import public_tls_executable
 import public_tls_pinned_inputs
+import public_tls_namespace_inputs
 import public_tls_frontend
 import public_tls_revocation_watch
 import wal_transport
@@ -79,7 +80,8 @@ def check_before_spawn(*, profile, authority, node, activation, genesis_sha,
         raise ValueError("missing exact sealed qualified TLS executable")
     if pinned_executable.ensure_binding(runtime_pid=runtime_pid, runtime_id=runtime_id) is not None:
         raise ValueError("executable proof cannot authorize public ingress")
-    if not isinstance(pinned_inputs, public_tls_pinned_inputs.PinnedTlsInputs):
+    if not isinstance(pinned_inputs, (public_tls_pinned_inputs.PinnedTlsInputs,
+                public_tls_namespace_inputs.NamespaceTlsInputs)):
         raise ValueError("missing exact sealed TLS material and read-only original route inputs")
     if pinned_inputs.ensure_current(config=config, authority=authority,
                                     cap_watch=cap_watch, runtime_pid=runtime_pid) is not None:
