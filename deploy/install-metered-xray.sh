@@ -122,13 +122,19 @@ fi
 # GitHub Actions artifacts expire. Reconstruct the binary from the same
 # stable sources, then verify its bytes against the independently signed
 # subject before installing it. Do not run the candidate during the build.
-[[ "$(git -C "$ROOT" rev-parse HEAD:experiments/xray-dataplane-fence)" == "$patch_tree" ]]
-git -C "$ROOT" diff --quiet HEAD -- experiments/xray-dataplane-fence
+# The attested Node commit fixes the exact ordinary-meter inputs. Fetch
+# separately: the reviewed namespace-only extension must never influence
+# the ordinary-meter patcher or become its implicit authorization.
+git init -q "$WORK/patch-source"
+git -C "$WORK/patch-source" fetch --no-tags --depth=1 "https://github.com/$SIGNER.git" "$signer_revision"
+git -C "$WORK/patch-source" checkout -q --detach FETCH_HEAD
+python3 -I -B "$ROOT/deploy/verify-metered-xray-patch-source.py" \
+    "$ROOT" "$WORK/patch-source" "$signer_revision" "$patch_tree"
 git init -q "$WORK/source"
 git -C "$WORK/source" fetch --no-tags --depth=1 https://github.com/XTLS/Xray-core.git "$upstream_revision"
 git -C "$WORK/source" checkout -q --detach FETCH_HEAD
 [[ "$(git -C "$WORK/source" rev-parse HEAD)" == "$upstream_revision" ]]
-python3 "$ROOT/experiments/xray-dataplane-fence/apply-experiment.py" "$WORK/source"
+python3 -I -B "$WORK/patch-source/experiments/xray-dataplane-fence/apply-experiment.py" "$WORK/source"
 
 fetch https://go.dev/dl/go1.27.4.linux-amd64.tar.gz "$WORK/go.tar.gz" 83886080
 check_sha "$WORK/go.tar.gz" 7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840

@@ -1285,3 +1285,15 @@ fail, the exact detached read-only view to succeed, actual Unix stream
 peer authentication, rejection of a wrong pidfd, foreign source and dead
 meter, and an unchanged supervisor mount namespace. The local structural
 variant cannot replace the mandatory hosted real-peer test.
+
+### Meter source provenance with namespace experiments present
+
+The ordinary metered-Xray installer reconstructs only from the exact
+attested Node commit and tree named by the qualification, not from the
+newer Agent checkout. An identical tree remains supported. The sole
+reviewed expanded tree is the ordinary signed tree plus eight specific
+namespace-only files, with every original blob and file mode unchanged.
+All other differences fail closed. The reconstructed binary and manifest
+must still match both original hosted attestations and the exact digest
+before publication. This does not qualify the namespace artifact for
+production or authorize ingress or settlement.

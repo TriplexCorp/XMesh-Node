@@ -4,6 +4,8 @@ on:
     paths:
       - '.github/workflows/quota-v2-metered-bootstrap.yml'
       - 'deploy/install-metered-xray.sh'
+      - 'deploy/verify-metered-xray-patch-source.py'
+      - 'tests/test_metered_xray_patch_source.py'
       - 'deploy/install-metered-services.sh'
       - 'bootstrap.sh'
       - 'deploy/xmesh-pq-install-guard.sh'
@@ -32,25 +34,24 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           target=/usr/local/libexec/xmesh-metered-xray
-          nexus=c86236175ed507a0c4c78d8c7dfdc9f217202af3
+          # Current independent signed qualification, NOT an older checkout.
+          nexus=2acdbf62232747102aa1f5f7b55eb756c37d8306
           test ! -e "$target"
-          approved_tree=6320eade435fb941fe53048c7259bf75c2fe788e
-          if [[ "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" != "$approved_tree" ]]; then
-            # A new patch has no existing release approval. Prove the
-            # current installer refuses it before exercising the approved
-            # release's positive reconstruction in a separate checkout.
-            if sudo bash deploy/install-metered-xray.sh "$nexus"; then
-              echo 'Unqualified new patch unexpectedly installed.' >&2
-              exit 1
-            fi
-            test ! -e "$target"
-            sudo test ! -e /var/lib/xmesh-metered-xray
-            approved_node=15ecd5b63ea63125f2dd119c3e905ff57414fe8e
-            git fetch --no-tags --depth=1 origin "$approved_node"
-            git worktree add --detach "$RUNNER_TEMP/approved-metered-node" "$approved_node"
-            cd "$RUNNER_TEMP/approved-metered-node"
-            test "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" = "$approved_tree"
+          test "$(git rev-parse HEAD:experiments/xray-dataplane-fence)" = 2d4716bc6445d6143ea9b10d6c231f5246062f69
+          python3 -B tests/test_metered_xray_patch_source.py
+          # A changed original tracked file must fail before executable or
+          # qualification publication, even on the reviewed extension.
+          patch=experiments/xray-dataplane-fence/apply-experiment.py
+          cp "$patch" "$RUNNER_TEMP/original-meter-patcher"
+          printf '\n# disposable tamper probe\n' >> "$patch"
+          if sudo bash deploy/install-metered-xray.sh "$nexus"; then
+            echo 'Modified ordinary-meter source unexpectedly installed.' >&2
+            exit 1
           fi
+          test ! -e "$target"
+          sudo test ! -e /var/lib/xmesh-metered-xray
+          mv "$RUNNER_TEMP/original-meter-patcher" "$patch"
+          git diff --exit-code HEAD -- experiments/xray-dataplane-fence
           sudo bash deploy/install-metered-xray.sh "$nexus"
           [[ "$(stat -c '%u:%a:%h' "$target")" == '0:755:1' ]]
           if sudo bash install.sh; then
@@ -59,7 +60,7 @@ jobs:
           else
             [[ "$?" == 2 ]]
           fi
-          printf '%s  %s\n' a6c4e6bb68cf88e38f85873d3adf8b68b49c79c125a79e8361d67f3ecfa22007 "$target" | sha256sum --check
+          printf '%s  %s\n' 899fbc06bf64aedefd1a8296a38fdb65077d994c4ad3946bba11d54d5f298bcf "$target" | sha256sum --check
           qualification=/var/lib/xmesh-metered-xray/identity
           [[ "$(sudo stat -c '%u:%a:%h' "$qualification")" == 0:600:1 ]]
           [[ "$(sudo stat -c '%u:%a' "$(dirname "$qualification")")" == 0:700 ]]
@@ -67,7 +68,7 @@ jobs:
             echo 'Unprivileged runner can read the private qualification record.' >&2
             exit 1
           fi
-          sudo grep -Fxq "artifactSha256=a6c4e6bb68cf88e38f85873d3adf8b68b49c79c125a79e8361d67f3ecfa22007" "$qualification"
+          sudo grep -Fxq "artifactSha256=899fbc06bf64aedefd1a8296a38fdb65077d994c4ad3946bba11d54d5f298bcf" "$qualification"
           sudo mv "$target" "$target.saved"
           if sudo bash install.sh; then
             echo 'Legacy installation accepted after metered executable loss.' >&2
@@ -82,7 +83,7 @@ jobs:
           # builder, not just the hosted runner's current buildx.
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash "$GITHUB_WORKSPACE/tests/test_quota_v2_classic_image.sh" "$GITHUB_WORKSPACE"
           report="$(sudo python3 "$GITHUB_WORKSPACE"/experiments/quota-v2-physical-stop/qualified_runtime_image.py)"
-          IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="a6c4e6bb68cf88e38f85873d3adf8b68b49c79c125a79e8361d67f3ecfa22007"; assert r["productionActivationAuthorized"] is False'
+          IMAGE_REPORT="$report" python3 -c 'import json,os,re; r=json.loads(os.environ["IMAGE_REPORT"]); assert re.fullmatch(r"sha256:[0-9a-f]{64}",r["imageId"]); assert r["artifactSha256"]=="899fbc06bf64aedefd1a8296a38fdb65077d994c4ad3946bba11d54d5f298bcf"; assert r["productionActivationAuthorized"] is False'
           test -z "$(sudo docker ps -q --filter ancestor="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["imageId"])' "$report")")"
           sudo python3 - "$GITHUB_WORKSPACE" "$report" <<'PYTHON'
           import hashlib
