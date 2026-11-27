@@ -507,6 +507,62 @@ print("namespace_manifest_" + verdict)
                     with self.assertRaisesRegex(ValueError, "socket was replaced"):
                         bundle.ensure_current()
 
+    def test_actual_go_namespace_dialer_consumes_exact_manifest_and_peer(self):
+        binary = self.root.parent / "namespace-peer.test"
+        env = dict(os.environ, GOPROXY="off", CGO_ENABLED="0", GOTOOLCHAIN="local")
+        subprocess.run(["go", "test", "-c", "-o", str(binary),
+                        "./experiments/quota-v2-physical-stop/namespacepeer"],
+                       cwd=ROOT, env=env, check=True, timeout=90)
+        with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
+            with namespace_route.NamespaceMeterInputs(capsule) as bundle:
+                view, manifest = bundle.child_fds
+                raw = os.pread(manifest, namespace_route.MAX_MANIFEST_BYTES, 0)
+
+                def check(fd, verdict):
+                    output = subprocess.check_output([
+                        "unshare", "--pid", "--fork", "--kill-child=SIGKILL", "--mount-proc",
+                        "setpriv", "--no-new-privs", "--bounding-set=-all",
+                        "--inh-caps=-all", "--ambient-caps=-all", str(binary),
+                        "-test.run=^TestActualNamespaceMeterChild$", "-test.v",
+                    ], pass_fds=(view, fd), timeout=10,
+                       env={"PATH": os.environ["PATH"],
+                            "XMESH_DISPOSABLE_GO_NAMESPACE_PEER": "1",
+                            "XMESH_FIXTURE_MANIFEST_FD": str(fd),
+                            "XMESH_FIXTURE_RUNTIME": self.runtime,
+                            "XMESH_FIXTURE_ROSTER": self.roster.roster_sha256,
+                            "XMESH_FIXTURE_VERDICT": verdict})
+                    self.assertIn(b"--- PASS: TestActualNamespaceMeterChild", output)
+
+                def variant(data, verdict):
+                    fd = namespace_route.certificates._sealed_bytes("different-fixture-manifest", data)
+                    try:
+                        check(fd, verdict)
+                    finally:
+                        os.close(fd)
+
+                check(manifest, "accept")
+                # The actual original listener remains in place here.
+                # A different live same-UID pidfs token must still fail.
+                parent = os.pidfd_open(os.getpid())
+                try:
+                    foreign = namespace_route.peers.capture_original(parent, os.getpid())
+                    document = json.loads(raw)
+                    document.update(peerDevice=str(foreign.device), peerInode=str(foreign.inode))
+                    variant(routes.wal.observed.canonical(document), "peer-reject")
+                finally:
+                    os.close(parent)
+                variant(raw + b" ", "manifest-reject")
+                variant(raw[:-1] + b',"version":1}', "manifest-reject")
+                # Replacing the original listener inode must fail before
+                # an authenticated stream could ever be returned.
+                target = self.meter / "vless-main"
+                target.unlink()
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as other:
+                    other.bind(str(target))
+                    target.chmod(0o600)
+                    other.listen(1)
+                    check(manifest, "manifest-reject")
+
     def test_actual_kernel_peer_and_cleanup(self):
         with routes.FirstGenesisRoutes(self.roster, self.fd) as capsule:
             self.assertIsNone(capsule.ensure_current())

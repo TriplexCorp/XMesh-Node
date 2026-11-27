@@ -869,3 +869,28 @@ or publish a port. Only an independently qualified future dialer may
 consume these inputs, checking the authenticated alias/tag before any
 application bytes, and the actual kernel peer for every connection.
 No existing installed service or production flag changes.
+
+### Namespace-native Go dialer kernel proof (dormant)
+
+The standalone Go package under
+`experiments/quota-v2-physical-stop/namespacepeer` consumes the exact
+sealed manifest from the preceding input bundle. It requires separate
+expected runtime/roster hashes, canonical JSON (byte-identical Go
+re-encoding, rejecting duplicate/foreign fields), exact uint64
+identities, in-scope alias and inbound tag, actual readonly detached
+meter directory/mount and particular original Unix socket inode.
+An actual AF_UNIX connection must expose UID/GID 0 and invisible
+PID 0, plus a fresh CLOEXEC live `SO_PEERPIDFD` from pidfs matching
+the immutable original token; fdinfo, liveness and identity are
+rechecked before returning the stream. It closes the transient peer
+pidfd and rechecks the original manifest/socket after dialing. It
+never sends a byte, retries another endpoint or uses host procfs.
+
+The hosted capless private-PID fixture runs the compiled Go code
+against original live sockets, then exercises wrong alias/tag,
+foreign runtime/roster and same-UID different pidfs token, changed
+listener inode, whitespace and duplicate manifest fields. This
+separate package is NOT injected into Xray, not a launcher or public
+authority and not a candidate release. Existing Go production
+`DialIngressMeter` remains unchanged until the separately qualified
+replacement is integrated and attested.
