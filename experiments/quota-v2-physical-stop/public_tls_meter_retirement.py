@@ -10,12 +10,12 @@ settlement, or grants a successor. A caller must establish TLS shutdown,
 quiesce the disposable workers, and independently verify the enrolled
 first-Genesis roster and installed executable before using it.
 """
-from contextlib import contextmanager
 import fcntl
 import hashlib
 import os
 from pathlib import Path
 import select
+import secrets
 import stat
 import time
 import uuid
@@ -26,6 +26,8 @@ import public_tls_wal_watch as watch
 wal = watch.wal
 journal = wal.journal
 DIRECTORY = Path("/var/lib/xmesh-first-meter/runtime/ledger")
+RECORD_DIRECTORY = Path("/var/lib/xmesh-ci-first-meter-retirement")
+MAX_RECORD = 8192
 FENCE_NAMESPACE = uuid.UUID("74df852d-a5a6-47d8-bac9-55f84d9b102a")
 MAX_RETIRE_NS = 30_000_000_000
 
@@ -45,7 +47,9 @@ def _poll_exit(fd):
     events = poll.poll(0)
     if not events:
         return False
-    if len(events) != 1 or events[0][0] != fd or not events[0][1] & select.POLLIN:
+    if (len(events) != 1 or events[0][0] != fd
+            or not events[0][1] & select.POLLIN
+            or events[0][1] & (select.POLLERR | select.POLLNVAL)):
         raise ValueError("invalid original meter pidfd exit evidence")
     return True
 
@@ -102,58 +106,97 @@ def _check_docker(docker, measured, running):
         raise ValueError("original isolated Docker incarnation changed or restarted")
 
 
-def _file_hash(fd, name, limit):
+def _file_evidence(fd, name, deadline):
+    """Exact immutable file metadata plus hash, including the empty lock."""
+    before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1
+            or not 0 <= before.st_size <= watch.MAX_SCAN
+            or ((before.st_size == 0) != (name == watch.INSTANCE_LOCK))):
+        raise ValueError("invalid original WAL file during retirement")
+    expected = watch._file_identity(before)
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     with os.fdopen(os.open(name, flags, dir_fd=fd), "rb") as source:
-        info = os.fstat(source.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
-                or not 0 < info.st_size <= limit):
-            raise ValueError("invalid original WAL file during retirement")
+        if watch._file_identity(os.fstat(source.fileno())) != expected:
+            raise ValueError("original WAL file replaced at open")
         digest = hashlib.sha256()
-        remaining = info.st_size
+        remaining = before.st_size
         while remaining:
+            deadline()
             chunk = source.read(min(65536, remaining))
             if not chunk:
                 raise ValueError("original WAL truncated while reading")
             digest.update(chunk)
             remaining -= len(chunk)
-        if source.read(1):
-            raise ValueError("original WAL grew while reading")
-        current = os.fstat(source.fileno())
-        named = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        def identity(item):
-            return (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
-                    item.st_ctime_ns, item.st_mode, item.st_uid, item.st_nlink)
-        if identity(current) != identity(info) or identity(named) != identity(info):
+        if (source.read(1)
+                or watch._file_identity(os.fstat(source.fileno())) != expected
+                or watch._file_identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) != expected):
             raise ValueError("original WAL file changed while reading")
-        return digest.hexdigest()
+        deadline()
+        return (expected, digest.hexdigest())
 
 
-@contextmanager
-def _released_lifetime_lock(fd, expected):
-    lock = os.open(watch.INSTANCE_LOCK, os.O_RDONLY | os.O_NOFOLLOW
-                   | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
+def _manifest(fd, names, deadline):
+    if set(os.listdir(fd)) != names:
+        raise ValueError("missing, additional or uncertain first-meter retirement WAL files")
+    entries = {}
+    total = 0
+    for name in sorted(names):
+        deadline()
+        total += os.stat(name, dir_fd=fd, follow_symlinks=False).st_size
+        if total > watch.MAX_SCAN:
+            raise ValueError("retirement WAL scan exceeds bounded budget")
+        entries[name] = _file_evidence(fd, name, deadline)
+    _check_manifest(fd, entries)
+    os.fsync(fd)
+    deadline()
+    return entries
+
+
+def _check_manifest(fd, entries):
+    if (set(os.listdir(fd)) != set(entries)
+            or any(watch._file_identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                   != identity for name, (identity, _) in entries.items())):
+        raise ValueError("original meter journal inode changed during audit")
+
+
+def _publish_record(directory, runtime, raw, before_link):
+    """No-replace, fsynced, private historical record. Not a Node signature."""
+    if not wal._hex(runtime, 64) or not 0 < len(raw) <= MAX_RECORD:
+        raise ValueError("invalid retirement record identity or size")
+    fd = journal._validate_directory(directory)
     try:
-        def check():
-            inode = os.fstat(lock)
-            named = os.stat(watch.INSTANCE_LOCK, dir_fd=fd, follow_symlinks=False)
-            for info in (inode, named):
-                if ((info.st_dev, info.st_ino) != expected[:2]
-                        or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                        or info.st_nlink != 1 or info.st_size != 0
-                        or stat.S_IMODE(info.st_mode) != 0o600):
-                    raise ValueError("original lifetime lock inode changed")
-        check()
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if any(name.startswith(".retirement-pending-") for name in os.listdir(fd)):
+            raise ValueError("interrupted retirement publication requires investigation")
+        name = "retired-" + runtime + ".json"
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ValueError("original lifetime lock still held") from exc
-        check()
-        yield check
-        check()
+            existing = wal.observed.read_private_record(fd, name)
+        except FileNotFoundError:
+            pass
+        else:
+            if existing != raw:
+                raise ValueError("conflicting immutable retirement evidence")
+            before_link()
+            os.fsync(fd)
+            return
+        pending = ".retirement-pending-" + secrets.token_hex(16)
+        out = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                      os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+        with os.fdopen(out, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.fsync(fd)
+        before_link()
+        os.link(pending, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+        os.fsync(fd)
+        os.unlink(pending, dir_fd=fd)
+        os.fsync(fd)
+        if wal.observed.read_private_record(fd, name) != raw:
+            raise ValueError("retirement evidence changed after publication")
     finally:
-        os.close(lock)
+        os.close(fd)
 
 
 class FirstGenesisRetirement:
@@ -168,7 +211,7 @@ class FirstGenesisRetirement:
                 or type(measured[2]) is not int or measured[2] <= 1):
             raise ValueError("independently authenticated first-Genesis roster required")
         self._roster, self._measured, self._remeasure = roster, measured, remeasure
-        self._pidfd = self._directory_fd = None
+        self._pidfd = self._directory_fd = self._instance_fd = None
         self._started = time.monotonic_ns()
         self._checkpoints = {}
         self._prestop = None
@@ -176,6 +219,10 @@ class FirstGenesisRetirement:
             self._pidfd = os.pidfd_open(measured[2], 0)
             self._directory_fd = journal._validate_directory(DIRECTORY)
             self._identity = _directory_identity(self._directory_fd)
+            self._instance_fd = os.open(
+                watch.INSTANCE_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC |
+                os.O_NONBLOCK, dir_fd=self._directory_fd)
+            self._instance_identity = watch._file_identity(os.fstat(self._instance_fd))
             self._live()
             readback_start = time.monotonic_ns()
 
@@ -184,10 +231,13 @@ class FirstGenesisRetirement:
                 if not 0 <= time.monotonic_ns() - readback_start < watch.MAX_CHECK_NS:
                     raise ValueError("first-Genesis WAL readback exceeded time budget")
 
-            self._snapshot, self._witness_sha = watch._checked_evidence(
+            self._snapshot, self._witness_raw = watch._checked_evidence(
                 roster, user, measured, os.fspath(DIRECTORY), remeasure, readback_deadline)
-            if self._snapshot["identity"] != self._identity:
-                raise ValueError("WAL witness used another directory")
+            self._witness_sha = hashlib.sha256(self._witness_raw).hexdigest()
+            if (self._snapshot["identity"] != self._identity
+                    or self._snapshot["inodes"][watch.INSTANCE_LOCK] != self._instance_identity):
+                raise ValueError("WAL witness used another directory or lock inode")
+            self._check_lock()
             self._live()
         except BaseException:
             self.close()
@@ -208,10 +258,20 @@ class FirstGenesisRetirement:
                 or _directory_identity(self._directory_fd) != self._identity):
             raise ValueError("retirement WAL directory changed")
         current = os.stat(DIRECTORY, follow_symlinks=False)
-        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != self._identity:
+        if (not stat.S_ISDIR(current.st_mode) or current.st_uid != os.geteuid()
+                or stat.S_IMODE(current.st_mode) != 0o700
+                or (current.st_dev, current.st_ino) != self._identity):
             raise ValueError("retirement WAL pathname replaced")
+        self._check_lock()
         self._deadline()
         return docker
+
+    def _check_lock(self):
+        named = os.stat(watch.INSTANCE_LOCK, dir_fd=self._directory_fd,
+                        follow_symlinks=False)
+        if (watch._file_identity(named) != self._instance_identity
+                or watch._file_identity(os.fstat(self._instance_fd)) != self._instance_identity):
+            raise ValueError("original lifetime lock inode changed")
 
     def _live(self):
         if self._pidfd is None or _poll_exit(self._pidfd):
@@ -238,22 +298,24 @@ class FirstGenesisRetirement:
             expected.add(wal.registry.NAME)
             hashes[wal.registry.NAME] = self._snapshot["sha256"]
         expected.update(_fence_names(self._roster._grants))
-        if set(os.listdir(fd)) != expected:
-            raise ValueError("missing, additional or uncertain first-meter retirement WAL files")
+        hashes[watch.INSTANCE_LOCK] = hashlib.sha256(b"").hexdigest()
+        entries = _manifest(fd, expected, self._deadline)
         for name, digest in sorted(hashes.items()):
             self._deadline()
-            if _file_hash(fd, name, watch.MAX_SCAN) != digest:
+            if entries[name][1] != digest:
                 raise ValueError("committed original WAL bytes changed after signed readback")
+            if entries[name][0] != self._snapshot["inodes"][name]:
+                raise ValueError("committed original WAL inode changed after signed readback")
         if set(self._checkpoints) != set(self._roster._grants):
             raise ValueError("one or more signed users lack a durable deny")
         fences = {}
         for user, checkpoint in sorted(self._checkpoints.items()):
             self._deadline()
             fences[str(user)] = journal.verify_poststop_journal(checkpoint, DIRECTORY, docker)
-        if set(os.listdir(fd)) != expected:
-            raise ValueError("original meter journal changed during fence audit")
+        _check_manifest(fd, entries)
+        self._check_lock()
         self._deadline()
-        return fences
+        return fences, entries
 
     def fence_all(self):
         """Only in the disposable harness, drain every independently signed user."""
@@ -289,29 +351,62 @@ class FirstGenesisRetirement:
         if self._prestop is None or self._pidfd is None or not _poll_exit(self._pidfd):
             raise ValueError("original meter pidfd has not exited after durable full-roster denial")
         docker = self._bound(False)
-        with _released_lifetime_lock(self._directory_fd, self._snapshot["instanceLock"]):
-            if self._ledger(docker) != self._prestop:
-                raise ValueError("durable deny or original WAL changed across process exit")
-            self._bound(False)
-            if not _poll_exit(self._pidfd):
-                raise ValueError("original meter pidfd exit could not be confirmed")
-            return {
-                "kind": "xmesh.quota-v2.nonfinal-first-meter-retirement",
-                "runtimeId": self._measured[3], "containerId": self._measured[0],
-                "startedAt": self._measured[1],
-                "signedWalReadbackSha256": self._witness_sha,
-                "inventorySha256": self._snapshot["sha256"],
-                "committedChargeHeadsSha256": self._snapshot["chargeHeadsSha256"],
-                "durableUserDenials": dict(self._prestop),
-                "originalMeterPidfdExited": True,
-                "lifetimeLockReleased": True,
-                "finalMeterVerified": False,
-                "settlementEligible": False,
-                "canResume": False, "refundableBytes": 0,
-            }
+        # Acquire the SAME already-open inode retained before the first
+        # authenticated readback, and retain it until this object closes.
+        # No new pathname open and no gap during publication.
+        self._check_lock()
+        try:
+            fcntl.flock(self._instance_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError("original lifetime lock still held") from exc
+        self._check_lock()
+        if self._ledger(docker) != self._prestop:
+            raise ValueError("durable deny or original WAL changed across process exit")
+        self._bound(False)
+        if not _poll_exit(self._pidfd):
+            raise ValueError("original meter pidfd exit could not be confirmed")
+        return {
+            "kind": "xmesh.quota-v2.nonfinal-first-meter-retirement",
+            "runtimeId": self._measured[3], "containerId": self._measured[0],
+            "startedAt": self._measured[1],
+            "signedWalReadbackSha256": self._witness_sha,
+            "inventorySha256": self._snapshot["sha256"],
+            "committedChargeHeadsSha256": self._snapshot["chargeHeadsSha256"],
+            "durableUserDenials": dict(self._prestop[0]),
+            "originalMeterPidfdExited": True,
+            "lifetimeLockReleased": True,
+            "finalMeterVerified": False,
+            "settlementEligible": False,
+            "canResume": False, "refundableBytes": 0,
+        }
+
+    def publish_exited(self):
+        """Optional private audit persistence; no terminal receipt or authority."""
+        observation = self.verify_exited()
+        manifest = [{"filename": name, "sha256": digest}
+                    for name, (_, digest) in sorted(self._prestop[1].items())]
+        payload = dict(observation, schemaVersion=1, nodeId=self._roster.node,
+                       retiredLedgerSha256=hashlib.sha256(
+                           wal.observed.canonical(manifest)).hexdigest(),
+                       deliveredBytesVerified=False, nodeSignatureVerified=False,
+                       canServePublic=False, canStart=False)
+        data = wal.observed.canonical({
+            "observation": payload,
+            # Preserve the exact authenticated response bytes, NOT a
+            # re-encoded subset or a claim that the Node signed this record.
+            "nexusResponse": self._witness_raw.decode("utf-8"),
+        }) + b"\n"
+        RECORD_DIRECTORY.mkdir(mode=0o700, exist_ok=True)
+
+        def before_link():
+            if self.verify_exited() != observation:
+                raise ValueError("retirement observation changed before publication")
+
+        _publish_record(RECORD_DIRECTORY, self._measured[3], data, before_link)
+        return payload
 
     def close(self):
-        for name in ("_directory_fd", "_pidfd"):
+        for name in ("_instance_fd", "_directory_fd", "_pidfd"):
             fd = getattr(self, name)
             if fd is not None:
                 os.close(fd)
