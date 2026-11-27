@@ -160,6 +160,12 @@ jobs:
           host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
           trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" PATH="$PATH" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net -- python3 tests/test_quota_v2_public_tls_go_listener.py --live "$host_ns"
+      - name: Exact sealed MAIN CDN listener manifest and Go consumer refuse foreign configuration before listen
+        run: |
+          set -euo pipefail
+          python3 -m py_compile experiments/quota-v2-physical-stop/public_tls_listener_manifest.py tests/test_quota_v2_public_tls_listener_manifest.py
+          host_ns="$(readlink /proc/self/ns/net)"
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" PATH="$PATH" XMESH_TLS_LISTENER_MANIFEST_HOST_NS="$host_ns" unshare --net --mount --propagation private -- python3 tests/test_quota_v2_public_tls_listener_manifest.py -v
       - name: Actual pivot root and isolated PID1 prove private readonly TLS namespace topology
         run: |
           set -euo pipefail
