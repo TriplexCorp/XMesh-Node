@@ -115,8 +115,11 @@ def capture_bound(sock, address, port, intended_netns_cookie):
 
     The exact address/port must come from the separately verified signed
     configuration and the expected namespace from an independent kernel
-    reference. Keep the owner FD until child stop/reap; the future child
-    must inherit only the original selected FD, not this owner context.
+    reference. Keep the owner FD only until exact child inheritance is
+    measured; RELEASE the owner copy BEFORE any listen gate. Keeping a
+    copy while the child listens would defeat physical listener shutdown
+    on independent child death. Use nonduplicating kernel readback after
+    transfer; never retain or reopen a live listener in the supervisor.
     """
     endpoint = _endpoint(address, port)
     if not _positive_u64(intended_netns_cookie):

@@ -807,7 +807,8 @@ This is **not** Xray inherited-listener support, a launcher, seccomp
 policy, positive signed authority, public listener, or production
 qualification. The future executable must use exact signed listener
 FDs, prevent independently created public/outbound sockets, and stop
-and reap before releasing these identities. No installed worker,
+and reap before releasing other pinned identities. The bound socket
+owner copy is different: release it before listen, as qualified below. No installed worker,
 release version or metered Xray artifact changes here.
 
 ### Actual private root and PID namespace topology proof (dormant)
@@ -894,3 +895,29 @@ separate package is NOT injected into Xray, not a launcher or public
 authority and not a candidate release. Existing Go production
 `DialIngressMeter` remains unchanged until the separately qualified
 replacement is integrated and attested.
+
+### Exclusive listener ownership transfer and nonduplicating stop readback (dormant)
+
+A retained supervisor copy would let the kernel keep a TCP listener
+alive after SIGKILL of the serving child. The original pre-bound
+socket owner must therefore close its actual copy after verifying
+exact child inheritance **and before listen**; the guardian must
+never inherit it either. The dormant `public_tls_listener_readback`
+uses bounded live directly-owned child procfs FD inode/birth proof
+and the kernel INET_DIAG IPv4 TCP LISTEN dump for the original
+network namespace, exact endpoint, root UID, inode and socket cookie.
+It never duplicates or reopens a listener. Missing/overlapping
+listener, mismatched cookie/inode, invalid/partial/foreign netlink
+response, or retained owner/guardian FD fails closed.
+
+The hosted test is a new disposable loopback-only private network
+namespace: direct capless child namespace init receives the original
+unlistening 443 FD, parent proves its own retained copy is detected,
+closes it, verifies both supervisor and independent guardian FD
+inventories, and verifies connection refusal before fixture gate.
+After a real guardian ACK, the child listens and serves an echo; the
+parent independently reads exact INET_DIAG identity. When heartbeat
+expires, actual guardian SIGKILL of PID1 must produce no kernel
+listener and ECONNREFUSED while the supervisor itself remains alive.
+No host sysctl change, public bind, actual authority, Xray inherited
+listener integration, seccomp policy or installed service is supplied.
