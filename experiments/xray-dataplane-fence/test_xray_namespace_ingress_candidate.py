@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Real disposable namespace TLS frontend -> original signed metered Xray.
 
-No production installation, public interface, issued Nexus authority or
-release evidence. Both TLS ports are bound ONLY in a loopback-only
+No production installation, public interface, live Nexus issuer or
+production release evidence. An independently attested side-by-side
+candidate may be selected only on the disposable installed-candidate test path. Both TLS ports are bound ONLY in a loopback-only
 private test namespace, using ephemeral fixture signatures/certificates.
 """
 from contextlib import ExitStack
@@ -172,15 +173,28 @@ def tls_echo(port,domain,ca,user_uuid,echo_port,payload):
             assert recv_exact(client,len(payload)) == payload
 
 
-def run(binary, original_ns, stop_mode):
+def run(binary, original_ns, stop_mode, installed=False):
     assert stop_mode in {"expiry", "revoked"}
     require_disposable_namespace(original_ns)
     with ExitStack() as stack:
         root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="xmesh-namespace-xray-")))
-        executable = root/"xray"
-        shutil.copyfile(binary,executable)
-        executable.chmod(0o755)
-        assert hashlib.sha256(executable.read_bytes()).digest() == hashlib.sha256(binary.read_bytes()).digest()
+        if installed:
+            # The separately signed qualification job installed this exact
+            # file in the isolated candidate store. Never copy or rename it
+            # over the normal product metered Xray.
+            import namespace_candidate_artifact as artifact
+            import install_namespace_candidate as installation
+            revision = artifact.git(ROOT, "HEAD")
+            assert binary == installation.ROOT/revision/"xray"
+            installation.private_directory(installation.ROOT)
+            installation.private_directory(binary.parent)
+            artifact.check(ROOT, revision, binary.parent)
+            executable = binary
+        else:
+            executable = root/"xray"
+            shutil.copyfile(binary,executable)
+            executable.chmod(0o755)
+            assert hashlib.sha256(executable.read_bytes()).digest() == hashlib.sha256(binary.read_bytes()).digest()
         echo = subprocess.Popen([sys.executable,"-I","-B","-c",ECHO],stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,text=True)
         stack.callback(stop,echo)
@@ -454,5 +468,6 @@ def run(binary, original_ns, stop_mode):
 
 
 if __name__ == "__main__":
-    assert len(sys.argv)==4
-    run(Path(sys.argv[1]).resolve(),sys.argv[2],sys.argv[3])
+    assert len(sys.argv) in (4,5)
+    assert len(sys.argv)==4 or sys.argv[4]=="--installed-candidate"
+    run(Path(sys.argv[1]).resolve(),sys.argv[2],sys.argv[3],len(sys.argv)==5)

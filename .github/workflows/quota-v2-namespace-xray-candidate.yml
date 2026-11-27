@@ -3,38 +3,59 @@ on:
   pull_request:
     paths:
       - '.github/workflows/quota-v2-namespace-xray-candidate.yml'
-      - 'experiments/xray-dataplane-fence/apply-namespace-ingress-candidate.py'
-      - 'experiments/xray-dataplane-fence/namespace_ingress_candidate.go.txt'
-      - 'experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py'
-      - 'experiments/quota-v2-physical-stop/namespacepeer/**'
-      - 'experiments/quota-v2-physical-stop/public_tls_*'
+      - 'deploy/install-namespace-xray-candidate.sh'
+      - 'experiments/xray-dataplane-fence/**'
+      - 'experiments/quota-v2-physical-stop/**'
+      - 'tests/test_quota_v2_public_tls*'
+      - 'tests/test_quota_v2_xray_user_inbound_drain.py'
+      - 'tests/test_quota_v2_first_cap_handoff.py'
+      - 'tests/test_namespace_candidate_artifact.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/quota-v2-namespace-xray-candidate.yml'
+      - 'deploy/install-namespace-xray-candidate.sh'
+      - 'experiments/xray-dataplane-fence/**'
+      - 'experiments/quota-v2-physical-stop/**'
+      - 'tests/test_quota_v2_public_tls*'
+      - 'tests/test_quota_v2_xray_user_inbound_drain.py'
+      - 'tests/test_quota_v2_first_cap_handoff.py'
+      - 'tests/test_namespace_candidate_artifact.py'
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  UPSTREAM_REVISION: a4a3dff5b20c2faae567b742c172c7b95e75c083
 jobs:
   actual-isolated-xray:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version: '1.27.4'
           cache: false
+      - name: Test exact, non-authorizing namespace artifact manifest
+        run: sudo python3 tests/test_namespace_candidate_artifact.py -v
       - name: Build separate exact upstream patched Xray namespace candidate (never release)
+        env:
+          EXPECTED_NODE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_NODE_REVISION"
           python3 -m py_compile experiments/xray-dataplane-fence/apply-namespace-ingress-candidate.py experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py
           source="$RUNNER_TEMP/xray-namespace-source"
           git init "$source"
-          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git a4a3dff5b20c2faae567b742c172c7b95e75c083
+          git -C "$source" fetch --depth=1 https://github.com/XTLS/Xray-core.git "$UPSTREAM_REVISION"
           git -C "$source" checkout --detach FETCH_HEAD
-          test "$(git -C "$source" rev-parse HEAD)" = a4a3dff5b20c2faae567b742c172c7b95e75c083
+          test "$(git -C "$source" rev-parse HEAD)" = "$UPSTREAM_REVISION"
           python3 experiments/xray-dataplane-fence/apply-namespace-ingress-candidate.py "$source"
           binary="$RUNNER_TEMP/xray-namespace-candidate"
-          (cd "$source" && CGO_ENABLED=0 go build -trimpath -o "$binary" ./main)
+          (cd "$source" && env GOFLAGS= GOENV=off GOWORK=off GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 go build -trimpath -o "$binary" ./main)
           if readelf -l "$binary" | grep -q INTERP; then
             echo "candidate must execute statically from sealed FD in empty private root" >&2
             exit 1
@@ -50,3 +71,157 @@ jobs:
           for stop_mode in expiry revoked; do
             sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$host_ns" "$stop_mode"
           done
+      - name: Independently rebuild the exact tested namespace candidate
+        env:
+          EXPECTED_NODE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          second="$RUNNER_TEMP/xray-namespace-rebuild"
+          git -C "$RUNNER_TEMP/xray-namespace-source" worktree add --detach "$second" "$UPSTREAM_REVISION"
+          test "$(git -C "$second" rev-parse HEAD)" = "$UPSTREAM_REVISION"
+          python3 experiments/xray-dataplane-fence/apply-namespace-ingress-candidate.py "$second"
+          rebuilt="$RUNNER_TEMP/xray-namespace-rebuilt"
+          (cd "$second" && env GOFLAGS= GOENV=off GOWORK=off GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 GOCACHE="$RUNNER_TEMP/namespace-rebuild-cache" go build -trimpath -o "$rebuilt" ./main)
+          cmp "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$rebuilt"
+          python3 experiments/xray-dataplane-fence/namespace_candidate_artifact.py generate "$GITHUB_WORKSPACE" "$EXPECTED_NODE_REVISION" "$XMESH_NAMESPACE_CANDIDATE_BINARY" "$rebuilt" "$RUNNER_TEMP/namespace-candidate-artifact"
+      - name: Retain independently rebuilt namespace candidate only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: namespace-xray-linux-amd64-candidate-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/namespace-candidate-artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+  attest-main-namespace-candidate:
+    needs: actual-isolated-xray
+    if: github.repository == 'TriplexCorp/XMesh-Node' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: namespace-xray-linux-amd64-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/namespace-candidate-artifact
+      - name: Recheck exact source trees, manifest and binary before signing
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          python3 experiments/xray-dataplane-fence/namespace_candidate_artifact.py check "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$RUNNER_TEMP/namespace-candidate-artifact"
+      - name: Attest both non-authorizing namespace candidate subjects
+        id: provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
+        with:
+          subject-path: |
+            ${{ runner.temp }}/namespace-candidate-artifact/xray
+            ${{ runner.temp }}/namespace-candidate-artifact/candidate-manifest.json
+      - name: Verify main-only signer and exact source digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          for subject in xray candidate-manifest.json; do
+            gh attestation verify "$RUNNER_TEMP/namespace-candidate-artifact/$subject" --bundle "$PROVENANCE_BUNDLE" \
+              --repo TriplexCorp/XMesh-Node \
+              --signer-workflow TriplexCorp/XMesh-Node/.github/workflows/quota-v2-namespace-xray-candidate.yml \
+              --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+          done
+          install -m 0600 "$PROVENANCE_BUNDLE" "$RUNNER_TEMP/provenance.jsonl"
+      - name: Retain verified signed namespace provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: namespace-xray-linux-amd64-provenance-${{ github.sha }}
+          path: ${{ runner.temp }}/provenance.jsonl
+          if-no-files-found: error
+          retention-days: 30
+
+  install-attested-namespace-candidate:
+    needs: [actual-isolated-xray, attest-main-namespace-candidate]
+    if: github.repository == 'TriplexCorp/XMesh-Node' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: namespace-xray-linux-amd64-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/namespace-candidate-artifact
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: namespace-xray-linux-amd64-provenance-${{ github.sha }}
+          path: ${{ runner.temp }}/namespace-candidate-artifact
+      - name: Install through independent pinned verifier without touching ordinary metered Xray
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          target=/var/lib/xmesh-namespace-xray-candidate
+          input="$RUNNER_TEMP/namespace-candidate-artifact"
+          test ! -e "$target"
+          test ! -e /usr/local/libexec/xmesh-metered-xray
+          test ! -e /var/lib/xmesh-metered-xray
+          # Invalid bytes must fail before creating any installation root.
+          cp -a "$input" "$RUNNER_TEMP/foreign-candidate"
+          printf tampered >> "$RUNNER_TEMP/foreign-candidate/xray"
+          if sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/foreign-candidate"; then
+            echo 'Modified candidate unexpectedly installed' >&2
+            exit 1
+          fi
+          test ! -e "$target"
+          # A manifest that consistently identifies changed bytes still
+          # lacks the signed manifest/binary subjects. Reject it too.
+          python3 - "$RUNNER_TEMP/foreign-candidate" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          root=Path(sys.argv[1])
+          path=root/"candidate-manifest.json"
+          manifest=json.loads(path.read_bytes())
+          manifest["artifactSha256"]=hashlib.sha256((root/"xray").read_bytes()).hexdigest()
+          path.write_text(json.dumps(manifest,sort_keys=True,indent=2)+"\n")
+          PY
+          if sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/foreign-candidate"; then
+            echo 'Consistently modified but unsigned candidate unexpectedly installed' >&2
+            exit 1
+          fi
+          test ! -e "$target"
+          sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$input"
+          installed="$target/$GITHUB_SHA/xray"
+          test "$(sudo stat -c '%u:%g:%a:%h' "$installed")" = 0:0:755:1
+          inode="$(sudo stat -c '%d:%i' "$installed")"
+          sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$input"
+          test "$(sudo stat -c '%d:%i' "$installed")" = "$inode"
+          test ! -e /usr/local/libexec/xmesh-metered-xray
+          test ! -e /var/lib/xmesh-metered-xray
+      - name: Run both actual TLS and WAL stop scenarios from the installed signed candidate
+        run: |
+          set -euo pipefail
+          installed="/var/lib/xmesh-namespace-xray-candidate/$GITHUB_SHA/xray"
+          host_ns="$(readlink /proc/self/ns/net)"
+          host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+          trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
+          for stop_mode in expiry revoked; do
+            sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$installed" "$host_ns" "$stop_mode" --installed-candidate
+          done
+          # Repaired or replaced local executable must never be silently
+          # accepted; preserve the modified inode and reject reinstallation.
+          inode="$(sudo stat -c '%d:%i' "$installed")"
+          sudo sh -c 'printf invalid >> "$1"' sh "$installed"
+          before="$(sudo sha256sum "$installed")"
+          if sudo bash deploy/install-namespace-xray-candidate.sh "$GITHUB_SHA" "$RUNNER_TEMP/namespace-candidate-artifact"; then
+            echo 'Modified installed namespace candidate was replaced' >&2
+            exit 1
+          fi
+          test "$(sudo sha256sum "$installed")" = "$before"
+          test "$(sudo stat -c '%d:%i' "$installed")" = "$inode"
+          test ! -e /usr/local/libexec/xmesh-metered-xray
+          test ! -e /var/lib/xmesh-metered-xray

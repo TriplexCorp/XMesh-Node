@@ -1064,3 +1064,32 @@ also checks all four fsynced hash chains, exact birth registry, runtime,
 alias, direction and 16KiB tails. Off-host Nexus WAL verification, an
 installed launcher with positive SQL authority, signed production binary
 qualification and systemd containment are not claimed by these fixtures.
+
+
+### Separate signed namespace artifact and side-by-side candidate installation
+
+The namespace candidate workflow checks out the exact reviewed Node commit
+and exact upstream Xray revision, runs both real namespace TLS/WAL stop
+scenarios, and independently rebuilds in a second clean worktree/cache.
+Its canonical manifest binds the full Node source tree, base patch tree,
+namespace-peer tree, pinned Go version/build flags and exact ELF digest.
+The ordinary metered build is unchanged. Only the successful job on the
+trusted `main` ref may attest both the binary and the manifest, explicitly
+marked candidate-only and production-activation-unauthorized.
+
+The separate installer copies bounded regular artifact files into private
+root-owned storage before signature verification. It independently checks
+both subjects against the exact trusted workflow, main ref and source
+digest using the same pinned Sigstore verifier distribution as the current
+meter installer. Atomic no-replacement publication creates a versioned
+side-by-side directory under `/var/lib/xmesh-namespace-xray-candidate`;
+an identical reinstall preserves the original inode and any changed or
+partial installation fails closed. It never changes the installed metered
+Xray, Nexus release pin, bootstrap, services, flag or listener state.
+
+A main-only hosted job must prove that modified bytes and consistently
+rewritten but unsigned manifests cannot install, then run both real
+TLS/WAL scenarios from the *actual installed candidate path*, with the
+same fixture authority and metering harness. This proves the candidate's
+provenance-to-exec path, not production admission, live Nexus signing,
+or an installed service launcher.
