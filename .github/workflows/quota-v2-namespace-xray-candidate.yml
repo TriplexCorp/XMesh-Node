@@ -9,6 +9,7 @@ on:
       - 'tests/test_quota_v2_xray_user_inbound_drain.py'
       - 'tests/test_quota_v2_first_cap_handoff.py'
       - 'tests/test_namespace_candidate_artifact.py'
+      - 'tests/test_quota_v2_namespace_candidate_executable.py'
   push:
     branches: [main]
     paths:
@@ -19,6 +20,7 @@ on:
       - 'tests/test_quota_v2_xray_user_inbound_drain.py'
       - 'tests/test_quota_v2_first_cap_handoff.py'
       - 'tests/test_namespace_candidate_artifact.py'
+      - 'tests/test_quota_v2_namespace_candidate_executable.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -41,6 +43,7 @@ jobs:
         run: |
           sudo python3 -B tests/test_namespace_candidate_artifact.py -v
           sudo python3 -B tests/test_quota_v2_public_tls_namespace_launcher.py -v
+          sudo python3 -B tests/test_quota_v2_namespace_candidate_executable.py -v
       - name: Build separate exact upstream patched Xray namespace candidate (never release)
         env:
           EXPECTED_NODE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -213,13 +216,16 @@ jobs:
         run: |
           set -euo pipefail
           installed="/var/lib/xmesh-namespace-xray-candidate/$GITHUB_SHA/xray"
+          input="$RUNNER_TEMP/namespace-candidate-artifact"
+          manifest_pin="$(sha256sum "$input/candidate-manifest.json" | cut -d ' ' -f 1)"
+          provenance_pin="$(sha256sum "$input/provenance.jsonl" | cut -d ' ' -f 1)"
           host_ns="$(readlink /proc/self/ns/net)"
           host_floor="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
           trap 'test "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = "$host_floor"' EXIT
           for stop_mode in expiry revoked; do
-            sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 unshare --net --mount --propagation private -- python3 -B experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$installed" "$host_ns" "$stop_mode" --installed-candidate
+            sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1 XMESH_NAMESPACE_MANIFEST_PIN="$manifest_pin" XMESH_NAMESPACE_PROVENANCE_PIN="$provenance_pin" unshare --net --mount --propagation private -- python3 -B experiments/xray-dataplane-fence/test_xray_namespace_ingress_candidate.py "$installed" "$host_ns" "$stop_mode" --installed-candidate
           done
-          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_TLS_SYSTEMD_TEST=1 python3 -B experiments/xray-dataplane-fence/test_xray_namespace_systemd.py "$installed" "$host_ns" --installed-candidate
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" XMESH_DISPOSABLE_TLS_SYSTEMD_TEST=1 XMESH_NAMESPACE_MANIFEST_PIN="$manifest_pin" XMESH_NAMESPACE_PROVENANCE_PIN="$provenance_pin" python3 -B experiments/xray-dataplane-fence/test_xray_namespace_systemd.py "$installed" "$host_ns" --installed-candidate
           # Repaired or replaced local executable must never be silently
           # accepted; preserve the modified inode and reject reinstallation.
           inode="$(sudo stat -c '%d:%i' "$installed")"

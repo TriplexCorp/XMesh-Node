@@ -93,6 +93,10 @@ def contain(binary, host_ns, installed=False):
             print(run("journalctl","--no-pager","-u",unit,"-n","80",check=False).stdout,flush=True)
             run("systemctl","reset-failed",unit,check=False)
         stack.callback(cleanup)
+        candidate_pins = ()
+        if installed:
+            candidate_pins = tuple("--setenv="+name+"="+os.environ[name] for name in
+                                   ("XMESH_NAMESPACE_MANIFEST_PIN", "XMESH_NAMESPACE_PROVENANCE_PIN"))
         launch = run("systemd-run","--quiet","--unit",unit,
             "--property=Type=notify","--property=NotifyAccess=main",
             "--property=WatchdogSec=3s","--property=WatchdogSignal=SIGKILL",
@@ -104,6 +108,7 @@ def contain(binary, host_ns, installed=False):
             "--setenv=GITHUB_ACTIONS=true","--setenv=RUNNER_ENVIRONMENT=github-hosted",
             "--setenv=XMESH_DISPOSABLE_BOUND_LISTENER_TEST=1",
             "--setenv=XMESH_DISPOSABLE_TLS_SYSTEMD_TEST=1",
+            *candidate_pins,
             sys.executable,"-B",str(HERE/"test_xray_namespace_ingress_candidate.py"),
             str(binary),host_ns,"systemd","--systemd-fixture",str(root),
             *(("--installed-candidate",) if installed else ()), check=False,timeout=65)

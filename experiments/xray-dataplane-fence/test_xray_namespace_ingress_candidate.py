@@ -253,20 +253,30 @@ def run(binary, original_ns, stop_mode, installed=False, containment=None):
         root_fd = os.open(sandbox,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
         stack.callback(os.close,root_fd)
         root_token = namespace.capture_root(root_fd)
-        # Real PinnedTlsExecutable against a disposable qualification
-        # record scoped to this candidate, not the installed host path.
-        qualification = root/"fixture-qualification"
-        qualification.mkdir(mode=0o700)
-        record = qualification/"identity"
-        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
-        record.write_text("".join(
-            f"{k}={digest if k == 'artifactSha256' else 'a'*40}\n"
-            for k in qualified_executable.release.FIELDS), encoding="ascii")
-        record.chmod(0o600)
-        stack.enter_context(mock.patch.object(qualified_executable.release,"QUALIFICATION",qualification))
-        stack.enter_context(mock.patch.object(qualified_executable.release,"EXECUTABLE",executable))
-        exec_proof = stack.enter_context(qualified_executable.PinnedTlsExecutable(
-            runtime_pid=meter.pid,runtime_id=runtime))
+        if installed:
+            # Bind the actual independently installed candidate subjects,
+            # not a synthesized ordinary release qualification record.
+            from namespace_candidate_executable import PinnedNamespaceCandidateExecutable
+            exec_proof = stack.enter_context(PinnedNamespaceCandidateExecutable(
+                runtime_pid=meter.pid, runtime_id=runtime, source_root=ROOT,
+                revision=revision, manifest_sha256=os.environ["XMESH_NAMESPACE_MANIFEST_PIN"],
+                provenance_sha256=os.environ["XMESH_NAMESPACE_PROVENANCE_PIN"],
+                fixture_same_candidate=True))
+        else:
+            # Real PinnedTlsExecutable against a disposable qualification
+            # record scoped to this candidate, not the installed host path.
+            qualification = root/"fixture-qualification"
+            qualification.mkdir(mode=0o700)
+            record = qualification/"identity"
+            digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+            record.write_text("".join(
+                f"{k}={digest if k == 'artifactSha256' else 'a'*40}\n"
+                for k in qualified_executable.release.FIELDS), encoding="ascii")
+            record.chmod(0o600)
+            stack.enter_context(mock.patch.object(qualified_executable.release,"QUALIFICATION",qualification))
+            stack.enter_context(mock.patch.object(qualified_executable.release,"EXECUTABLE",executable))
+            exec_proof = stack.enter_context(qualified_executable.PinnedTlsExecutable(
+                runtime_pid=meter.pid,runtime_id=runtime))
         native_inputs = namespace_inputs.NamespaceTlsInputs(original=inputs,native=native_routes,
             manifest=manifest,root_fd=root_fd,root_token=root_token)
         state = {"revoked":False,"ttl":7000}
