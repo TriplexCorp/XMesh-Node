@@ -54,7 +54,15 @@ jobs:
           [[ "$(stat -c '%u:%g:%a:%i' .git/index):$(sha256sum .git/index)" == "$index_before" ]]
           mv "$RUNNER_TEMP/original-meter-patcher" "$patch"
           git diff --exit-code HEAD -- experiments/xray-dataplane-fence
-          sudo bash deploy/install-metered-xray.sh "$nexus"
+          # Runner-installed Go is not a dependency. Any invocation through
+          # the inherited PATH aborts; only the verified private archive may
+          # supply gofmt and go, including during source patching.
+          poison="$RUNNER_TEMP/ambient-go-forbidden"
+          mkdir -m 0755 "$poison"
+          printf '#!/bin/sh\necho ambient Go invocation forbidden >&2\nexit 97\n' > "$poison/go"
+          cp "$poison/go" "$poison/gofmt"
+          chmod 0755 "$poison/go" "$poison/gofmt"
+          sudo env PATH="$poison:/usr/bin:/bin" bash deploy/install-metered-xray.sh "$nexus"
           [[ "$(stat -c '%u:%a:%h' "$target")" == '0:755:1' ]]
           if sudo bash install.sh; then
             echo 'Legacy standalone installer accepted a metered artifact.' >&2

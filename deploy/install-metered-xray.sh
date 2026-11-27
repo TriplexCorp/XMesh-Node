@@ -134,14 +134,20 @@ git init -q "$WORK/source"
 git -C "$WORK/source" fetch --no-tags --depth=1 https://github.com/XTLS/Xray-core.git "$upstream_revision"
 git -C "$WORK/source" checkout -q --detach FETCH_HEAD
 [[ "$(git -C "$WORK/source" rev-parse HEAD)" == "$upstream_revision" ]]
-python3 -I -B "$WORK/patch-source/experiments/xray-dataplane-fence/apply-experiment.py" "$WORK/source"
-
+# The signed patcher itself invokes gofmt. A clean VPS may have no Go
+# installed, and a host-provided gofmt must not alter the signed build.
+# Authenticate the toolchain before running either patch or build.
 fetch https://go.dev/dl/go1.27.4.linux-amd64.tar.gz "$WORK/go.tar.gz" 83886080
 check_sha "$WORK/go.tar.gz" 7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840
 tar -xzf "$WORK/go.tar.gz" -C "$WORK"
+[[ -x "$WORK/go/bin/gofmt" && -x "$WORK/go/bin/go" ]]
+[[ "$(env -i PATH="$WORK/go/bin:/usr/bin:/bin" HOME="$WORK" GOENV=off GOTOOLCHAIN=local "$WORK/go/bin/go" version)" == 'go version go1.27.4 linux/amd64' ]]
+env -i PATH="$WORK/go/bin:/usr/bin:/bin" HOME="$WORK" GOENV=off GOWORK=off GOTOOLCHAIN=local \
+    python3 -I -B "$WORK/patch-source/experiments/xray-dataplane-fence/apply-experiment.py" "$WORK/source"
+
 (
     cd "$WORK/source"
-    env -i PATH=/usr/bin:/bin HOME="$WORK" GOENV=off GOWORK=off GOTOOLCHAIN=local \
+    env -i PATH="$WORK/go/bin:/usr/bin:/bin" HOME="$WORK" GOENV=off GOWORK=off GOTOOLCHAIN=local \
         GOPATH="$WORK/gopath" GOCACHE="$WORK/cache" GOFLAGS= \
         GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 \
         "$WORK/go/bin/go" build -trimpath -o "$WORK/xray" ./main

@@ -51,5 +51,19 @@ class PatchSourceTests(unittest.TestCase):
                 source.entries(value)
 
 
+    def test_authenticated_private_toolchain_precedes_patcher(self):
+        installer = (Path(__file__).resolve().parents[1] / "deploy/install-metered-xray.sh").read_text()
+        downloaded = installer.index('fetch https://go.dev/dl/go1.27.4.linux-amd64.tar.gz')
+        verified = installer.index('check_sha "$WORK/go.tar.gz"')
+        extracted = installer.index('tar -xzf "$WORK/go.tar.gz"')
+        patch = installer.index('python3 -I -B "$WORK/patch-source/experiments/xray-dataplane-fence/apply-experiment.py"')
+        build = installer.index('"$WORK/go/bin/go" build')
+        self.assertLess(downloaded, verified)
+        self.assertLess(verified, extracted)
+        self.assertLess(extracted, patch)
+        self.assertLess(patch, build)
+        self.assertIn('env -i PATH="$WORK/go/bin:/usr/bin:/bin"', installer[extracted:patch])
+
+
 if __name__ == "__main__":
     unittest.main()

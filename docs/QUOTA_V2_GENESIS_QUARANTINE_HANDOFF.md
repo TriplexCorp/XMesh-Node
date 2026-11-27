@@ -1297,3 +1297,9 @@ All other differences fail closed. The reconstructed binary and manifest
 must still match both original hosted attestations and the exact digest
 before publication. This does not qualify the namespace artifact for
 production or authorize ingress or settlement.
+
+The patcher itself invokes `gofmt`. Cold installation authenticates and
+extracts pinned Go 1.27.4 before patching, and both patch and build run with
+the private toolchain first in an isolated PATH. No preinstalled Go or
+ambient `gofmt` is required. Hosted installer testing poisons the ambient
+Go/Gofmt PATH; the real guest bootstrap tests a clean system without Go.
